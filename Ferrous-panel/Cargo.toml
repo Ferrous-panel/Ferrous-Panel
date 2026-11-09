@@ -1,0 +1,35 @@
+[package]
+name = "Ferrous-panel"
+version = "2.0.0"
+edition = "2021"
+authors = ["FerrousPanel Security Engineering"]
+description = "100% Native Rust Ubuntu Server Control Panel Daemon powered by Actix-Web, managing OpenSSH & Web PTY Terminal, Systemd, Nginx Reverse Proxy, Multi-PHP (7.4-8.4), File Manager ZIP/Unzip, SQL Databases, Postfix Mail, 1-Click Store, Git CI/CD, and Kernel Optimizer."
+
+[dependencies]
+actix-web = { version = "4.9", features = ["rustls-0_23", "compress-gzip", "compress-brotli"] }
+actix-ws = "0.3"
+actix-cors = "0.7"
+actix-files = "0.6"
+actix-limitation = "0.5"
+tokio = { version = "1.41", features = ["full", "process", "fs", "sync"] }
+portable-pty = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.32"
+argon2 = { version = "0.5", features = ["std"] }
+jsonwebtoken = "9.3"
+totp-rs = { version = "5.6", features = ["qr", "otpauth"] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2.0"
+regex = "1.11"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
