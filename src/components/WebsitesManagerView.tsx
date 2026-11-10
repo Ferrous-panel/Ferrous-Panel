@@ -206,7 +206,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [runtimeCategory, setRuntimeCategory] = useState<
-    'ALL' | 'MODERN_JS' | 'RUST' | 'PHP'
+    'ALL' | 'MODERN_JS' | 'RUST' | 'PHP' | 'POLYGLOT'
   >('ALL');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [modalTab, setModalTab] = useState<SiteModalTab>('domain_dir');
@@ -307,8 +307,6 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
     }
   }, [autoOpenSettingsCounter, selectedApp]);
 
-  if (!selectedApp) return null;
-
   const isModernJsFramework = (fw: string) =>
     fw.includes('Next.js') ||
     fw.includes('Nuxt') ||
@@ -317,6 +315,16 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
     fw.includes('Remix') ||
     fw.includes('NestJS') ||
     fw.includes('Vite');
+
+  const isPolyglotFramework = (fw: string) =>
+    fw.includes('Python') ||
+    fw.includes('Go') ||
+    fw.includes('Java') ||
+    fw.includes('C#') ||
+    fw.includes('.NET') ||
+    fw.includes('Ruby') ||
+    fw.includes('C++') ||
+    fw.includes('WebAssembly');
 
   const filteredApps = apps.filter((a) => {
     const matchesSearch =
@@ -329,6 +337,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
       return isModernJsFramework(a.framework);
     if (runtimeCategory === 'RUST') return a.framework.includes('Rust');
     if (runtimeCategory === 'PHP') return a.framework.includes('PHP');
+    if (runtimeCategory === 'POLYGLOT') return isPolyglotFramework(a.framework);
     return true;
   });
 
@@ -356,6 +365,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   };
 
   const handleSaveSiteSettings = async () => {
+    if (!selectedApp) return;
     setBusyAction('save');
     try {
       await onUpdateSiteSettings(selectedApp.id, {
@@ -399,6 +409,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   };
 
   const handleRenewSslClick = async () => {
+    if (!selectedApp) return;
     setBusyAction('renew-ssl');
     try {
       await onRenewSsl(selectedApp.id);
@@ -412,6 +423,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   };
 
   const handleDeleteCurrentSite = async () => {
+    if (!selectedApp) return;
     setBusyAction('delete-site');
     try {
       const deletedDomain = selectedApp.domain;
@@ -425,6 +437,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   };
 
   const handleValidateNginx = async () => {
+    if (!selectedApp) return;
     setBusyAction('validate');
     try {
       const res = await fetch('/api/nginx/validate', {
@@ -444,6 +457,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   };
 
   const handleGitPullDeploy = async () => {
+    if (!selectedApp) return;
     setBusyAction('git');
     try {
       await onTriggerGitDeploy(selectedApp.id);
@@ -463,13 +477,12 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="space-y-1">
             <h1 className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 font-display">
-              Quản lý Websites &amp; Modern JS / Rust Runtimes ({apps.length}{' '}
+              Quản lý Websites &amp; Đa Ngôn Ngữ Chạy Trên Nhân Rust ({apps.length}{' '}
               Sites)
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Vận hành đa nền tảng (Actix-Web, Next.js 15, Nuxt 3, SvelteKit 2,
-              Astro 5, PHP 8.3-FPM) bảo vệ bởi FerrousWAF, FerrousACME SSL và
-              FerrousKV Cache.
+              Vận hành đồng thời 10 hệ sinh thái (Rust Actix/Axum, Next.js 15, Nuxt 3, SvelteKit 2,
+              PHP 7.4–8.4, Python PyO3, Go CGO, Java JNI, .NET 8, Ruby/Elixir, C++, WASI) qua cầu nối <code className="font-mono">libferrous_bridge.so</code>
             </p>
           </div>
 
@@ -501,16 +514,20 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
             {[
               { id: 'ALL', label: `Tất cả (${apps.length})` },
               {
-                id: 'MODERN_JS',
-                label: `Modern JS SSR/SPA (${apps.filter((a) => isModernJsFramework(a.framework)).length})`
-              },
-              {
                 id: 'RUST',
                 label: `Rust Actix/Axum (${apps.filter((a) => a.framework.includes('Rust')).length})`
               },
               {
+                id: 'MODERN_JS',
+                label: `Modern JS/TS (${apps.filter((a) => isModernJsFramework(a.framework)).length})`
+              },
+              {
                 id: 'PHP',
                 label: `PHP-FPM (${apps.filter((a) => a.framework.includes('PHP')).length})`
+              },
+              {
+                id: 'POLYGLOT',
+                label: `Python/Go/Java/.NET/WASI (${apps.filter((a) => isPolyglotFramework(a.framework)).length})`
               }
             ].map((tab) => (
               <button
@@ -532,7 +549,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
           <div className="flex items-center gap-2 text-xs font-mono text-slate-500 dark:text-slate-400">
             <Sparkles className="w-3.5 h-3.5 text-orange-500" />
             <span>
-              FerrousWAF + FerrousACME + FerrousKV Cache đang hoạt động
+              FerrousWAF + FerrousACME + Polyglot FFI Bridge đang hoạt động
             </span>
           </div>
         </div>

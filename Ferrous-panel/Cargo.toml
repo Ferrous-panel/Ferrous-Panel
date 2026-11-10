@@ -1,9 +1,18 @@
 [package]
 name = "Ferrous-panel"
-version = "2.0.0"
+version = "2.5.0"
 edition = "2021"
 authors = ["FerrousPanel Security Engineering"]
-description = "100% Native Rust Ubuntu Server Control Panel Daemon powered by Actix-Web, managing OpenSSH & Web PTY Terminal, Systemd, Nginx Reverse Proxy, Multi-PHP (7.4-8.4), File Manager ZIP/Unzip, SQL Databases, Postfix Mail, 1-Click Store, Git CI/CD, and Kernel Optimizer."
+description = "100% Native Rust Ubuntu Server Control Panel Daemon powered by Actix-Web & Polyglot C-ABI FFI/IPC Bridge, managing OpenSSH & Web PTY Terminal, Systemd, Nginx Reverse Proxy, Multi-PHP (7.4-8.4), File Manager ZIP/Unzip, SQL Databases, Postfix Mail, 1-Click Store, Git CI/CD, and Kernel Optimizer."
+
+[[bin]]
+name = "ferrous-panel"
+path = "src/main.rs"
+
+[lib]
+name = "ferrous_bridge"
+path = "src/polyglot_compiler.rs"
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 actix-web = { version = "4.9", features = ["rustls-0_23", "compress-gzip", "compress-brotli"] }
@@ -32,4 +41,5 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
 

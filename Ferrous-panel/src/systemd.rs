@@ -74,6 +74,73 @@ php_admin_value[error_log] = /www/wwwlogs/{domain}.php-error.log
             );
         }
 
+        let fw_lower = spec.framework.to_lowercase();
+        let lang_runtime_envs = if fw_lower.contains("node")
+            || fw_lower.contains("next")
+            || fw_lower.contains("nuxt")
+            || fw_lower.contains("svelte")
+            || fw_lower.contains("astro")
+            || fw_lower.contains("remix")
+            || fw_lower.contains("nest")
+            || fw_lower.contains("bun")
+            || fw_lower.contains("typescript")
+        {
+            format!(
+                "Environment=\"NODE_ENV=production\"\nEnvironment=\"UV_THREADPOOL_SIZE={}\"\nEnvironment=\"FERROUS_NAPI_BRIDGE={}/native/index.node\"",
+                (spec.workers as usize).max(4),
+                spec.working_dir
+            )
+        } else if fw_lower.contains("python")
+            || fw_lower.contains("fastapi")
+            || fw_lower.contains("django")
+            || fw_lower.contains("flask")
+        {
+            format!(
+                "Environment=\"PYTHONUNBUFFERED=1\"\nEnvironment=\"PYTHONDONTWRITEBYTECODE=1\"\nEnvironment=\"VIRTUAL_ENV={}/.venv\"\nEnvironment=\"PATH={}/.venv/bin:/usr/local/bin:/usr/bin:/bin\"\nEnvironment=\"WEB_CONCURRENCY={}\"",
+                spec.working_dir,
+                spec.working_dir,
+                spec.workers
+            )
+        } else if fw_lower.contains("go") || fw_lower.contains("fiber") || fw_lower.contains("gin") {
+            format!(
+                "Environment=\"GOMAXPROCS={}\"\nEnvironment=\"GOGC=100\"\nEnvironment=\"CGO_ENABLED=1\"\nEnvironment=\"LD_LIBRARY_PATH={}/lib:/usr/local/lib\"",
+                spec.workers,
+                spec.working_dir
+            )
+        } else if fw_lower.contains("java")
+            || fw_lower.contains("kotlin")
+            || fw_lower.contains("spring")
+            || fw_lower.contains("jvm")
+        {
+            format!(
+                "Environment=\"JAVA_TOOL_OPTIONS=-XX:+UseZGC -Xmx{}m -Djava.library.path={}/lib\"",
+                (spec.memory_limit_mb * 80) / 100,
+                spec.working_dir
+            )
+        } else if fw_lower.contains(".net") || fw_lower.contains("c#") || fw_lower.contains("aspnet") {
+            format!(
+                "Environment=\"ASPNETCORE_ENVIRONMENT=Production\"\nEnvironment=\"ASPNETCORE_URLS=http://127.0.0.1:{}\"\nEnvironment=\"DOTNET_CLI_TELEMETRY_OPTOUT=1\"\nEnvironment=\"LD_LIBRARY_PATH={}/lib:/usr/local/lib\"",
+                spec.internal_port,
+                spec.working_dir
+            )
+        } else if fw_lower.contains("ruby") || fw_lower.contains("rails") || fw_lower.contains("elixir") || fw_lower.contains("phoenix") {
+            format!(
+                "Environment=\"RAILS_ENV=production\"\nEnvironment=\"MIX_ENV=prod\"\nEnvironment=\"RUBY_YJIT_ENABLE=1\"\nEnvironment=\"WEB_CONCURRENCY={}\"",
+                spec.workers
+            )
+        } else if fw_lower.contains("wasm") || fw_lower.contains("wasi") {
+            format!(
+                "Environment=\"WASMTIME_BACKTRACE_DETAILS=1\"\nEnvironment=\"WASI_ROOT={}\"",
+                spec.working_dir
+            )
+        } else {
+            format!(
+                "Environment=\"ACTIX_WORKERS={}\"\nEnvironment=\"RUST_BACKTRACE=1\"\nEnvironment=\"LD_LIBRARY_PATH={}/lib:/usr/local/lib\"",
+                spec.workers,
+                spec.working_dir
+            )
+        };
+
         let env_lines: String = spec
             .env_vars
             .iter()
@@ -83,7 +150,7 @@ php_admin_value[error_log] = /www/wwwlogs/{domain}.php-error.log
 
         format!(
             r#"[Unit]
-Description=Ferrous-panel Managed Service: {name} ({framework})
+Description=Ferrous-panel Managed Polyglot Service: {name} ({framework})
 After=network-online.target nginx.service
 Wants=network-online.target
 
@@ -106,16 +173,17 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths={working_dir} /www/wwwlogs
+ReadWritePaths={working_dir} /www/wwwlogs /run/ferrous-polyglot.sock
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Runtime Environment
+# Polyglot Runtime Environment & Rust FFI Bridge Socket
 Environment="PORT={port}"
-Environment="ACTIX_WORKERS={workers}"
+Environment="FERROUS_POLYGLOT_IPC=/run/ferrous-polyglot.sock"
+{lang_runtime_envs}
 {env_lines}
 
 [Install]
@@ -128,7 +196,7 @@ WantedBy=multi-user.target
             memory_limit = spec.memory_limit_mb,
             cpu_quota = spec.cpu_quota_percent,
             port = spec.internal_port,
-            workers = spec.workers,
+            lang_runtime_envs = lang_runtime_envs,
             env_lines = env_lines
         )
     }

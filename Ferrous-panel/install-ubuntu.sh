@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Ferrous-panel — Ubuntu 22.04 / 24.04 LTS Production VPS Installer
-# Supports Custom Admin Account, Custom SQL Root Password & `fp` Terminal CLI:
-#   sudo bash install-ubuntu.sh --admin-user admin --admin-pass MyPass#2026 --sql-pass SqlPass#2026 --port 3000
+# Ferrous-panel — Ubuntu 22.04 / 24.04 LTS Production VPS Installer (100% Native Rust Core)
+# Compiles the Actix-Web Rust Server Binary (`target/release/Ferrous-panel`),
+# provisions Web Admin Login Account, MariaDB/PostgreSQL + phpMyAdmin 5.2 (Port 888),
+# and installs the `fp` VPS Terminal CLI Toolbox.
 # ==============================================================================
 set -euo pipefail
 
@@ -11,7 +12,8 @@ APP_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 INSTALL_DIR="/opt/Ferrous-panel"
 
 PANEL_PORT="${PANEL_PORT:-3000}"
-DAEMON_BIND="${PANEL_BIND_ADDR:-127.0.0.1:9443}"
+PMA_PORT="${PMA_PORT:-888}"
+PMA_PATH="${PMA_PATH:-/phpmyadmin_ferrous_89a2}"
 ADMIN_USER="${ADMIN_USER:-}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
@@ -32,7 +34,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 echo "=============================================================================="
-echo "  Ferrous-panel v2.5 — Ubuntu VPS Installer & Admin Account Creation"
+echo "  Ferrous-panel v2.5 (Native Rust Actix-Web Core) — Ubuntu VPS Installer"
 echo "=============================================================================="
 
 # Interactive prompt for Web Panel Admin Account login credentials
@@ -75,25 +77,47 @@ sudo mkdir -p /etc/ferrous-panel
 sudo chown -R www-data:www-data /www/wwwroot /www/wwwlogs /var/www/letsencrypt || true
 
 echo "[2/9] Updating Ubuntu APT & installing core server packages..."
-sudo apt-get update -y
-sudo apt-get install -y software-properties-common ca-certificates gnupg lsb-release \
+sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common ca-certificates gnupg lsb-release \
   build-essential pkg-config libssl-dev nginx ufw fail2ban certbot python3-certbot-nginx \
   curl wget git zip unzip zstd jq openssl mariadb-server postgresql postgresql-contrib
 
-echo "[3/9] Configuring Multi-PHP FPM repository (ppa:ondrej/php) & PHP 8.3-FPM..."
+echo "[3/9] Configuring Multi-PHP FPM repository (ppa:ondrej/php), PHP 8.3-FPM & phpMyAdmin 5.2..."
 if ! grep -rq "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
   sudo add-apt-repository -y ppa:ondrej/php || true
   sudo apt-get update -y
 fi
-sudo apt-get install -y php8.3-fpm php8.3-cli php8.3-common php8.3-mysql php8.3-pgsql \
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y php8.3-fpm php8.3-cli php8.3-common php8.3-mysql php8.3-pgsql \
   php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip php8.3-bcmath php8.3-intl \
-  php8.3-opcache php8.3-redis php8.3-imagick || true
+  php8.3-opcache php8.3-redis php8.3-imagick phpmyadmin || true
 sudo systemctl enable --now php8.3-fpm || true
 
-echo "[4/9] Initializing MariaDB & PostgreSQL with Custom SQL Root Password..."
+echo "[4/9] Initializing MariaDB & PostgreSQL with Custom SQL Root Password & phpMyAdmin Nginx Vhost..."
 sudo systemctl enable --now mariadb postgresql || true
 sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${SQL_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>/dev/null || true
 sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${SQL_ROOT_PASS}';" 2>/dev/null || true
+
+# Configure Nginx VirtualHost for phpMyAdmin 5.2 on Port 888
+sudo mkdir -p /etc/nginx/conf.d
+sudo tee /etc/nginx/conf.d/ferrous-phpmyadmin.conf > /dev/null <<EOF
+# Ferrous-panel — phpMyAdmin 5.2 Guard on Port ${PMA_PORT}
+server {
+    listen ${PMA_PORT};
+    server_name _;
+    client_max_body_size 256M;
+
+    location ${PMA_PATH} {
+        alias /usr/share/phpmyadmin/;
+        index index.php;
+
+        location ~ \.php$ {
+            fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME \$request_filename;
+            include fastcgi_params;
+        }
+    }
+}
+EOF
 
 echo "[5/9] Provisioning Panel Admin Account (/etc/ferrous-panel/admin.json & default.pl)..."
 sudo tee /etc/ferrous-panel/admin.json > /dev/null <<EOF
@@ -109,7 +133,9 @@ sudo tee /etc/ferrous-panel/admin.json > /dev/null <<EOF
   "postgresRootPassword": "${SQL_ROOT_PASS}",
   "twoFactorEnabled": false,
   "allowedAdminIps": "0.0.0.0/0",
-  "installedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  "configFile": "/etc/ferrous-panel/admin.json",
+  "installedAt": "$(date -u +"%Y-%m-%d %H:%M:%S")",
+  "lastModifiedAt": "$(date -u +"%Y-%m-%d %H:%M:%S")"
 }
 EOF
 sudo chmod 600 /etc/ferrous-panel/admin.json
@@ -117,9 +143,8 @@ echo "${SECURITY_ENTRANCE}" | sudo tee /www/server/panel/default.pl > /dev/null
 
 if [ -n "${CUSTOM_DOMAIN:-}" ]; then
   echo "Setting up Nginx Reverse Proxy for Custom Domain ${CUSTOM_DOMAIN}..."
-  sudo mkdir -p /etc/nginx/conf.d
   sudo tee "/etc/nginx/conf.d/ferrous-panel-domain.conf" > /dev/null <<EOF
-# Ferrous-panel Custom Domain Reverse Proxy
+# Ferrous-panel Custom Domain Reverse Proxy -> Rust Actix-Web Daemon
 server {
     listen 80;
     server_name ${CUSTOM_DOMAIN};
@@ -147,11 +172,11 @@ if [ ! -f /etc/nginx/ssl/ferrous-fallback.crt ]; then
 fi
 
 sudo tee /etc/nginx/conf.d/ferrous-panel-vhosts.conf > /dev/null <<'EOF'
-# Include all Website VirtualHosts managed by Ferrous-panel
+# Include all Website VirtualHosts managed by Ferrous-panel Rust Engine
 include /www/server/panel/vhost/nginx/*.conf;
 EOF
 
-echo "[7/9] Installing Node.js 22 LTS, Rust toolchain & syncing source to ${INSTALL_DIR}..."
+echo "[7/9] Building Static Web Assets & Compiling Native Rust Actix-Web Core Binary..."
 if ! command -v node &> /dev/null; then
   curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
   sudo apt-get install -y nodejs
@@ -172,38 +197,42 @@ if [ -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" ]; then
   sudo chmod +x /usr/local/bin/fp /usr/local/bin/ferrous
 fi
 
+# 1. Build static frontend bundle (`dist/`)
 cd "${INSTALL_DIR}"
 npm install
 npm run build
 
-if [ -d "${INSTALL_DIR}/Ferrous-panel" ]; then
-  cd "${INSTALL_DIR}/Ferrous-panel"
-  cargo build --release || echo "Notice: Rust release binary build skipped or completed."
-fi
+# 2. Compile Native Rust Actix-Web Server Binary (`target/release/Ferrous-panel`)
+cd "${INSTALL_DIR}/Ferrous-panel"
+cargo build --release
+sudo cp "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" /usr/local/bin/ferrous-panel-daemon
+sudo chmod +x /usr/local/bin/ferrous-panel-daemon
 
-echo "[8/9] Configuring UFW Firewall (SSH, HTTP/80, HTTPS/443, Panel/${PANEL_PORT})..."
+echo "[8/9] Configuring UFW Firewall (SSH, HTTP/80, HTTPS/443, phpMyAdmin/${PMA_PORT}, Panel/${PANEL_PORT})..."
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp comment 'SSH Access'
 sudo ufw allow 80/tcp comment 'Nginx HTTP'
 sudo ufw allow 443/tcp comment 'Nginx HTTPS TLS 1.3'
 sudo ufw allow 443/udp comment 'Nginx HTTP/3 QUIC'
-sudo ufw allow "${PANEL_PORT}/tcp" comment 'Ferrous-panel Web UI'
+sudo ufw allow "${PMA_PORT}/tcp" comment 'phpMyAdmin 5.2 Guard'
+sudo ufw allow "${PANEL_PORT}/tcp" comment 'Ferrous-panel Rust Actix-Web Server'
 sudo ufw --force enable
 
-echo "[9/9] Installing Systemd service (ferrous-panel-web.service)..."
+echo "[9/9] Installing Systemd service (ferrous-panel-web.service -> Native Rust Binary)..."
 sudo tee /etc/systemd/system/ferrous-panel-web.service > /dev/null <<EOF
 [Unit]
-Description=Ferrous-panel Web Control Panel UI & Architectural Brain
+Description=Ferrous-panel Native Rust Actix-Web Server Daemon
 After=network-online.target nginx.service mariadb.service postgresql.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
-Environment="NODE_ENV=production"
+Environment="RUST_LOG=info,actix_web=info"
 Environment="PORT=${PANEL_PORT}"
-ExecStart=/usr/bin/npx tsx ${INSTALL_DIR}/server.ts
+Environment="PANEL_BIND_ADDR=0.0.0.0:${PANEL_PORT}"
+ExecStart=/usr/local/bin/ferrous-panel-daemon
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -218,21 +247,20 @@ sudo nginx -t && sudo systemctl reload nginx
 
 PUBLIC_IP="$(hostname -I | awk '{print $1}')"
 echo "=============================================================================="
-echo "✅ FERROUS-PANEL ĐÃ CÀI ĐẶT THÀNH CÔNG TRÊN UBUNTU VPS!"
+echo "✅ FERROUS-PANEL (100% NATIVE RUST CORE) ĐÃ CÀI ĐẶT THÀNH CÔNG TRÊN UBUNTU!"
 echo "------------------------------------------------------------------------------"
+echo "🦀 Tiến trình Core Server       : /usr/local/bin/ferrous-panel-daemon (Rust Actix-Web)"
 if [ -n "${CUSTOM_DOMAIN:-}" ]; then
   echo "🌐 URL Đăng nhập Panel (Domain): http://${CUSTOM_DOMAIN}${SECURITY_ENTRANCE}"
 fi
 echo "🌐 URL Đăng nhập Panel (IP)    : http://${PUBLIC_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}"
+echo "🗄️ URL Truy cập phpMyAdmin 5.2 : http://${PUBLIC_IP}:${PMA_PORT}${PMA_PATH}"
 echo "👤 Tên đăng nhập Admin         : ${ADMIN_USER}  (Dùng để đăng nhập trang Login Web)"
 echo "🔑 Mật khẩu Admin              : ${ADMIN_PASS}"
-if [ -n "${CUSTOM_DOMAIN:-}" ]; then
-  echo "💡 Lưu ý Tên miền             : Trỏ bản ghi DNS loại A của ${CUSTOM_DOMAIN} về IP ${PUBLIC_IP}"
-fi
+echo "🔐 Mật khẩu Root SQL           : ${SQL_ROOT_PASS}"
 echo "------------------------------------------------------------------------------"
 echo "🛠️ Lệnh Sửa chữa VPS           : Gõ 'fp' hoặc 'ferrous' trên Terminal (tương đương 'bt')"
 echo "👉 Đổi mật khẩu Admin          : gõ 'fp 5' trên Terminal"
 echo "👉 Gán / đổi tên miền riêng    : gõ 'fp 17 <domain>' trên Terminal"
-echo "👉 Xem lại tài khoản           : gõ 'fp default' trên Terminal"
-echo "📂 Thư mục Web Root            : /www/wwwroot"
+echo "👉 Xem lại tài khoản           : gõ 'fp 14' trên Terminal"
 echo "=============================================================================="

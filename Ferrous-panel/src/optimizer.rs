@@ -56,6 +56,34 @@ pub struct BackendWatchdogModel {
     pub last_health_sweep_ms: u64,
 }
 
+/// Model 4: Anti-Crash Server Resilience (Load Shedding, Cgroups v2 & ZRAM Guard)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OomImmunityEntry {
+    pub service: String,
+    pub pid: u32,
+    pub oom_score_adj: i32,
+    pub memory_high_mb: u32,
+    pub memory_max_mb: u32,
+    pub policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntiCrashResilienceModel {
+    pub load_shedding_enabled: bool,
+    pub cpu_shed_threshold_percent: u8,
+    pub ram_shed_threshold_percent: u8,
+    pub zram_enabled: bool,
+    pub zram_compression_algo: String,
+    pub zram_size_mb: u32,
+    pub slow_query_auto_kill_sec: u32,
+    pub cgroups_v2_enforced: bool,
+    pub oom_immunity_map: Vec<OomImmunityEntry>,
+    pub mitigation_count: u64,
+    pub last_mitigation_action: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryReclaimReport {
     pub freed_pagecache_mb: u64,
@@ -68,6 +96,35 @@ pub struct MemoryReclaimReport {
 pub struct SystemOptimizer;
 
 impl SystemOptimizer {
+    pub fn recommended_ubuntu_sysctl() -> Vec<KernelSysctlModel> {
+        vec![
+            KernelSysctlModel {
+                key: "net.ipv4.tcp_congestion_control".into(),
+                category: "TCP BBR & Network".into(),
+                current_value: "bbr".into(),
+                optimal_value: "bbr".into(),
+                description: "Thuật toán chống nghẽn TCP BBR tăng tốc độ HTTPS/QUIC".into(),
+                applied: true,
+            },
+            KernelSysctlModel {
+                key: "net.core.somaxconn".into(),
+                category: "TCP BBR & Network".into(),
+                current_value: "65535".into(),
+                optimal_value: "65535".into(),
+                description: "Hàng đợi lắng nghe socket tối đa cho Nginx & Actix-Web".into(),
+                applied: true,
+            },
+            KernelSysctlModel {
+                key: "vm.swappiness".into(),
+                category: "Memory & Swap".into(),
+                current_value: "10".into(),
+                optimal_value: "10".into(),
+                description: "Ưu tiên giữ tiến trình Rust và Database trên RAM vật lý".into(),
+                applied: true,
+            },
+        ]
+    }
+
     /// Computes a deterministic, hardware-adaptive optimization model for the Ubuntu server
     pub fn compute_adaptive_profile(
         profile_id: &str,

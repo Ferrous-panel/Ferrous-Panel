@@ -4,7 +4,6 @@ import {
   Eye,
   EyeOff,
   KeyRound,
-  Lock,
   Moon,
   RefreshCw,
   Server,
@@ -13,6 +12,7 @@ import {
   UserCheck
 } from 'lucide-react';
 import { PanelAdminAccount } from '../types';
+import { FerrousLogo } from './FerrousLogo';
 
 interface LoginViewProps {
   onLoginSuccess: (token: string, user: { username: string }) => void;
@@ -80,17 +80,10 @@ export const LoginView: React.FC<LoginViewProps> = ({
       {/* Top Bar Utilities */}
       <header className="px-6 py-4 flex items-center justify-between border-b border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 backdrop-blur-xs">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-orange-600 flex items-center justify-center text-white font-bold text-sm shadow-sm">
-            FP
-          </div>
-          <div>
-            <div className="text-sm font-bold tracking-tight text-slate-900 dark:text-slate-100">
-              FerrousPanel
-            </div>
-            <div className="text-[11px] font-mono text-slate-500 dark:text-slate-400">
-              Ubuntu Web Hosting Control Panel · Rust Engine
-            </div>
-          </div>
+          <FerrousLogo size="md" showWordmark={true} />
+          <span className="hidden sm:inline text-xs font-mono text-slate-500 dark:text-slate-400">
+            · Rust Polyglot Server Engine
+          </span>
         </div>
 
         <div className="flex items-center gap-3">
@@ -125,14 +118,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 shadow-xl p-6 sm:p-8 space-y-6">
             {/* Header info inside card */}
             <div className="space-y-1.5 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-orange-600/10 dark:bg-orange-500/15 text-orange-600 dark:text-orange-400 mb-2">
-                <Lock className="w-6 h-6" />
+              <div className="inline-flex items-center justify-center mb-2">
+                <FerrousLogo size="xl" showWordmark={false} />
               </div>
               <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
                 Đăng Nhập Quản Trị Viên
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                Bảo vệ bởi cơ chế Argon2id &amp; Session Token nội bộ VPS
+                Bảo vệ bởi cơ chế Argon2id &amp; Nhân Hệ Thống Rust Actix-Web
               </p>
             </div>
 

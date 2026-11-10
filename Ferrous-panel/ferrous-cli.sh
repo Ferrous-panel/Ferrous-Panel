@@ -61,10 +61,12 @@ show_default_info() {
   sqlpass="$(read_json_field mysqlRootPassword Sql#2026!MariaDbRoot)"
 
   echo "======================================================================"
-  echo "  FERROUS-PANEL — THÔNG TIN TÀI KHOẢN ADMIN & CẤU HÌNH VPS NỘI BỘ"
+  echo "  FERROUS-PANEL — THÔNG TIN TÀI KHOẢN ADMIN & RUST CORE ENGINE"
   echo "======================================================================"
+  echo "  Tiến trình Core Server  : /usr/local/bin/ferrous-panel-daemon (Rust Actix-Web)"
   echo "  URL Truy cập Ngoại mạng : http://${ip}:${port}${entrance}"
   echo "  URL Truy cập Nội bộ     : http://127.0.0.1:${port}${entrance}"
+  echo "  URL phpMyAdmin 5.2      : http://${ip}:888/phpmyadmin_ferrous_89a2"
   echo "  Tài khoản Admin (User)  : ${user}"
   echo "  Mật khẩu Admin (Pass)   : ${pass}"
   echo "  Mật khẩu SQL Root       : ${sqlpass}"

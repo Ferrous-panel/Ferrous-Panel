@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import {
   Activity,
+  AlertTriangle,
   CheckCircle2,
   Cpu,
+  Flame,
   Gauge,
   HardDrive,
+  Layers,
   RefreshCw,
   ShieldAlert,
   ShieldCheck,
@@ -13,7 +16,11 @@ import {
   Terminal,
   Zap,
 } from 'lucide-react';
-import { OptimizationProfilePreset, SystemOptimizerData } from '../types';
+import {
+  AntiCrashGuardState,
+  OptimizationProfilePreset,
+  SystemOptimizerData,
+} from '../types';
 
 interface SystemOptimizerViewProps {
   optimizer: SystemOptimizerData;
@@ -21,6 +28,13 @@ interface SystemOptimizerViewProps {
   onToggleSysctl: (id: string) => Promise<void>;
   onReclaimMemory: () => Promise<{ freedMb: number; message: string }>;
   onWatchdogHeal: () => Promise<void>;
+  onUpdateAntiCrash?: (payload: Partial<AntiCrashGuardState>) => Promise<void>;
+  onEmergencyMitigate?: (
+    action:
+      | 'purge_syn_backlog'
+      | 'isolate_leaking_workers'
+      | 'reset_hung_db_queries'
+  ) => Promise<{ message?: string } | void>;
 }
 
 export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
@@ -29,10 +43,13 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
   onToggleSysctl,
   onReclaimMemory,
   onWatchdogHeal,
+  onUpdateAntiCrash,
+  onEmergencyMitigate,
 }) => {
   const [applyingId, setApplyingId] = useState<string | null>(null);
   const [reclaiming, setReclaiming] = useState(false);
   const [healing, setHealing] = useState(false);
+  const [mitigatingAction, setMitigatingAction] = useState<string | null>(null);
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
   const handleApply = async (id: OptimizationProfilePreset['id']) => {
@@ -73,7 +90,42 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
     }
   };
 
-  const { watchdog } = optimizer;
+  const handleToggleAntiCrashOption = async (
+    field: 'loadSheddingEnabled' | 'zramEnabled' | 'cgroupsV2Enforced'
+  ) => {
+    if (!onUpdateAntiCrash || !optimizer.antiCrashGuard) return;
+    setStatusBanner(null);
+    const nextValue = !optimizer.antiCrashGuard[field];
+    await onUpdateAntiCrash({ [field]: nextValue });
+    setStatusBanner(
+      `[Rust Core Binary] Đã cập nhật cơ chế chống sập ${field} = ${
+        nextValue ? 'ENABLED' : 'DISABLED'
+      } qua Cgroups v2 & Kernel Guard.`
+    );
+  };
+
+  const handleRunEmergencyAction = async (
+    action:
+      | 'purge_syn_backlog'
+      | 'isolate_leaking_workers'
+      | 'reset_hung_db_queries',
+    label: string
+  ) => {
+    if (!onEmergencyMitigate) return;
+    setMitigatingAction(action);
+    setStatusBanner(null);
+    try {
+      const res = await onEmergencyMitigate(action);
+      setStatusBanner(
+        (res && typeof res === 'object' && res.message) ||
+          `[Rust Emergency Guard] Đã thực thi "${label}" thành công.`
+      );
+    } finally {
+      setMitigatingAction(null);
+    }
+  };
+
+  const { watchdog, antiCrashGuard } = optimizer;
 
   return (
     <div className="space-y-6">
@@ -86,10 +138,10 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
             </div>
             <h1 className="text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
               <Gauge className="w-5 h-5 text-orange-600 dark:text-orange-400" />
-              Models Tối Ưu Hóa Hệ Thống &amp; Bảo Đảm Ổn Định Backend (Watchdog Engine)
+              Công Nghệ Chống Sập Server (Anti-Crash Resilience) &amp; Tối Ưu Hóa Hệ Thống
             </h1>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Tự động tính toán thông số Worker Pool theo phần cứng vật lý, tinh chỉnh nhân Linux <code className="font-mono">sysctl</code> và bảo vệ tiến trình điều khiển không bao giờ bị treo hay tràn bộ nhớ.
+              Bảo vệ VPS khỏi sập nguồn do quá tải lưu lượng hoặc rò rỉ RAM bằng Cgroups v2 Slice Isolation, Adaptive Load Shedding, ZRAM zstd và OOM Killer Immunity.
             </p>
           </div>
 
@@ -116,7 +168,7 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
         {statusBanner && (
           <div className="p-3.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs font-medium text-emerald-800 dark:text-emerald-200 flex items-center justify-between gap-2">
             <span>{statusBanner}</span>
-            <span className="font-mono text-[11px] shrink-0">STATUS: OK</span>
+            <span className="font-mono text-[11px] shrink-0">RUST-CORE: OK</span>
           </div>
         )}
 
@@ -175,6 +227,257 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
           </div>
         </div>
       </section>
+
+      {/* Anti-Crash Server Resilience Console */}
+      {antiCrashGuard && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+            <div className="space-y-1">
+              <div className="text-xs font-mono text-orange-600 dark:text-orange-400">
+                RUST ANTI-CRASH ENGINE · CGROUPS V2 SLICE ISOLATION · ADAPTIVE BACKPRESSURE · ZRAM ZSTD
+              </div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <Layers className="w-4 h-4 text-orange-600 dark:text-orange-400" />
+                Kiến Trúc Chống Sập Server Đa Tầng (Zero-Downtime &amp; Anti-OOM Crash Guard)
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Ngăn chặn hiệu ứng Domino làm treo toàn bộ VPS khi 1 website bị spike CPU/RAM đột biến hoặc Database bị kẹt Deadlock.
+              </p>
+            </div>
+
+            {/* 1-Click Emergency Anti-Crash Mitigations */}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  handleRunEmergencyAction(
+                    'purge_syn_backlog',
+                    'Xả hàng đợi TCP SYN Backlog & Socket treo'
+                  )
+                }
+                disabled={mitigatingAction !== null}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Flame className="w-3.5 h-3.5 text-amber-500" />
+                {mitigatingAction === 'purge_syn_backlog'
+                  ? 'Đang xả SYN Backlog...'
+                  : 'Xả TCP SYN Backlog'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  handleRunEmergencyAction(
+                    'isolate_leaking_workers',
+                    'Cô lập Worker rò rỉ RAM (Cgroups v2)'
+                  )
+                }
+                disabled={mitigatingAction !== null}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-orange-500/10 hover:bg-orange-500/20 text-orange-700 dark:text-orange-300 border border-orange-500/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 text-orange-500" />
+                {mitigatingAction === 'isolate_leaking_workers'
+                  ? 'Đang cô lập Worker...'
+                  : 'Cô lập Worker Rò Rỉ RAM'}
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  handleRunEmergencyAction(
+                    'reset_hung_db_queries',
+                    'Ngắt truy vấn SQL treo > 15s'
+                  )
+                }
+                disabled={mitigatingAction !== null}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/10 hover:bg-rose-500/20 text-rose-700 dark:text-rose-300 border border-rose-500/30 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Zap className="w-3.5 h-3.5 text-rose-500" />
+                {mitigatingAction === 'reset_hung_db_queries'
+                  ? 'Đang ngắt Deadlock...'
+                  : 'Cắt SQL Queries Treo'}
+              </button>
+            </div>
+          </div>
+
+          {/* 3 Core Anti-Crash Pillars */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Pillar 1: Adaptive Load Shedding & Backpressure */}
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 flex flex-col justify-between space-y-3">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-orange-600 dark:text-orange-400">
+                    ADAPTIVE LOAD SHEDDING
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    SQL Kill &gt; {antiCrashGuard.slowQueryAutoKillSec}s
+                  </span>
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Cắt Tải Thông Minh Khi Spike Đột Biến
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Khi CPU &gt; {antiCrashGuard.cpuShedThresholdPercent}% hoặc RAM &gt;{' '}
+                  {antiCrashGuard.ramShedThresholdPercent}%, tầng Rust Proxy tự động trả{' '}
+                  <code className="font-mono">503 Retry-After</code> cho bot/request phụ để giữ sống nhân xử lý chính.
+                </p>
+              </div>
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                  Can thiệp bảo vệ: {antiCrashGuard.mitigationCount} lần
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleAntiCrashOption('loadSheddingEnabled')}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                    antiCrashGuard.loadSheddingEnabled
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {antiCrashGuard.loadSheddingEnabled ? 'Đang Bật' : 'Đã Tắt'}
+                </button>
+              </div>
+            </div>
+
+            {/* Pillar 2: ZRAM Compressed Memory Swap */}
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 flex flex-col justify-between space-y-3">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-sky-600 dark:text-sky-400">
+                    ZRAM ZSTD MEMORY COMPRESSION
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400 tabular-nums">
+                    Thuật toán {antiCrashGuard.zramCompressionAlgo}
+                  </span>
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Nén RAM Thực Tế Bằng Thuật Toán {antiCrashGuard.zramCompressionAlgo}
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Tạo vùng nhớ nén tốc độ cao trực tiếp trên RAM ({antiCrashGuard.zramSizeMb} MB), tránh I/O Thrashing làm đơ ổ cứng NVMe khi VPS gần cạn bộ nhớ vật lý.
+                </p>
+              </div>
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                  Dung lượng ZRAM: {antiCrashGuard.zramSizeMb} MB
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleAntiCrashOption('zramEnabled')}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                    antiCrashGuard.zramEnabled
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {antiCrashGuard.zramEnabled ? 'Đang Bật' : 'Đã Tắt'}
+                </button>
+              </div>
+            </div>
+
+            {/* Pillar 3: Cgroups v2 Hard Isolation & Auto-Respawn */}
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/70 flex flex-col justify-between space-y-3">
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                    CGROUPS V2 &amp; AUTO-RESPAWN
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-500 tabular-nums">
+                    SLA &lt; 50ms
+                  </span>
+                </div>
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Cô Lập Cứng Từng Tiến Trình Theo Slice
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  Áp trần <code className="font-mono">memory.high</code> và{' '}
+                  <code className="font-mono">memory.max</code> riêng cho từng dịch vụ. Nếu 1 worker bị crash, Systemd + Rust Supervisor tự khởi chạy lại tức thì.
+                </p>
+              </div>
+              <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+                <span className="text-[11px] font-mono text-slate-500 truncate max-w-[180px]" title={antiCrashGuard.lastMitigationAction}>
+                  {antiCrashGuard.lastMitigationAction}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleAntiCrashOption('cgroupsV2Enforced')}
+                  className={`px-3 py-1 rounded-lg text-xs font-semibold transition-colors cursor-pointer shrink-0 ${
+                    antiCrashGuard.cgroupsV2Enforced
+                      ? 'bg-emerald-600 text-white'
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                  }`}
+                >
+                  {antiCrashGuard.cgroupsV2Enforced ? 'Đang Bật' : 'Đã Tắt'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* OOM Killer Immunity Matrix & Cgroups v2 Slice Table */}
+          <div className="rounded-xl border border-slate-200 dark:border-slate-800 overflow-hidden">
+            <div className="px-4 py-3 bg-slate-50 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="text-xs font-bold text-slate-900 dark:text-white">
+                Ma Trận Miễn Nhiễm Linux OOM Killer (<code className="font-mono">/proc/&lt;pid&gt;/oom_score_adj</code>) &amp; Cgroups v2 Limits
+              </div>
+              <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
+                Ưu tiên giữ sống SSHD (-950) &amp; Ferrous Core (-900)
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 dark:border-slate-800 text-[11px] font-mono text-slate-500 uppercase bg-slate-50/50 dark:bg-slate-950/50">
+                    <th className="py-2.5 px-4">Tiến Trình Hệ Thống</th>
+                    <th className="py-2.5 px-4">PID</th>
+                    <th className="py-2.5 px-4">OOM Score Adj</th>
+                    <th className="py-2.5 px-4">Ngưỡng Cảnh Báo (memory.high)</th>
+                    <th className="py-2.5 px-4">Giới Hạn Cứng (memory.max)</th>
+                    <th className="py-2.5 px-4">Chính Sách Tự Hồi Phục (Cgroups v2 Policy)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-800 font-mono">
+                  {antiCrashGuard.oomImmunityMap.map((proc) => (
+                    <tr
+                      key={proc.service}
+                      className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
+                    >
+                      <td className="py-2.5 px-4 font-bold text-slate-900 dark:text-white">
+                        {proc.service}
+                      </td>
+                      <td className="py-2.5 px-4 tabular-nums text-slate-600 dark:text-slate-400">
+                        {proc.pid}
+                      </td>
+                      <td className="py-2.5 px-4 tabular-nums">
+                        <span
+                          className={
+                            proc.oomScoreAdj <= -800
+                              ? 'text-emerald-600 dark:text-emerald-400 font-bold'
+                              : proc.oomScoreAdj < 0
+                                ? 'text-sky-600 dark:text-sky-400 font-semibold'
+                                : 'text-amber-600 dark:text-amber-400'
+                          }
+                        >
+                          {proc.oomScoreAdj}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-4 tabular-nums text-slate-600 dark:text-slate-300">
+                        {proc.memoryHighMb} MB
+                      </td>
+                      <td className="py-2.5 px-4 tabular-nums text-slate-700 dark:text-slate-300">
+                        {proc.memoryMaxMb} MB
+                      </td>
+                      <td className="py-2.5 px-4 text-emerald-600 dark:text-emerald-400">
+                        {proc.policy}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Section 2: Hardware-Adaptive Optimization Models */}
       <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
@@ -334,20 +637,26 @@ export const SystemOptimizerView: React.FC<SystemOptimizerViewProps> = ({
               <span className="text-[11px] font-mono text-slate-500">Auto-Heal Active</span>
             </div>
             <div className="divide-y divide-slate-200 dark:divide-slate-800 max-h-64 overflow-y-auto text-xs">
-              {watchdog.recentEvents.map((ev) => (
-                <div key={ev.id} className="p-3.5 space-y-1">
-                  <div className="flex items-center justify-between font-mono text-[11px]">
-                    <span className="font-semibold text-slate-900 dark:text-white">
-                      [{ev.subsystem}]
-                    </span>
-                    <span className="text-slate-500 tabular-nums">{ev.timestamp}</span>
-                  </div>
-                  <div className="text-slate-700 dark:text-slate-300">{ev.action}</div>
-                  <div className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                    <CheckCircle2 className="w-3 h-3" /> {ev.result}
-                  </div>
+              {watchdog.recentEvents.length === 0 ? (
+                <div className="p-5 text-center text-slate-500 dark:text-slate-400">
+                  Chưa có sự kiện can thiệp khẩn cấp nào trong phiên hiện tại. Nhấn &ldquo;Chạy Watchdog Self-Heal&rdquo; hoặc các nút chống sập ở trên để ghi nhận thực thi.
                 </div>
-              ))}
+              ) : (
+                watchdog.recentEvents.map((ev) => (
+                  <div key={ev.id} className="p-3.5 space-y-1">
+                    <div className="flex items-center justify-between font-mono text-[11px]">
+                      <span className="font-semibold text-slate-900 dark:text-white">
+                        [{ev.subsystem}]
+                      </span>
+                      <span className="text-slate-500 tabular-nums">{ev.timestamp}</span>
+                    </div>
+                    <div className="text-slate-700 dark:text-slate-300">{ev.action}</div>
+                    <div className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3" /> {ev.result}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

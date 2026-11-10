@@ -47,15 +47,15 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   onClose,
   onDeploy
 }) => {
-  const [domain, setDomain] = useState('app.ferroushub.vn');
-  const [aliasesText, setAliasesText] = useState('www.app.ferroushub.vn');
+  const [domain, setDomain] = useState('');
+  const [aliasesText, setAliasesText] = useState('');
   const [framework, setFramework] =
-    useState<WebsiteRuntimeType>('Next.js 15 (React SSR)');
-  const [workingDir, setWorkingDir] = useState('/www/wwwroot/app.ferroushub.vn');
-  const [runSubDir, setRunSubDir] = useState('/.next/standalone');
-  const [internalPort, setInternalPort] = useState(3005);
+    useState<WebsiteRuntimeType>('Actix-Web (Rust)');
+  const [workingDir, setWorkingDir] = useState('/www/wwwroot/');
+  const [runSubDir, setRunSubDir] = useState('/');
+  const [internalPort, setInternalPort] = useState(8080);
   const [execCommand, setExecCommand] = useState(
-    '/usr/bin/node /www/wwwroot/app.ferroushub.vn/.next/standalone/server.js'
+    '/www/wwwroot/app/target/release/app'
   );
   const [workers, setWorkers] = useState(4);
   const [memoryLimitMb, setMemoryLimitMb] = useState(512);
@@ -65,18 +65,16 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [dbEngine, setDbEngine] = useState<'PostgreSQL 17' | 'MariaDB 11.4'>(
     'PostgreSQL 17'
   );
-  const [dbName, setDbName] = useState('app_ferroushub_db');
-  const [dbUser, setDbUser] = useState('app_ferroushub_user');
+  const [dbName, setDbName] = useState('');
+  const [dbUser, setDbUser] = useState('');
   const [dbPassword, setDbPassword] = useState(() =>
     generateRandomSqlPassword()
   );
 
   const [createFtp, setCreateFtp] = useState(true);
-  const [ftpUser, setFtpUser] = useState('ftp_app_ferrous');
+  const [ftpUser, setFtpUser] = useState('');
 
-  const [gitRepoUrl, setGitRepoUrl] = useState(
-    'https://github.com/ferroushub/nextjs15-app-router.git'
-  );
+  const [gitRepoUrl, setGitRepoUrl] = useState('');
   const [gitBranch, setGitBranch] = useState('main');
 
   const [sslEnabled, setSslEnabled] = useState(true);
@@ -134,19 +132,39 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     } else if (nextFw === 'NestJS 10 (TypeScript API)') {
       setRunSubDir('/dist');
       setExecCommand(`/usr/bin/node /www/wwwroot/${clean}/dist/main.js`);
-    } else if (nextFw === 'Vite + React 19 / Vue 3 SPA') {
+    } else if (nextFw === 'Vite + React 19 / Vue 3 SPA' || nextFw === 'Static HTML / SPA') {
       setRunSubDir('/dist');
       setCreateDatabase(false);
       setExecCommand('nginx static try_files /index.html');
     } else if (nextFw === 'PHP 8.3-FPM') {
       setRunSubDir('/public');
       setDbEngine('MariaDB 11.4');
-      setExecCommand('php-fpm8.3 (unix:/run/php/php8.3-fpm.sock)');
+      setExecCommand('php-fpm8.3 (unix:/run/php/php8.3-fpm.sock + libferrous_bridge.so)');
     } else if (nextFw === 'Python / FastAPI') {
       setRunSubDir('/');
       setExecCommand(
         `/www/wwwroot/${clean}/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker main:app`
       );
+    } else if (nextFw === 'Go / Fiber') {
+      setRunSubDir('/');
+      setExecCommand(`/www/wwwroot/${clean}/bin/${prefix}_go_cgo`);
+    } else if (nextFw === 'Java 21 / Spring Boot 3') {
+      setRunSubDir('/target');
+      setExecCommand(
+        `/usr/bin/java -XX:+UseZGC -Djava.library.path=/opt/Ferrous-panel/lib -jar /www/wwwroot/${clean}/target/${prefix}.jar`
+      );
+    } else if (nextFw === 'C# / .NET 8 ASP.NET Core') {
+      setRunSubDir('/publish');
+      setExecCommand(`/usr/bin/dotnet /www/wwwroot/${clean}/publish/${prefix}.dll`);
+    } else if (nextFw === 'Ruby 3.3 / Rails & Elixir') {
+      setRunSubDir('/public');
+      setExecCommand(`/usr/local/bin/bundle exec puma -C /www/wwwroot/${clean}/config/puma.rb`);
+    } else if (nextFw === 'C++20 / Zig Native Daemon') {
+      setRunSubDir('/');
+      setExecCommand(`/www/wwwroot/${clean}/build/${prefix}_native`);
+    } else if (nextFw === 'WebAssembly (WASI Wasmtime)') {
+      setRunSubDir('/');
+      setExecCommand(`/usr/local/bin/wasmtime serve --addr 127.0.0.1:${internalPort} /www/wwwroot/${clean}/${prefix}.wasm`);
     }
   };
 
@@ -198,10 +216,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/70 dark:bg-slate-950/50">
           <div>
             <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-              Thêm Website Mới (Hỗ trợ Rust Backend &amp; Các Framework JS Hiện đại)
+              Thêm Website Mới (Tất cả Framework &amp; Ngôn ngữ chạy trên Nhân Rust)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Khởi tạo đồng thời Thư mục Web, Nginx Reverse Proxy, Database SQL (Tùy chỉnh mật khẩu), FTP và SSL Let’s Encrypt
+              Tự động nạp cầu nối Rust Polyglot FFI/IPC (<code className="font-mono">libferrous_bridge.so</code>), Nginx Reverse Proxy, Systemd Sandbox, Database SQL và SSL
             </p>
           </div>
           <button
@@ -245,7 +263,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
 
             <div className="space-y-1.5">
               <label className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-                Framework JS Hiện đại / Rust / PHP Runtime
+                Framework / Ngôn ngữ (Được giám sát bởi Nhân Rust FFI/IPC)
               </label>
               <select
                 value={framework}
@@ -254,44 +272,61 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                 }
                 className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
               >
-                <optgroup label="Modern JavaScript & TypeScript Frameworks">
+                <optgroup label="1. Rust Native Backends (Direct ABI)">
+                  <option value="Actix-Web (Rust)">
+                    Actix-Web 4.9 (Rust Native LTO)
+                  </option>
+                  <option value="Axum (Rust)">Axum 0.8 (Rust Tokio Hyper)</option>
+                  <option value="Rocket (Rust)">Rocket 0.5 (Rust Async)</option>
+                </optgroup>
+                <optgroup label="2. Modern JS/TS Frameworks (NAPI-RS + Rust IPC Bridge)">
                   <option value="Next.js 15 (React SSR)">
-                    Next.js 15 (React 19 App Router SSR)
+                    Next.js 15 (React 19 App Router SSR + NAPI-RS)
                   </option>
                   <option value="Nuxt 3 (Vue 3 SSR)">
-                    Nuxt 3.14 (Vue 3 Nitro SSR)
+                    Nuxt 3.14 (Vue 3 Nitro SSR + NAPI-RS)
                   </option>
                   <option value="SvelteKit 2 (Svelte 5)">
-                    SvelteKit 2.8 (Svelte 5 Runes SSR)
+                    SvelteKit 2.8 (Svelte 5 Runes SSR + Bun/Node FFI)
                   </option>
                   <option value="Astro 5 (Hybrid / Static)">
-                    Astro 5.0 (Content Islands Hybrid)
+                    Astro 5.0 (Content Islands Hybrid + NAPI-RS)
                   </option>
                   <option value="Remix / React Router v7">
                     Remix / React Router v7 SSR
                   </option>
+                  <option value="NestJS 10 (TypeScript API)">
+                    NestJS 10 (Enterprise TypeScript API + Rust Addon)
+                  </option>
                   <option value="Vite + React 19 / Vue 3 SPA">
                     Vite 6 + React 19 / Vue 3 SPA
                   </option>
-                  <option value="NestJS 10 (TypeScript API)">
-                    NestJS 10 (Enterprise TypeScript API)
-                  </option>
                 </optgroup>
-                <optgroup label="Rust Native Backends">
-                  <option value="Actix-Web (Rust)">
-                    Actix-Web 4.9 (Rust Backend)
-                  </option>
-                  <option value="Axum (Rust)">Axum 0.8 (Rust Tokio)</option>
-                  <option value="Rocket (Rust)">Rocket 0.5 (Rust)</option>
-                </optgroup>
-                <optgroup label="PHP / Python / Go">
+                <optgroup label="3. Polyglot Server Languages (PyO3 / Zend FFI / CGO / JNI / P/Invoke)">
                   <option value="PHP 8.3-FPM">
-                    PHP 8.3-FPM (WordPress / Laravel 11)
+                    PHP 8.4 / 8.3 / 7.4-FPM (Laravel / WordPress + Zend Rust FFI)
                   </option>
                   <option value="Python / FastAPI">
-                    Python 3.12 / FastAPI Uvicorn
+                    Python 3.12 / FastAPI / Django (PyO3 Rust C-Extension)
                   </option>
-                  <option value="Go / Fiber">Go 1.23 / Fiber Binary</option>
+                  <option value="Go / Fiber">
+                    Go 1.23 / Fiber / Gin (CGO Static Link libferrous_bridge.a)
+                  </option>
+                  <option value="Java 21 / Spring Boot 3">
+                    Java 21 / Kotlin Spring Boot 3 (Rust JNI &amp; Panama FFM)
+                  </option>
+                  <option value="C# / .NET 8 ASP.NET Core">
+                    C# / .NET 8.0 ASP.NET Core Kestrel (Rust P/Invoke csbindgen)
+                  </option>
+                  <option value="Ruby 3.3 / Rails & Elixir">
+                    Ruby 3.3 Rails / Elixir Phoenix (Magnus &amp; Rustler NIF)
+                  </option>
+                  <option value="C++20 / Zig Native Daemon">
+                    C / C++20 / Zig Daemon (cbindgen Zero-Overhead C-ABI)
+                  </option>
+                  <option value="WebAssembly (WASI Wasmtime)">
+                    WebAssembly WASI Preview 2 (Rust Wasmtime Sandbox)
+                  </option>
                 </optgroup>
               </select>
             </div>

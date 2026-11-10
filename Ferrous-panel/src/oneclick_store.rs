@@ -53,25 +53,53 @@ impl OneClickStoreEngine {
             .replace("$PORT", &allocated_port.to_string())
             .replace("$DOMAIN", domain);
 
+        let is_php = template.framework.to_lowercase().contains("php");
+        let default_envs = if is_php {
+            vec![
+                ("APP_ENV".to_string(), "production".to_string()),
+                ("FERROUS_POLYGLOT_IPC".to_string(), "/run/ferrous-polyglot.sock".to_string()),
+            ]
+        } else if template.framework.to_lowercase().contains("python")
+            || template.framework.to_lowercase().contains("fastapi")
+            || template.framework.to_lowercase().contains("django")
+        {
+            vec![
+                ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
+                ("PORT".to_string(), allocated_port.to_string()),
+            ]
+        } else if template.framework.to_lowercase().contains("rust")
+            || template.framework.to_lowercase().contains("actix")
+            || template.framework.to_lowercase().contains("axum")
+        {
+            vec![
+                ("RUST_LOG".to_string(), "info,actix_web=info".to_string()),
+                ("PORT".to_string(), allocated_port.to_string()),
+            ]
+        } else {
+            vec![
+                ("NODE_ENV".to_string(), "production".to_string()),
+                ("PORT".to_string(), allocated_port.to_string()),
+            ]
+        };
+
         Ok(AppServiceSpec {
             id: format!("svc-{}", domain.replace('.', "-")),
             name: domain.replace('.', "-"),
             framework: template.framework.clone(),
+            runtime_version: template.version.clone(),
             domain: domain.to_string(),
+            php_version: if is_php { Some("8.3".to_string()) } else { None },
             internal_port: allocated_port,
             working_dir,
             exec_command: exec_cmd,
             workers: 4,
             memory_limit_mb: 512,
+            cpu_quota_percent: 200,
             status: "running".to_string(),
             ssl_enabled: true,
-            http3_quic: true,
             websocket_enabled: true,
             rate_limit_rps: 250,
-            env_vars: vec![
-                ("NODE_ENV".to_string(), "production".to_string()),
-                ("PORT".to_string(), allocated_port.to_string()),
-            ],
+            env_vars: default_envs,
         })
     }
 

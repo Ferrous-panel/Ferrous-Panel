@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import {
   ActiveTab,
+  AntiCrashGuardState,
   CpanelData,
   DiagnosticCheckItem,
   EnvVar,
@@ -59,6 +60,7 @@ import { SecurityCenterView } from './components/SecurityCenterView';
 import { RustSourceView } from './components/RustSourceView';
 import { DeployModal } from './components/DeployModal';
 import { LoginView } from './components/LoginView';
+import { FerrousLogo } from './components/FerrousLogo';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
@@ -645,6 +647,38 @@ export default function App() {
     }
   };
 
+  const handleUpdateAntiCrash = async (
+    payload: Partial<AntiCrashGuardState>
+  ) => {
+    const res = await fetch('/api/optimizer/anti-crash', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      setOptimizer(await res.json());
+    }
+  };
+
+  const handleEmergencyMitigate = async (
+    action:
+      | 'purge_syn_backlog'
+      | 'isolate_leaking_workers'
+      | 'reset_hung_db_queries'
+  ): Promise<{ message?: string } | void> => {
+    const res = await fetch('/api/optimizer/emergency-mitigate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.optimizer) setOptimizer(data.optimizer);
+      fetchTelemetry();
+      return { message: data.message };
+    }
+  };
+
   // cPanel Suite Handlers
   const handleAddCron = async (payload: {
     title: string;
@@ -858,6 +892,44 @@ export default function App() {
     }
   };
 
+  const handleChangeDdosMode = async (
+    mode: 'normal' | 'elevated' | 'under_attack'
+  ) => {
+    const res = await fetch('/api/security/ddos-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode })
+    });
+    if (res.ok) {
+      const antiDdos = await res.json();
+      setSecurity((prev) => (prev ? { ...prev, antiDdos } : prev));
+    }
+  };
+
+  const handleToggleWafRule = async (id: string) => {
+    const res = await fetch(`/api/security/waf/${id}/toggle`, {
+      method: 'PUT'
+    });
+    if (res.ok) {
+      const antiDdos = await res.json();
+      setSecurity((prev) => (prev ? { ...prev, antiDdos } : prev));
+    }
+  };
+
+  const handleRunFimScan = async (): Promise<void> => {
+    const res = await fetch('/api/security/fim-scan', {
+      method: 'POST'
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.antiDdos) {
+        setSecurity((prev) =>
+          prev ? { ...prev, antiDdos: data.antiDdos } : prev
+        );
+      }
+    }
+  };
+
   // SSH Terminal & External Client Handlers
   const handleUpdateSshConfig = async (payload: Partial<SshDaemonConfig>) => {
     const res = await fetch('/api/ssh/config', {
@@ -1041,7 +1113,7 @@ export default function App() {
     { id: 'optimizer', label: 'Models Tối ưu & Watchdog', icon: Gauge },
     { id: 'cpanel', label: 'Cron, DNS, Backup & FTP', icon: Wrench },
     { id: 'security', label: 'Tường lửa & Bảo mật', icon: ShieldCheck },
-    { id: 'rust-source', label: 'Mã nguồn 14 Module Rust', icon: Code2 }
+    { id: 'rust-source', label: 'Nhân Rust & Đa Ngôn Ngữ', icon: Code2 }
   ];
 
   // Mandatory Login Gate: If not authenticated, render LoginView only
@@ -1061,16 +1133,16 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       {/* Top Bar Contract: 3 zones separated by gap-8 */}
       <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 sticky top-0 z-30">
-        {/* Zone 1: Single text element wordmark */}
+        {/* Zone 1: Brand lockup */}
         <a
           href="#overview"
           onClick={(e) => {
             e.preventDefault();
             setActiveTab('overview');
           }}
-          className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0 font-display"
+          className="whitespace-nowrap shrink-0"
         >
-          FerrousPanel
+          <FerrousLogo size="md" showWordmark={true} />
         </a>
 
         {/* Zone 2: 5 clean single-line text navigation links */}
@@ -1132,18 +1204,18 @@ export default function App() {
             MySQL &amp; phpMyAdmin
           </a>
           <a
-            href="#ssh"
+            href="#rust-source"
             onClick={(e) => {
               e.preventDefault();
-              setActiveTab('ssh');
+              setActiveTab('rust-source');
             }}
             className={`hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-              activeTab === 'ssh'
+              activeTab === 'rust-source'
                 ? 'text-slate-900 dark:text-slate-100 font-semibold underline'
                 : ''
             }`}
           >
-            Web SSH &amp; Client
+            Cầu nối Đa ngôn ngữ
           </a>
         </nav>
 
@@ -1190,10 +1262,10 @@ export default function App() {
           <div className="space-y-6">
             <div className="px-3 py-2 space-y-1">
               <div className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                Ubuntu Web Control Panel
+                Ubuntu Rust Control Panel
               </div>
               <div className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                100% Rust · Multi-PHP · ZIP · SSH
+                100% Rust Core · 10 Ngôn ngữ FFI
               </div>
             </div>
 
@@ -1250,7 +1322,7 @@ export default function App() {
               </button>
             </div>
             <div className="px-2 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
-              14/14 Rust Modules · SSH Port {sshData?.config.port ?? 22}
+              15/15 Rust Modules · SSH Port {sshData?.config.port ?? 22}
             </div>
           </div>
         </aside>
@@ -1384,6 +1456,8 @@ export default function App() {
               onToggleSysctl={handleToggleSysctlParam}
               onReclaimMemory={handleReclaimMemory}
               onWatchdogHeal={handleWatchdogHeal}
+              onUpdateAntiCrash={handleUpdateAntiCrash}
+              onEmergencyMitigate={handleEmergencyMitigate}
             />
           )}
 
@@ -1415,6 +1489,9 @@ export default function App() {
               onBanIp={handleBanIp}
               onUnbanIp={handleUnbanIp}
               onToggleHardening={handleToggleHardening}
+              onChangeDdosMode={handleChangeDdosMode}
+              onToggleWafRule={handleToggleWafRule}
+              onRunFimScan={handleRunFimScan}
             />
           )}
 

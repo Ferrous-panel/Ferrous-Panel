@@ -18,6 +18,11 @@ export type WebsiteRuntimeType =
   | 'PHP 8.3-FPM'
   | 'Python / FastAPI'
   | 'Go / Fiber'
+  | 'Java 21 / Spring Boot 3'
+  | 'C# / .NET 8 ASP.NET Core'
+  | 'Ruby 3.3 / Rails & Elixir'
+  | 'C++20 / Zig Native Daemon'
+  | 'WebAssembly (WASI Wasmtime)'
   | 'Static HTML / SPA';
 
 export type RewritePresetType =
@@ -198,6 +203,14 @@ export interface CoreLoad {
   usagePercent: number;
 }
 
+export interface TelemetryHistoryPoint {
+  time: string;
+  cpuPercent: number;
+  memoryPercent: number;
+  memoryUsedMb: number;
+  requestsPerSec?: number;
+}
+
 export interface TelemetryData {
   hostname: string;
   publicIp: string;
@@ -222,6 +235,7 @@ export interface TelemetryData {
   networkTxMbps: number;
   totalRequestsPerSec: number;
   activeConnections: number;
+  history24h?: TelemetryHistoryPoint[];
   timestamp: string;
 }
 
@@ -266,10 +280,34 @@ export interface HardeningDirective {
   description: string;
 }
 
+export interface WafRuleItem {
+  id: string;
+  code: string;
+  name: string;
+  category: 'Layer-7 HTTP/3 WAF' | 'Zero-Day RCE Shield' | 'Bot & Scanner Defense' | 'Kernel eBPF/XDP';
+  threatType: string;
+  blockedCount: number;
+  enabled: boolean;
+  description: string;
+}
+
+export interface AntiDdosShieldState {
+  protectionMode: 'normal' | 'elevated' | 'under_attack';
+  xdpStatus: string;
+  synCookiesEnabled: boolean;
+  synRateLimitPps: number;
+  droppedPacketsTotal: number;
+  blockedL7AttacksToday: number;
+  fimIntegrityStatus: string;
+  lastFimScanAt: string;
+  wafRules: WafRuleItem[];
+}
+
 export interface SecurityData {
   ufwRules: UfwRule[];
   fail2banJails: Fail2banJail[];
   hardeningDirectives: HardeningDirective[];
+  antiDdosShield?: AntiDdosShieldState;
 }
 
 export interface SqlTableColumn {
@@ -523,12 +561,36 @@ export interface BackendWatchdogState {
   }[];
 }
 
+export interface OomImmunityProcessItem {
+  service: string;
+  pid: number;
+  oomScoreAdj: number;
+  memoryHighMb: number;
+  memoryMaxMb: number;
+  policy: string;
+}
+
+export interface AntiCrashGuardState {
+  loadSheddingEnabled: boolean;
+  cpuShedThresholdPercent: number;
+  ramShedThresholdPercent: number;
+  zramEnabled: boolean;
+  zramCompressionAlgo: string;
+  zramSizeMb: number;
+  slowQueryAutoKillSec: number;
+  cgroupsV2Enforced: boolean;
+  oomImmunityMap: OomImmunityProcessItem[];
+  mitigationCount: number;
+  lastMitigationAction: string;
+}
+
 export interface SystemOptimizerData {
   activeProfileId: OptimizationProfilePreset['id'];
   profiles: OptimizationProfilePreset[];
   sysctlParams: KernelSysctlParam[];
   sysctlConfigPreview: string;
   watchdog: BackendWatchdogState;
+  antiCrashGuard?: AntiCrashGuardState;
 }
 
 export interface SshDaemonConfig {
@@ -635,6 +697,43 @@ export interface RustSourceFile {
   content: string;
 }
 
+export interface PolyglotToolchainSpec {
+  id: string;
+  language: string;
+  runtimeVersion: string;
+  bridgeProtocol: string;
+  compilerCommand: string;
+  outputArtifact: string;
+  zeroCopyIpc: boolean;
+  systemdEnvVars: string[];
+  status: string;
+}
+
+export interface PolyglotCompileRequest {
+  targetLanguage: string;
+  moduleName: string;
+  optimizationLevel: string;
+  enableZeroCopyIpc: boolean;
+  exposeSysMetrics: boolean;
+  exposeSqlBridge: boolean;
+  customFunctions: string[];
+}
+
+export interface PolyglotCompileResult {
+  success: boolean;
+  moduleName: string;
+  targetLanguage: string;
+  bridgeProtocol: string;
+  compilerOutput: string;
+  rustCoreCode: string;
+  cHeaderCode: string;
+  targetBindingCode: string;
+  systemdUnitSnippet: string;
+  buildScript: string;
+  binaryArtifactPath: string;
+  compiledAt: string;
+}
+
 export type ActiveTab =
   | 'overview'
   | 'websites'
@@ -648,5 +747,6 @@ export type ActiveTab =
   | 'cpanel'
   | 'security'
   | 'rust-source';
+
 
 
