@@ -173,7 +173,7 @@ try {
   execFileSync(
     'cargo',
     ['build', '--release', '--manifest-path', path.resolve(RUST_BACKEND_DIR, 'Cargo.toml')],
-    { stdio: 'inherit', timeout: 120000 }
+    { stdio: 'pipe', timeout: 120000 }
   );
   compiledNativeCargo = true;
 } catch {
