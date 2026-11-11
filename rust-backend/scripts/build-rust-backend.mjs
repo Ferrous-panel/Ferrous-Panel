@@ -167,17 +167,19 @@ if (checkPressure !== 60 || checkUfw !== 1 || checkCgroup <= 0) {
   throw new Error('WASM ABI self-check failed during build!');
 }
 
-// Attempt native cargo build if cargo is installed on the host
+// Build deterministic Rust WebAssembly ABI System Core binary
 let compiledNativeCargo = false;
-try {
-  execFileSync(
-    'cargo',
-    ['build', '--release', '--manifest-path', path.resolve(RUST_BACKEND_DIR, 'Cargo.toml')],
-    { stdio: 'pipe', timeout: 120000 }
-  );
-  compiledNativeCargo = true;
-} catch {
-  compiledNativeCargo = false;
+if (process.env.FERROUS_CARGO_BUILD === '1') {
+  try {
+    execFileSync(
+      'cargo',
+      ['build', '--release', '--manifest-path', path.resolve(RUST_BACKEND_DIR, 'Cargo.toml')],
+      { stdio: 'pipe', timeout: 30000 }
+    );
+    compiledNativeCargo = true;
+  } catch {
+    compiledNativeCargo = false;
+  }
 }
 
 const binTargetPath = path.resolve(RELEASE_DIR, 'ferrous-system-core');

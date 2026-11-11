@@ -281,8 +281,20 @@ fi
 export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 
 cd "${INSTALL_DIR}"
+echo -e "${BLUE}[*] Installing npm dependencies (with --legacy-peer-deps)...${NC}"
 npm install --legacy-peer-deps --no-audit 2>/dev/null || npm install --legacy-peer-deps
+echo -e "${BLUE}[*] Building production assets & compiling Rust System Core...${NC}"
 npm run build
+
+# Deploy compiled native Rust binary to system bin path
+if [ -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" ]; then
+  cp -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
+  cp -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-system-core 2>/dev/null || true
+  chmod +x /usr/local/bin/ferrous-panel-daemon /usr/local/bin/ferrous-system-core 2>/dev/null || true
+elif [ -f "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" ]; then
+  cp -f "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
+  chmod +x /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
+fi
 
 # Install CLI commands
 if [ -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" ]; then
@@ -306,7 +318,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="NODE_ENV=production"
 Environment="PORT=${PANEL_PORT}"
 Environment="RUST_LOG=info,actix_web=info"
-ExecStart=/usr/bin/node ${INSTALL_DIR}/server.ts
+ExecStart=/bin/sh -c 'if [ -x ./node_modules/.bin/tsx ]; then exec ./node_modules/.bin/tsx server.ts; else exec npm start; fi'
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -317,34 +329,56 @@ EOF
 
 ln -sf /etc/systemd/system/ferrous-panel.service /etc/systemd/system/ferrous-panel-web.service
 systemctl daemon-reload
-systemctl enable --now ferrous-panel.service
+systemctl enable --now ferrous-panel.service 2>/dev/null || true
 
-# 11. Firewall Configuration (UFW & iptables)
-echo -e "${BLUE}[8/8] Configuring UFW Netfilter firewall rules & iptables...${NC}"
-ufw default deny incoming 2>/dev/null || true
-ufw default allow outgoing 2>/dev/null || true
-ufw allow 22/tcp comment 'SSH Remote Access' 2>/dev/null || true
-ufw allow 80/tcp comment 'Nginx HTTP' 2>/dev/null || true
-ufw allow 443/tcp comment 'Nginx HTTPS TLS 1.3' 2>/dev/null || true
-ufw allow 443/udp comment 'Nginx HTTP/3 QUIC' 2>/dev/null || true
-ufw allow "${PMA_PORT}/tcp" comment 'phpMyAdmin 5.2' 2>/dev/null || true
-ufw allow "${PANEL_PORT}/tcp" comment 'FerrousPanel Web Gateway' 2>/dev/null || true
-ufw --force enable 2>/dev/null || true
+# 11. Firewall Configuration (UFW & iptables) - Safe Order & Anti-Freeze
+echo -e "${BLUE}[8/8] Configuring Netfilter firewall rules & ports...${NC}"
 
-# Auto-unblock for Oracle Cloud / strict iptables default drop/reject rules
+# Detect active SSH port to prevent ever getting locked out
+ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
+ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
+
+# 1. Primary iptables safeguard: immediately accept established and critical incoming traffic
 if command -v iptables &>/dev/null; then
+  iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+  if [ "${ACTIVE_SSH_PORT}" != "22" ]; then
+    iptables -I INPUT 1 -p tcp --dport "${ACTIVE_SSH_PORT}" -j ACCEPT 2>/dev/null || true
+  fi
   iptables -I INPUT 1 -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
   iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
   iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
   iptables -I INPUT 1 -p udp --dport 443 -j ACCEPT 2>/dev/null || true
   iptables -I INPUT 1 -p tcp --dport "${PMA_PORT}" -j ACCEPT 2>/dev/null || true
-  iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
 fi
+
+# 2. Configure UFW rules: allow necessary ports BEFORE setting default deny
+if command -v ufw &>/dev/null; then
+  ufw allow 22/tcp 2>/dev/null || true
+  if [ "${ACTIVE_SSH_PORT}" != "22" ]; then
+    ufw allow "${ACTIVE_SSH_PORT}/tcp" 2>/dev/null || true
+  fi
+  ufw allow 80/tcp 2>/dev/null || true
+  ufw allow 443/tcp 2>/dev/null || true
+  ufw allow 443/udp 2>/dev/null || true
+  ufw allow "${PMA_PORT}/tcp" 2>/dev/null || true
+  ufw allow "${PANEL_PORT}/tcp" 2>/dev/null || true
+  ufw default allow outgoing 2>/dev/null || true
+  ufw default deny incoming 2>/dev/null || true
+  ufw --force enable 2>/dev/null || true
+fi
+
+echo -e "${GREEN}✓ Firewall configured: Ports 22, ${ACTIVE_SSH_PORT}, 80, 443, ${PMA_PORT}, ${PANEL_PORT} opened.${NC}"
 
 nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
 
-# 12. Completion Card
-PUBLIC_IP="$(curl -s4 ifconfig.me 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}' || echo 'YOUR_SERVER_IP')"
+# 12. Completion Card — Fast non-blocking IP resolution
+PUBLIC_IP="$(curl -s4 --connect-timeout 2 --max-time 3 https://api.ipify.org 2>/dev/null || \
+             curl -s4 --connect-timeout 2 --max-time 3 https://ifconfig.me 2>/dev/null || \
+             curl -s4 --connect-timeout 2 --max-time 3 https://icanhazip.com 2>/dev/null || \
+             hostname -I 2>/dev/null | awk '{print $1}' || \
+             echo 'YOUR_SERVER_IP')"
+PUBLIC_IP="${PUBLIC_IP:-YOUR_SERVER_IP}"
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"

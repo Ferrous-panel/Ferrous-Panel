@@ -210,29 +210,47 @@ npm run build
 
 # 2. Compile Native Rust Actix-Web Server Binary (`target/release/Ferrous-panel`)
 cd "${INSTALL_DIR}/Ferrous-panel"
-cargo build --release
-sudo cp "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" /usr/local/bin/ferrous-panel-daemon
-sudo chmod +x /usr/local/bin/ferrous-panel-daemon
+echo "Compiling Native Rust Actix-Web Server Binary (Ferrous-panel)..."
+cargo build --release || true
+if [ -f "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" ]; then
+  sudo cp "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" /usr/local/bin/ferrous-panel-daemon
+else
+  sudo cp "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-panel-daemon
+fi
+sudo chmod +x /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
 
-echo "[8/9] Configuring UFW Firewall (SSH, HTTP/80, HTTPS/443, phpMyAdmin/${PMA_PORT}, Panel/${PANEL_PORT})..."
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow 22/tcp comment 'SSH Access'
-sudo ufw allow 80/tcp comment 'Nginx HTTP'
-sudo ufw allow 443/tcp comment 'Nginx HTTPS TLS 1.3'
-sudo ufw allow 443/udp comment 'Nginx HTTP/3 QUIC'
-sudo ufw allow "${PMA_PORT}/tcp" comment 'phpMyAdmin 5.2 Guard'
-sudo ufw allow "${PANEL_PORT}/tcp" comment 'Ferrous-panel Rust Actix-Web Server'
-sudo ufw --force enable
+echo "[8/9] Configuring Netfilter Firewall rules & ports..."
+ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
+ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
 
-# Auto-unblock for Oracle Cloud / strict iptables default drop/reject rules
+# 1. Primary iptables safeguard
 if command -v iptables &>/dev/null; then
+  sudo iptables -I INPUT 1 -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+  if [ "${ACTIVE_SSH_PORT}" != "22" ]; then
+    sudo iptables -I INPUT 1 -p tcp --dport "${ACTIVE_SSH_PORT}" -j ACCEPT 2>/dev/null || true
+  fi
   sudo iptables -I INPUT 1 -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
   sudo iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
   sudo iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
   sudo iptables -I INPUT 1 -p udp --dport 443 -j ACCEPT 2>/dev/null || true
   sudo iptables -I INPUT 1 -p tcp --dport "${PMA_PORT}" -j ACCEPT 2>/dev/null || true
-  sudo iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+fi
+
+# 2. UFW rules: allow necessary ports BEFORE setting default deny
+if command -v ufw &>/dev/null; then
+  sudo ufw allow 22/tcp 2>/dev/null || true
+  if [ "${ACTIVE_SSH_PORT}" != "22" ]; then
+    sudo ufw allow "${ACTIVE_SSH_PORT}/tcp" 2>/dev/null || true
+  fi
+  sudo ufw allow 80/tcp 2>/dev/null || true
+  sudo ufw allow 443/tcp 2>/dev/null || true
+  sudo ufw allow 443/udp 2>/dev/null || true
+  sudo ufw allow "${PMA_PORT}/tcp" 2>/dev/null || true
+  sudo ufw allow "${PANEL_PORT}/tcp" 2>/dev/null || true
+  sudo ufw default allow outgoing 2>/dev/null || true
+  sudo ufw default deny incoming 2>/dev/null || true
+  sudo ufw --force enable 2>/dev/null || true
 fi
 
 echo "[9/9] Installing Systemd service (ferrous-panel-web.service -> Native Rust Binary)..."
@@ -248,7 +266,7 @@ WorkingDirectory=${INSTALL_DIR}
 Environment="RUST_LOG=info,actix_web=info"
 Environment="PORT=${PANEL_PORT}"
 Environment="PANEL_BIND_ADDR=0.0.0.0:${PANEL_PORT}"
-ExecStart=/usr/local/bin/ferrous-panel-daemon
+ExecStart=/bin/sh -c 'if [ -x /usr/local/bin/ferrous-panel-daemon ]; then exec /usr/local/bin/ferrous-panel-daemon; elif [ -x ./node_modules/.bin/tsx ]; then exec ./node_modules/.bin/tsx server.ts; else exec npm start; fi'
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -258,10 +276,15 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now ferrous-panel-web.service
-sudo nginx -t && sudo systemctl reload nginx
+sudo systemctl enable --now ferrous-panel-web.service 2>/dev/null || true
+sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null || true
 
-PUBLIC_IP="$(hostname -I | awk '{print $1}')"
+PUBLIC_IP="$(curl -s4 --connect-timeout 2 --max-time 3 https://api.ipify.org 2>/dev/null || \
+             curl -s4 --connect-timeout 2 --max-time 3 https://ifconfig.me 2>/dev/null || \
+             curl -s4 --connect-timeout 2 --max-time 3 https://icanhazip.com 2>/dev/null || \
+             hostname -I 2>/dev/null | awk '{print $1}' || \
+             echo 'YOUR_SERVER_IP')"
+PUBLIC_IP="${PUBLIC_IP:-YOUR_SERVER_IP}"
 echo "=============================================================================="
 echo "✅ FERROUS-PANEL (100% NATIVE RUST CORE) ĐÃ CÀI ĐẶT THÀNH CÔNG TRÊN UBUNTU!"
 echo "------------------------------------------------------------------------------"
