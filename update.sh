@@ -33,7 +33,7 @@ fi
 
 # Build static assets & Rust core
 echo -e "${BLUE}[*] Building frontend & verifying Rust core...${NC}"
-npm install --prefer-offline 2>/dev/null || npm install
+npm install --legacy-peer-deps --prefer-offline 2>/dev/null || npm install --legacy-peer-deps
 npm run build
 
 # Re-link CLI commands if needed

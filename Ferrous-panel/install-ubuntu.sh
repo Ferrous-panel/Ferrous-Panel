@@ -184,8 +184,14 @@ fi
 
 if ! command -v cargo &> /dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-  export PATH="$HOME/.cargo/bin:$PATH"
 fi
+
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+elif [ -f "/root/.cargo/env" ]; then
+  . "/root/.cargo/env"
+fi
+export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 
 sudo mkdir -p "${INSTALL_DIR}"
 sudo cp -r "${APP_ROOT}/." "${INSTALL_DIR}/"
@@ -199,7 +205,7 @@ fi
 
 # 1. Build static frontend bundle (`dist/`)
 cd "${INSTALL_DIR}"
-npm install
+npm install --legacy-peer-deps
 npm run build
 
 # 2. Compile Native Rust Actix-Web Server Binary (`target/release/Ferrous-panel`)

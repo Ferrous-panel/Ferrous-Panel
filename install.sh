@@ -271,11 +271,17 @@ fi
 if ! command -v cargo &>/dev/null; then
   echo -e "${BLUE}[*] Installing official Rust toolchain (stable)...${NC}"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-  export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
+if [ -f "$HOME/.cargo/env" ]; then
+  . "$HOME/.cargo/env"
+elif [ -f "/root/.cargo/env" ]; then
+  . "/root/.cargo/env"
+fi
+export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
+
 cd "${INSTALL_DIR}"
-npm install --no-audit --prefer-offline 2>/dev/null || npm install
+npm install --legacy-peer-deps --no-audit 2>/dev/null || npm install --legacy-peer-deps
 npm run build
 
 # Install CLI commands
