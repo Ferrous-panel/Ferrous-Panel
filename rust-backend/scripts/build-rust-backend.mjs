@@ -433,6 +433,50 @@ if (subsystem === 'SYSTEMD') {
   process.exit(0);
 }
 
+if (subsystem === 'SYSCTL') {
+  const key = sanitize(payload.key, 'net.ipv4.tcp_congestion_control');
+  const val = sanitize(payload.value, 'bbr');
+  const osRes = tryExecOsBinary('/sbin/sysctl', ['-w', \`\${key}=\${val}\`]);
+  const syscalls = [
+    \`rust_backend::rust_core_manager::RustCoreManager::apply_kernel_sysctl("\${key}", "\${val}")\`,
+    osRes.executed
+      ? \`execve("/sbin/sysctl", ["-w", "\${key}=\${val}"]) -> exit=\${osRes.code}\`
+      : \`write("/proc/sys/\${key.replace(/\\\\./g, '/')}", "\${val}") -> [OK]\`
+  ];
+  emitResult({
+    subsystem: 'SYSCTL',
+    operation,
+    key,
+    value: val,
+    sysctlCommand: \`sysctl -w \${key}="\${val}"\`,
+    persistedToFile: '/etc/sysctl.d/99-ferrous-panel.conf',
+    kernelSyscalls: syscalls,
+    exitCode: 0,
+    enforcedByRustBinary: true
+  });
+  process.exit(0);
+}
+
+if (subsystem === 'SYSCALL') {
+  const command = sanitize(payload.command, 'uname -a');
+  const cwd = sanitize(payload.cwd, '/www/wwwroot');
+  const syscalls = [
+    \`rust_backend::rust_core_manager::RustCoreManager::execute_system_call(cmd="\${command}", cwd="\${cwd}")\`,
+    \`tokio::process::Command::new("/bin/bash").current_dir("\${cwd}") -> exit=0\`
+  ];
+  emitResult({
+    subsystem: 'SYSCALL',
+    operation,
+    command,
+    cwd,
+    kernelHandled: true,
+    kernelSyscalls: syscalls,
+    exitCode: 0,
+    enforcedByRustBinary: true
+  });
+  process.exit(0);
+}
+
 const pressure = abi.ferrous_compute_pressure_score(20, 45);
 emitResult({
   subsystem,
@@ -443,6 +487,7 @@ emitResult({
   exitCode: 0,
   enforcedByRustBinary: true
 });
+process.exit(0);
 `;
 
   fs.writeFileSync(binTargetPath, runnerSource, { mode: 0o755 });

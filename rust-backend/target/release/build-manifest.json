@@ -4,7 +4,7 @@
   "binaryPath": "/app/applet/rust-backend/target/release/ferrous-system-core",
   "wasmKernelPath": "/app/applet/rust-backend/target/release/ferrous_system_core.wasm",
   "sha256": "0b14e8528730502ef6530f7032935279b519823245a8ea7d528c8cb3de2fa039",
-  "builtAt": "2026-11-11T13:06:37.978Z",
+  "builtAt": "2026-11-11T14:00:06.075Z",
   "enforcedSubsystems": [
     "UFW",
     "NGINX",
@@ -64,7 +64,7 @@
       "basicAuthMiddlewareActive": true,
       "cleanInitialStateVerified": true,
       "abiSignature": "FERROUS-CORE-ABI-2.5.0-STRICT",
-      "verifiedAt": "2026-11-11T13:06:37.973Z"
+      "verifiedAt": "2026-11-11T14:00:06.068Z"
     }
   }
 }

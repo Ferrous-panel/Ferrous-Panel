@@ -12,6 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/nginx_engine.rs");
     println!("cargo:rerun-if-changed=src/systemd_engine.rs");
     println!("cargo:rerun-if-changed=src/wasm_exports.rs");
+    println!("cargo:rerun-if-changed=src/rust_core_manager.rs");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| "linux".to_string());
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());

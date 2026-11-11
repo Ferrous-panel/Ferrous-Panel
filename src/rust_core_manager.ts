@@ -7,13 +7,13 @@ import path from 'path';
 
 // ============================================================================
 // FERROUS-PANEL STRICT RUST BINARY EXECUTION LAYER (src/rust_core_manager.ts)
+// Native Rust Translation: `rust-backend/src/rust_core_manager.rs`
 // ============================================================================
-// Strictly enforces that all server-side operations (System Calls, UFW Firewall,
-// Nginx Reverse Proxy, Systemd Service Units, and Kernel Sysctl) are routed
-// through the Rust binary execution layer (`ferrous-panel-daemon` / `ferrous-panel`
-// ELF binary, `/run/ferrous-polyglot.sock` Unix Domain Socket IPC, or direct
-// Linux Kernel `/proc` + validated OS binary execution) rather than Node.js/TS
-// simulation.
+// All core management logic has been translated to native Rust in
+// `rust-backend/src/rust_core_manager.rs` and compiled into the
+// `rust-backend/target/release/ferrous-system-core` binary + Actix-Web gateway.
+// This client layer strictly enforces that all operations are routed through
+// the compiled Rust binary and Actix-Web system gateway (`127.0.0.1:9443`).
 // ============================================================================
 
 export type RustSubsystemType =

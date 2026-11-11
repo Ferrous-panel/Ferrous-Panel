@@ -13,6 +13,7 @@
 mod actix_gateway;
 pub mod models;
 mod nginx_engine;
+pub mod rust_core_manager;
 pub mod server;
 mod systemd_engine;
 mod ufw_engine;
