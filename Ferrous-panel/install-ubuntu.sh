@@ -219,6 +219,16 @@ sudo ufw allow "${PMA_PORT}/tcp" comment 'phpMyAdmin 5.2 Guard'
 sudo ufw allow "${PANEL_PORT}/tcp" comment 'Ferrous-panel Rust Actix-Web Server'
 sudo ufw --force enable
 
+# Auto-unblock for Oracle Cloud / strict iptables default drop/reject rules
+if command -v iptables &>/dev/null; then
+  sudo iptables -I INPUT 1 -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p udp --dport 443 -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p tcp --dport "${PMA_PORT}" -j ACCEPT 2>/dev/null || true
+  sudo iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+fi
+
 echo "[9/9] Installing Systemd service (ferrous-panel-web.service -> Native Rust Binary)..."
 sudo tee /etc/systemd/system/ferrous-panel-web.service > /dev/null <<EOF
 [Unit]

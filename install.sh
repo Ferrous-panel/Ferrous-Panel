@@ -313,8 +313,8 @@ ln -sf /etc/systemd/system/ferrous-panel.service /etc/systemd/system/ferrous-pan
 systemctl daemon-reload
 systemctl enable --now ferrous-panel.service
 
-# 11. Firewall Configuration (UFW)
-echo -e "${BLUE}[8/8] Configuring UFW Netfilter firewall rules...${NC}"
+# 11. Firewall Configuration (UFW & iptables)
+echo -e "${BLUE}[8/8] Configuring UFW Netfilter firewall rules & iptables...${NC}"
 ufw default deny incoming 2>/dev/null || true
 ufw default allow outgoing 2>/dev/null || true
 ufw allow 22/tcp comment 'SSH Remote Access' 2>/dev/null || true
@@ -324,6 +324,16 @@ ufw allow 443/udp comment 'Nginx HTTP/3 QUIC' 2>/dev/null || true
 ufw allow "${PMA_PORT}/tcp" comment 'phpMyAdmin 5.2' 2>/dev/null || true
 ufw allow "${PANEL_PORT}/tcp" comment 'FerrousPanel Web Gateway' 2>/dev/null || true
 ufw --force enable 2>/dev/null || true
+
+# Auto-unblock for Oracle Cloud / strict iptables default drop/reject rules
+if command -v iptables &>/dev/null; then
+  iptables -I INPUT 1 -p tcp --dport "${PANEL_PORT}" -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p udp --dport 443 -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p tcp --dport "${PMA_PORT}" -j ACCEPT 2>/dev/null || true
+  iptables -I INPUT 1 -p tcp --dport 22 -j ACCEPT 2>/dev/null || true
+fi
 
 nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true
 
