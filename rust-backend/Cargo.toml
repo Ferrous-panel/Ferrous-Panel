@@ -1,0 +1,29 @@
+[package]
+name = "ferrous-system-core"
+version = "2.5.0"
+edition = "2021"
+authors = ["FerrousPanel Systems Engineering"]
+description = "Dedicated compiled Rust system binary exclusively handling UFW firewall rule management, Nginx/FerrousX VirtualHost configurations, and Systemd service & Cgroups v2 lifecycle control."
+build = "build.rs"
+
+[[bin]]
+name = "ferrous-system-core"
+path = "src/main.rs"
+
+[lib]
+name = "ferrous_system_core"
+path = "src/wasm_exports.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+actix-web = "4.9"
+tokio = { version = "1.41", features = ["full"] }
+nix = { version = "0.29", features = ["process", "signal", "user", "fs"] }
+base64 = "0.22"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4"] }
+regex = "1.11"
+thiserror = "2.0"

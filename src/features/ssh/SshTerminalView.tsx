@@ -70,8 +70,10 @@ const QUICK_SSH_COMMANDS = [
   { label: 'htop / ps aux', cmd: 'htop' },
   { label: 'cat sshd_config', cmd: 'cat /etc/ssh/sshd_config' },
   { label: 'ufw status', cmd: 'ufw status numbered' },
+  { label: 'ferrousx -t', cmd: 'ferrousx -t' },
   { label: 'nginx -t', cmd: 'nginx -t' },
-  { label: 'free -h (RAM)', cmd: 'free -h' }
+  { label: 'free -h (RAM)', cmd: 'free -h' },
+  { label: 'Switch Web Server (FerrousX/Nginx)', cmd: 'fp 19' }
 ];
 
 const FP_CLI_OPTIONS: {
@@ -188,6 +190,14 @@ const FP_CLI_OPTIONS: {
     title: 'Xóa bỏ Tên Miền Riêng (Trở về đăng nhập bằng IP VPS)',
     command: 'fp 18',
     category: 'admin'
+  },
+  {
+    option: 19,
+    title:
+      'Chuyển đổi Web Server Engine: FerrousX (github.com/Ferrous-panel/FerrousX) ↔ Nginx 1.26',
+    command: 'fp 19 [ferrousx|nginx]',
+    category: 'service',
+    promptPlaceholder: 'Nhập ferrousx (mặc định) hoặc nginx'
   }
 ];
 
@@ -503,7 +513,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
     }
   };
 
-  const vpsInstallCommandSnippet = `bash Ferrous-panel/install-ubuntu.sh --admin-user="${adminUserInput}" --admin-pass="${adminPassInput}"${customDomainInput.trim() ? ` --domain="${customDomainInput.trim()}"` : ''} --port=${panelPortInput} --entrance="${entranceInput}"`;
+  const vpsInstallCommandSnippet = `git clone https://github.com/Ferrous-panel/FerrousX.git /opt/Ferrous-panel && cd /opt/Ferrous-panel && bash Ferrous-panel/install-ubuntu.sh --admin-user="${adminUserInput}" --admin-pass="${adminPassInput}"${customDomainInput.trim() ? ` --domain="${customDomainInput.trim()}"` : ''} --port=${panelPortInput} --entrance="${entranceInput}"`;
 
   const totalRustMemoryKb = sshData.rustModules.reduce(
     (sum, m) => sum + m.memoryFootprintKb,

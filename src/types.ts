@@ -25,6 +25,10 @@ export type WebsiteRuntimeType =
   | 'WebAssembly (WASI Wasmtime)'
   | 'Static HTML / SPA';
 
+export type WebServerEngineType =
+  | 'FerrousX (Rust Web Server)'
+  | 'Nginx 1.26';
+
 export type RewritePresetType =
   | 'rust_proxy'
   | 'nextjs_proxy'
@@ -39,6 +43,7 @@ export interface ManagedApp {
   id: string;
   name: string;
   framework: WebsiteRuntimeType;
+  webServerEngine?: WebServerEngineType;
   runtimeVersion: string;
   domain: string;
   aliases: string[];
@@ -157,6 +162,7 @@ export interface OneClickTemplate {
   buildCommand: string;
   execCommandTemplate: string;
   popularScore: string;
+  gitRepoUrl?: string;
 }
 
 export interface ServerPackageItem {

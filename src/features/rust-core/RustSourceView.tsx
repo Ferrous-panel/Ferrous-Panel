@@ -139,56 +139,56 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
   return (
     <div className="space-y-6">
       {/* Architecture & Mode Switcher Banner */}
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div className="space-y-1">
-            <div className="text-xs font-mono text-orange-600 dark:text-orange-400">
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-6 space-y-4 min-w-0 overflow-hidden">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0">
+          <div className="space-y-1 min-w-0">
+            <div className="text-xs font-mono text-orange-600 dark:text-orange-400 break-words">
               rustc 1.83+ · actix-web 4.9 · cbindgen C-ABI · PyO3 · NAPI-RS · ext-php-rs · CGO · JNI · WASI
             </div>
-            <h1 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+            <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100">
               Nhân Hệ Thống Rust &amp; Trình Biên Dịch Cầu Nối Đa Ngôn Ngữ (Polyglot FFI/IPC Engine)
             </h1>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
               Hệ thống biên dịch cốt lõi <code className="font-mono">src/polyglot_compiler.rs</code> dịch trực tiếp các hàm hệ thống Rust sang C-ABI (<code className="font-mono">cdylib</code>), N-API, PyO3, PHP Zend FFI, Go CGO, Java JNI, .NET P/Invoke và WebAssembly WASI
             </p>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:flex items-center gap-2 w-full lg:w-auto shrink-0">
             <button
               onClick={() => setSubTab('polyglot')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
+              className={`px-3.5 py-2.5 sm:py-2 text-xs font-semibold rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0 ${
                 subTab === 'polyglot'
                   ? 'bg-orange-600 text-white'
                   : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
               }`}
             >
-              <Layers className="w-3.5 h-3.5" />
-              Trình Biên Dịch Đa Ngôn Ngữ (10 Ngôn Ngữ)
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Trình Biên Dịch Đa Ngôn Ngữ (10 Ngôn Ngữ)</span>
             </button>
             <button
               onClick={() => setSubTab('source')}
-              className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
+              className={`px-3.5 py-2.5 sm:py-2 text-xs font-semibold rounded-lg transition-colors inline-flex items-center justify-center gap-1.5 cursor-pointer min-w-0 ${
                 subTab === 'source'
                   ? 'bg-orange-600 text-white'
                   : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
               }`}
             >
-              <Code2 className="w-3.5 h-3.5" />
-              Mã Nguồn Nhân Rust ({files.length} Tệp)
+              <Code2 className="w-3.5 h-3.5 shrink-0" />
+              <span className="truncate">Mã Nguồn Nhân Rust ({files.length} Tệp)</span>
             </button>
           </div>
         </div>
 
-        <div className="p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Terminal className="w-4 h-4 text-orange-400 shrink-0" />
-            <span>
+        <div className="p-3.5 sm:p-4 rounded-lg bg-slate-950 border border-slate-800 text-xs font-mono text-slate-300 flex flex-col sm:flex-row sm:items-center justify-between gap-2 min-w-0">
+          <div className="flex items-start sm:items-center gap-2 min-w-0">
+            <Terminal className="w-4 h-4 text-orange-400 shrink-0 mt-0.5 sm:mt-0" />
+            <span className="break-all">
               cd Ferrous-panel &amp;&amp; cargo build --release &amp;&amp; cbindgen --crate ferrous-panel --output include/ferrous_bridge.h
             </span>
           </div>
-          <span className="text-emerald-400 flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            10/10 Hệ Sinh Thái Ngôn Ngữ Tương Thích (Zero-Copy FFI &amp; Unix Socket IPC)
+          <span className="text-emerald-400 flex items-center gap-1.5 shrink-0">
+            <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+            <span>10/10 Hệ Sinh Thái Tương Thích</span>
           </span>
         </div>
       </section>

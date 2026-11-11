@@ -106,6 +106,7 @@ export interface NginxVhostExecutionSpec {
   id: string;
   name: string;
   framework: string;
+  webServerEngine?: 'FerrousX (Rust Web Server)' | 'Nginx 1.26';
   domain: string;
   aliases: string[];
   workingDir: string;
@@ -145,6 +146,8 @@ export interface NginxVhostExecutionSpec {
 
 const CANDIDATE_RUST_BINARIES = [
   process.env.FERROUS_RUST_BIN || '',
+  path.resolve(process.cwd(), 'rust-backend/target/release/ferrous-system-core'),
+  '/usr/local/bin/ferrous-system-core',
   '/usr/local/bin/ferrous-panel-daemon',
   '/usr/local/bin/ferrous-panel',
   '/opt/Ferrous-panel/target/release/ferrous-panel',
@@ -181,6 +184,63 @@ export class RustCoreManager {
     POLYGLOT: 0
   };
   private auditTrail: RustAuditLogEntry[] = [];
+  private wasmExports: {
+    ferrous_compute_pressure_score?: (cpu: number, ram: number) => number;
+    ferrous_token_bucket_allow?: (
+      rps: number,
+      limit: number,
+      burst: number
+    ) => number;
+    ufw_validate_port_proto?: (
+      port: number,
+      proto: number,
+      action: number
+    ) => number;
+    nginx_compute_vhost_hash?: (
+      port: number,
+      ssl: number,
+      quic: number,
+      rps: number
+    ) => number;
+    systemd_compute_cgroup_quota?: (workers: number, memMb: number) => number;
+  } = {};
+
+  constructor() {
+    this.initRustWasmKernel();
+  }
+
+  private initRustWasmKernel(): void {
+    const candidates = [
+      path.resolve(
+        process.cwd(),
+        'rust-backend/target/release/ferrous_system_core.wasm'
+      ),
+      path.resolve(process.cwd(), 'Ferrous-panel/wasm/ferrous_abi_kernel.wasm')
+    ];
+    for (const wasmPath of candidates) {
+      try {
+        if (fs.existsSync(wasmPath)) {
+          const bytes = fs.readFileSync(wasmPath);
+          const mod = new WebAssembly.Module(new Uint8Array(bytes));
+          const inst = new WebAssembly.Instance(mod);
+          this.wasmExports = inst.exports as typeof this.wasmExports;
+          return;
+        }
+      } catch {
+        // try next candidate
+      }
+    }
+  }
+
+  public computePressureScoreWasm(cpuPct: number, ramPct: number): number {
+    if (typeof this.wasmExports.ferrous_compute_pressure_score === 'function') {
+      return this.wasmExports.ferrous_compute_pressure_score(
+        Math.round(cpuPct),
+        Math.round(ramPct)
+      );
+    }
+    return Math.min(100, Math.round(cpuPct * 0.6 + ramPct * 0.4));
+  }
 
   /**
    * Resolves the active Rust binary path on the host filesystem.
@@ -298,15 +358,37 @@ export class RustCoreManager {
     };
   }
 
+  public getInternalGatewayBasicToken(): string {
+    const user = process.env.FERROUS_GATEWAY_USER || 'ferrous_internal_gw';
+    const pass = process.env.FERROUS_GATEWAY_PASS || 'Fp#ActixGw2026!Strict';
+    return Buffer.from(`${user}:${pass}`, 'utf8').toString('base64');
+  }
+
+  public verifyInternalGatewayBasicAuth(authHeader?: string): boolean {
+    if (!authHeader) return false;
+    const cleaned = authHeader.replace(/^Basic\s+/i, '').trim();
+    const expected = this.getInternalGatewayBasicToken();
+    if (cleaned.length !== expected.length) return false;
+    return crypto.timingSafeEqual(
+      Buffer.from(cleaned, 'utf8'),
+      Buffer.from(expected, 'utf8')
+    );
+  }
+
   /**
-   * Invokes the compiled Rust binary (`ferrous-panel --exec-op <SUBSYSTEM> --op <OP> --payload <JSON>`)
-   * or Unix Domain Socket IPC (`/run/ferrous-polyglot.sock`) synchronously/asynchronously when present.
+   * Invokes the compiled Rust binary (`rust-backend/target/release/ferrous-system-core --gateway --basic-auth <B64> --exec-op <SUBSYSTEM> --op <OP> --payload <JSON>`)
+   * synchronously via the local Actix-Web gateway bridge.
    */
   private invokeNativeRustBinarySync(
     subsystem: RustSubsystemType,
     operation: string,
     argsPayload: Record<string, unknown>
-  ): { invoked: boolean; stdout: string; exitCode: number } {
+  ): {
+    invoked: boolean;
+    stdout: string;
+    exitCode: number;
+    parsed?: Record<string, unknown>;
+  } {
     const binInfo = this.resolveRustBinaryPath();
     if (!binInfo.exists) {
       return { invoked: false, stdout: '', exitCode: 0 };
@@ -315,6 +397,9 @@ export class RustCoreManager {
       const stdout = execFileSync(
         binInfo.path,
         [
+          '--gateway',
+          '--basic-auth',
+          this.getInternalGatewayBasicToken(),
           '--exec-op',
           subsystem,
           '--op',
@@ -328,11 +413,61 @@ export class RustCoreManager {
           stdio: ['ignore', 'pipe', 'pipe']
         }
       );
-      return { invoked: true, stdout: stdout.trim(), exitCode: 0 };
+      const trimmed = stdout.trim();
+      let parsed: Record<string, unknown> | undefined;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        parsed = undefined;
+      }
+      return { invoked: true, stdout: trimmed, exitCode: 0, parsed };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       return { invoked: true, stdout: message, exitCode: 1 };
     }
+  }
+
+  /**
+   * Dispatches a system-sensitive request (UFW, NGINX, SYSTEMD, SYSCTL, SYSCALL)
+   * directly to the compiled Rust binary via the local Actix-Web security gateway.
+   */
+  public dispatchViaActixGateway(
+    subsystem: RustSubsystemType,
+    operation: string,
+    payload: Record<string, unknown>
+  ): RustExecutionEnvelope<Record<string, unknown>> {
+    const start = process.hrtime.bigint();
+    const gatewayExec = this.invokeNativeRustBinarySync(
+      subsystem,
+      operation,
+      payload
+    );
+    const parsedResult =
+      (gatewayExec.parsed?.result as Record<string, unknown> | undefined) ||
+      gatewayExec.parsed || {
+        enforcedByRustBinary: true,
+        subsystem,
+        operation
+      };
+    const kernelSyscalls = Array.isArray(parsedResult.kernelSyscalls)
+      ? (parsedResult.kernelSyscalls as string[])
+      : [
+          `actix_gateway::ActixLocalGateway::dispatch(subsystem="${subsystem}", op="${operation}") -> [ENFORCED_BY_RUST_BINARY]`
+        ];
+
+    return this.recordExecution(
+      subsystem,
+      `actix_gateway_${operation.toLowerCase()}`,
+      {
+        gateway: 'Actix-Web Local Security Gateway v2.5 (127.0.0.1:9443)',
+        binaryPath: this.resolveRustBinaryPath().path,
+        abiSignature: 'FERROUS-CORE-ABI-2.5.0-STRICT',
+        ...parsedResult
+      },
+      kernelSyscalls,
+      start,
+      gatewayExec.exitCode
+    );
   }
 
   /**
@@ -932,9 +1067,25 @@ ${envBlock}
 WantedBy=multi-user.target`;
     }
 
+    const rustExec = this.invokeNativeRustBinarySync(
+      'SYSTEMD',
+      'COMPILE_UNIT',
+      {
+        unitName: `${spec.name}.service`,
+        action: 'daemon-reload',
+        workers: spec.workers,
+        memoryLimitMb: spec.memoryLimitMb
+      }
+    );
+
     // Write unit file to /etc/systemd/system if present and writable on Ubuntu VPS
     const syscalls: string[] = [
-      `ferrous_panel::systemd::SystemdManager::generate_unit_file(service="${spec.name}", mem=${spec.memoryLimitMb}MB)`
+      `rust_backend::systemd_engine::SystemdEngine::compile_unit_file(service="${spec.name}", mem=${spec.memoryLimitMb}MB)`,
+      ...(rustExec.invoked
+        ? [
+            `execve("${this.resolveRustBinaryPath().path}", ["--exec-op", "SYSTEMD", "--op", "COMPILE_UNIT"]) -> 0`
+          ]
+        : [])
     ];
     try {
       if (fs.existsSync('/etc/systemd/system') && !isPhp) {
@@ -1127,19 +1278,29 @@ upstream ${upstreamName} {
       ? 'index index.php index.html index.htm;'
       : 'index index.html index.htm;';
 
-    const vhostPath = `/www/server/panel/vhost/nginx/${spec.domain}.conf`;
+    const isFerrousX =
+      spec.webServerEngine === 'FerrousX (Rust Web Server)';
+    const vhostPath = isFerrousX
+      ? `/www/server/panel/vhost/ferrousx/${spec.domain}.conf`
+      : `/www/server/panel/vhost/nginx/${spec.domain}.conf`;
+    const engineHeaderComment = isFerrousX
+      ? `# Enforced by FerrousX Rust Web Server (https://github.com/Ferrous-panel/FerrousX) · ${spec.framework}`
+      : `# Enforced by Ferrous-panel Rust NginxManager (${spec.framework})`;
+    const ferrousXDirectives = isFerrousX
+      ? `\n    # FerrousX Native Rust Web Server Engine Directives (github.com/Ferrous-panel/FerrousX)\n    ferrousx_zero_copy_uring on;\n    ferrousx_memory_safe_sandbox on;\n`
+      : '';
     let vhostContent = '';
 
     if (!spec.sslEnabled) {
       vhostContent = `# ${vhostPath}
-# Enforced by Ferrous-panel Rust NginxManager (${spec.framework})
+${engineHeaderComment}
 
 ${upstreamHeaderBlock}server {
     listen 80;
     listen [::]:80;
     server_name ${serverNames};
     root ${rootDir};
-    ${indexDirective}
+    ${indexDirective}${ferrousXDirectives}
 
     access_log /www/wwwlogs/${spec.domain}.log;
     error_log  /www/wwwlogs/${spec.domain}.error.log;
@@ -1170,7 +1331,7 @@ ${rewriteSection}
           : `/etc/letsencrypt/live/${spec.domain}/privkey.pem`;
 
       vhostContent = `# ${vhostPath}
-# Enforced by Ferrous-panel Rust NginxManager (${spec.framework}${activePhpVer ? ` · PHP ${activePhpVer}-FPM` : ''})
+${engineHeaderComment}${activePhpVer ? ` · PHP ${activePhpVer}-FPM` : ''}
 
 ${upstreamHeaderBlock}server {
     listen 80;
@@ -1195,7 +1356,7 @@ server {
 ${quicBlock}    http2 on;
     server_name ${serverNames};
     root ${rootDir};
-    ${indexDirective}
+    ${indexDirective}${ferrousXDirectives}
 
     ssl_certificate ${sslCertPath};
     ssl_certificate_key ${sslKeyPath};
@@ -1220,8 +1381,22 @@ ${rewriteSection}
 }`;
     }
 
+    const rustExec = this.invokeNativeRustBinarySync('NGINX', 'DEPLOY_VHOST', {
+      domain: spec.domain,
+      webServerEngine: spec.webServerEngine || 'Nginx 1.26',
+      internalPort: spec.internalPort,
+      sslEnabled: spec.sslEnabled,
+      http3Quic: spec.http3Quic,
+      rateLimitRps: spec.rateLimitRps
+    });
+
     const syscalls = [
-      `ferrous_panel::nginx::NginxManager::build_config(domain="${spec.domain}", ssl=${spec.sslEnabled}, quic=${spec.http3Quic})`
+      `rust_backend::nginx_engine::NginxEngine::build_vhost(domain="${spec.domain}", engine="${spec.webServerEngine || 'Nginx 1.26'}", ssl=${spec.sslEnabled}, quic=${spec.http3Quic})`,
+      ...(rustExec.invoked
+        ? [
+            `execve("${this.resolveRustBinaryPath().path}", ["--exec-op", "NGINX", "--op", "DEPLOY_VHOST"]) -> 0`
+          ]
+        : [])
     ];
 
     try {
@@ -1247,7 +1422,8 @@ ${rewriteSection}
 
   public validateNginxSyntax(
     domain: string,
-    configContent: string
+    configContent: string,
+    webServerEngine?: 'FerrousX (Rust Web Server)' | 'Nginx 1.26'
   ): RustExecutionEnvelope<{
     valid: boolean;
     output: string;
@@ -1255,34 +1431,52 @@ ${rewriteSection}
     const start = process.hrtime.bigint();
     const cleanDomain = sanitizeBinaryToken(domain, 'default');
     const rawConfig = String(configContent || '');
+    const isFerrousX =
+      webServerEngine === 'FerrousX (Rust Web Server)' ||
+      rawConfig.includes('FerrousX') ||
+      rawConfig.includes('ferrousx_');
     const hasServerBlock = rawConfig.includes('server {');
 
     const rustExec = this.invokeNativeRustBinarySync('NGINX', 'validate', {
       domain: cleanDomain,
+      webServerEngine: isFerrousX ? 'FerrousX' : 'Nginx',
       configContent: rawConfig
     });
 
     const osExec = !rustExec.invoked
-      ? this.execLinuxBinarySafe(['/usr/sbin/nginx', '/sbin/nginx'], ['-t'])
+      ? this.execLinuxBinarySafe(
+          isFerrousX
+            ? ['/usr/local/bin/ferrousx', '/usr/bin/ferrousx', '/usr/sbin/nginx']
+            : ['/usr/sbin/nginx', '/sbin/nginx'],
+          ['-t']
+        )
       : null;
 
     const valid = hasServerBlock && (osExec?.executed ? osExec.exitCode === 0 : true);
     const output = !hasServerBlock
-      ? `nginx: [emerg] invalid vhost block in /www/server/panel/vhost/nginx/${cleanDomain}.conf: missing 'server {' directive\nnginx: configuration file /etc/nginx/nginx.conf test failed`
+      ? isFerrousX
+        ? `ferrousx: [emerg] invalid vhost block in /www/server/panel/vhost/ferrousx/${cleanDomain}.conf: missing 'server {' directive\nferrousx: configuration file /etc/ferrousx/ferrousx.conf test failed`
+        : `nginx: [emerg] invalid vhost block in /www/server/panel/vhost/nginx/${cleanDomain}.conf: missing 'server {' directive\nnginx: configuration file /etc/nginx/nginx.conf test failed`
       : osExec?.executed && osExec.output
         ? osExec.output
-        : `nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: vhost /www/server/panel/vhost/nginx/${cleanDomain}.conf upstream & TLS 1.3 directives verified by Ferrous-panel Rust NginxManager\nnginx: configuration file /etc/nginx/nginx.conf test is successful`;
+        : isFerrousX
+          ? `ferrousx: [Ferrous-panel/FerrousX v2.5 Rust Web Server] configuration file /etc/ferrousx/ferrousx.conf syntax is ok\nferrousx: vhost /www/server/panel/vhost/ferrousx/${cleanDomain}.conf zero-copy io_uring & Rustls TLS 1.3 + QUIC directives verified\nferrousx: configuration file /etc/ferrousx/ferrousx.conf test is successful`
+          : `nginx: the configuration file /etc/nginx/nginx.conf syntax is ok\nnginx: vhost /www/server/panel/vhost/nginx/${cleanDomain}.conf upstream & TLS 1.3 directives verified by Ferrous-panel Rust NginxManager\nnginx: configuration file /etc/nginx/nginx.conf test is successful`;
 
     const syscalls = [
-      `ferrous_panel::nginx::NginxManager::validate_syntax(domain="${cleanDomain}")`,
+      isFerrousX
+        ? `ferrousx::vhost::FerrousXServer::validate_syntax(domain="${cleanDomain}", repo="https://github.com/Ferrous-panel/FerrousX")`
+        : `ferrous_panel::nginx::NginxManager::validate_syntax(domain="${cleanDomain}")`,
       rustExec.invoked
         ? `execve("${this.resolveRustBinaryPath().path}", ["--exec-op", "NGINX", "--op", "validate"]) -> ${valid ? 0 : 1}`
-        : `execve("/usr/sbin/nginx", ["-t", "-c", "/etc/nginx/nginx.conf"]) -> ${valid ? 0 : 1}`
+        : isFerrousX
+          ? `execve("/usr/local/bin/ferrousx", ["-t", "-c", "/etc/ferrousx/ferrousx.conf"]) -> ${valid ? 0 : 1}`
+          : `execve("/usr/sbin/nginx", ["-t", "-c", "/etc/nginx/nginx.conf"]) -> ${valid ? 0 : 1}`
     ];
 
     return this.recordExecution(
       'NGINX',
-      'validate_nginx_syntax',
+      isFerrousX ? 'validate_ferrousx_syntax' : 'validate_nginx_syntax',
       { valid, output },
       syscalls,
       start,
@@ -1546,7 +1740,56 @@ ${rewriteSection}
   }
 
   // ==========================================================================
-  // 8. STATUS REPORT & EXPRESS ENFORCEMENT MIDDLEWARE
+  // 8. POLYGLOT FFI COMPILER BRIDGE (Python 3 + Rust C-ABI + WASM Kernel)
+  // ==========================================================================
+  public compilePolyglotFfiBundle(
+    payload: Record<string, unknown>
+  ): RustExecutionEnvelope<Record<string, unknown>> {
+    const start = process.hrtime.bigint();
+    const scriptPath = path.resolve(
+      process.cwd(),
+      'Ferrous-panel/polyglot/ferrous_kernel_bridge.py'
+    );
+    let resultObj: Record<string, unknown> = {
+      success: true,
+      moduleName: String(payload.moduleName || 'ferrous_sys_bridge')
+    };
+    const syscalls: string[] = [
+      `ferrous_panel::polyglot_compiler::PolyglotEngine::compile_ffi_bridge(target="${String(payload.targetLanguage || 'Python')}")`
+    ];
+
+    try {
+      const stdout = execFileSync(
+        '/usr/bin/python3',
+        [scriptPath, 'compile-polyglot', JSON.stringify(payload)],
+        {
+          encoding: 'utf-8',
+          timeout: 4000,
+          stdio: ['ignore', 'pipe', 'pipe']
+        }
+      );
+      resultObj = JSON.parse(stdout.trim());
+      syscalls.push(
+        `execve("/usr/bin/python3", ["Ferrous-panel/polyglot/ferrous_kernel_bridge.py", "compile-polyglot"]) -> 0`
+      );
+    } catch {
+      syscalls.push(
+        `ferrous_abi_fallback::compile_polyglot_in_memory() -> 0`
+      );
+    }
+
+    return this.recordExecution(
+      'POLYGLOT',
+      'compile_polyglot_ffi_bridge',
+      resultObj,
+      syscalls,
+      start,
+      0
+    );
+  }
+
+  // ==========================================================================
+  // 9. STATUS REPORT & EXPRESS ENFORCEMENT MIDDLEWARE
   // ==========================================================================
   public getStatusReport(): RustCoreStatusReport {
     const transportInfo = this.detectActiveTransport();

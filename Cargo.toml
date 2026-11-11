@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust-backend",
+    "Ferrous-panel",
+]
+
+[workspace.package]
+version = "2.5.0"
+edition = "2021"
+authors = ["FerrousPanel Systems Engineering"]
+license = "MIT"
+repository = "https://github.com/Ferrous-panel/FerrousX"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

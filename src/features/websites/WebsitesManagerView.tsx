@@ -30,6 +30,7 @@ import {
   ManagedApp,
   RedirectRuleItem,
   RewritePresetType,
+  WebServerEngineType,
   WebsiteLiveTestResult
 } from '../types';
 
@@ -224,6 +225,9 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
   // Editable states inside Site Configuration Modal
   const [aliasesText, setAliasesText] = useState('');
   const [runSubDir, setRunSubDir] = useState('/');
+  const [webServerEngine, setWebServerEngine] = useState<WebServerEngineType>(
+    'FerrousX (Rust Web Server)'
+  );
   const [phpVersion, setPhpVersion] = useState<
     '8.4' | '8.3' | '8.2' | '8.1' | '7.4' | 'None'
   >('None');
@@ -269,6 +273,9 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
     if (selectedApp) {
       setAliasesText((selectedApp.aliases || []).join('\n'));
       setRunSubDir(selectedApp.runSubDir || '/');
+      setWebServerEngine(
+        selectedApp.webServerEngine || 'FerrousX (Rust Web Server)'
+      );
       setPhpVersion(
         selectedApp.phpVersion ||
           (selectedApp.framework.includes('PHP') ? '8.3' : 'None')
@@ -374,6 +381,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
           .map((s) => s.trim())
           .filter(Boolean),
         runSubDir,
+        webServerEngine,
         phpVersion,
         redirects,
         hotlinkProtection: hotlinkConfig,
@@ -400,7 +408,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
         envVars: envVars.filter((e) => e.key.trim().length > 0)
       });
       setStatusToast(
-        `Đã lưu cấu hình Website ${selectedApp.domain} (PHP: ${phpVersion}) & nạp lại Nginx/Systemd thành công!`
+        `Đã lưu cấu hình Website ${selectedApp.domain} (Web Server: ${webServerEngine} · PHP: ${phpVersion}) & nạp lại cấu hình thành công!`
       );
       setTimeout(() => setStatusToast(null), 4000);
     } finally {
@@ -445,7 +453,8 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           domain: selectedApp.domain,
-          configContent: nginxRaw
+          configContent: nginxRaw,
+          webServerEngine
         })
       });
       if (res.ok) {
@@ -673,7 +682,20 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                       {site.framework}
                     </div>
                     <div className="text-slate-500 font-mono">
-                      RAM: {site.memoryUsedMb}/{site.memoryLimitMb} MB · P99{' '}
+                      <span
+                        className={
+                          (site.webServerEngine ||
+                            'FerrousX (Rust Web Server)') ===
+                          'FerrousX (Rust Web Server)'
+                            ? 'text-orange-600 dark:text-orange-400 font-semibold'
+                            : 'text-sky-600 dark:text-sky-400 font-semibold'
+                        }
+                      >
+                        {site.webServerEngine === 'Nginx 1.26'
+                          ? 'Nginx 1.26'
+                          : 'FerrousX Rust'}
+                      </span>{' '}
+                      · RAM: {site.memoryUsedMb}/{site.memoryLimitMb} MB · P99{' '}
                       {site.p99LatencyMs}ms
                     </div>
                   </td>
@@ -942,7 +964,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                   },
                   {
                     id: 'nginx_conf',
-                    label: 'File cấu hình Vhost Nginx',
+                    label: 'VHost (FerrousX / Nginx)',
                     icon: ShieldCheck
                   },
                   {
@@ -1015,6 +1037,49 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                             /build/client (Chuẩn SvelteKit 2)
                           </option>
                         </select>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-xs font-medium text-slate-600 dark:text-slate-400">
+                        Tùy chọn Web Server Engine (FerrousX vs Nginx)
+                      </label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setWebServerEngine('FerrousX (Rust Web Server)')
+                          }
+                          className={`p-3 rounded-lg border text-left transition-colors cursor-pointer ${
+                            webServerEngine === 'FerrousX (Rust Web Server)'
+                              ? 'border-orange-500 bg-orange-500/10 text-slate-900 dark:text-white'
+                              : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          <div className="text-xs font-bold font-mono text-orange-600 dark:text-orange-400">
+                            FerrousX (Rust Web Server)
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                            github.com/Ferrous-panel/FerrousX · Tokio + Hyper + io_uring
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setWebServerEngine('Nginx 1.26')}
+                          className={`p-3 rounded-lg border text-left transition-colors cursor-pointer ${
+                            webServerEngine === 'Nginx 1.26'
+                              ? 'border-orange-500 bg-orange-500/10 text-slate-900 dark:text-white'
+                              : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-600 dark:text-slate-400'
+                          }`}
+                        >
+                          <div className="text-xs font-bold font-mono text-sky-600 dark:text-sky-400">
+                            Nginx 1.26 (Mainline C Daemon)
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                            Web Server truyền thống tương thích epoll + FastCGI
+                          </div>
+                        </button>
                       </div>
                     </div>
 
@@ -1537,6 +1602,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                           type="text"
                           value={gitRepoUrl}
                           onChange={(e) => setGitRepoUrl(e.target.value)}
+                          placeholder="https://github.com/Ferrous-panel/FerrousX.git"
                           className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
                         />
                       </div>
@@ -1700,18 +1766,40 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
 
                 {modalTab === 'nginx_conf' && (
                   <div className="space-y-3">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-xs font-mono text-slate-500">
-                        /www/server/panel/vhost/nginx/{selectedApp.domain}.conf
+                        {webServerEngine === 'FerrousX (Rust Web Server)'
+                          ? `/www/server/panel/vhost/ferrousx/${selectedApp.domain}.conf`
+                          : `/www/server/panel/vhost/nginx/${selectedApp.domain}.conf`}
                       </span>
-                      <button
-                        type="button"
-                        onClick={handleValidateNginx}
-                        className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        <CheckCircle2 className="w-3.5 h-3.5" />
-                        Kiểm tra cú pháp (nginx -t)
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <select
+                          value={webServerEngine}
+                          onChange={(e) =>
+                            setWebServerEngine(
+                              e.target.value as WebServerEngineType
+                            )
+                          }
+                          className="px-2.5 py-1.5 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
+                        >
+                          <option value="FerrousX (Rust Web Server)">
+                            FerrousX (github.com/Ferrous-panel/FerrousX)
+                          </option>
+                          <option value="Nginx 1.26">Nginx 1.26</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={handleValidateNginx}
+                          className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Kiểm tra cú pháp (
+                          {webServerEngine === 'FerrousX (Rust Web Server)'
+                            ? 'ferrousx -t'
+                            : 'nginx -t'}
+                          )
+                        </button>
+                      </div>
                     </div>
                     <textarea
                       rows={12}
@@ -1779,7 +1867,11 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                       <Save className="w-3.5 h-3.5" />
                       {busyAction === 'save'
                         ? 'Đang lưu & Reload...'
-                        : 'Lưu Cấu hình & Reload Nginx'}
+                        : `Lưu Cấu hình & Reload ${
+                            webServerEngine === 'FerrousX (Rust Web Server)'
+                              ? 'FerrousX'
+                              : 'Nginx'
+                          }`}
                     </button>
                   </div>
                 </div>

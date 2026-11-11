@@ -4,9 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "start": "tsx server.ts",
+    "build:rust": "node rust-backend/scripts/build-rust-backend.mjs",
+    "dev": "node rust-backend/scripts/build-rust-backend.mjs && tsx server.ts",
+    "build": "node rust-backend/scripts/build-rust-backend.mjs && vite build",
+    "start": "node rust-backend/scripts/build-rust-backend.mjs && tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

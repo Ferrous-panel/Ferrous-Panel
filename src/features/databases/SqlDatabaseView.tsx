@@ -462,24 +462,24 @@ ${
   return (
     <div className="space-y-6">
       {/* Top Summary Header */}
-      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className="space-y-1">
-          <div className="text-xs font-mono text-orange-600 dark:text-orange-400 flex items-center gap-2">
+      <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0 overflow-hidden">
+        <div className="space-y-1 min-w-0">
+          <div className="text-xs font-mono text-orange-600 dark:text-orange-400 flex flex-wrap items-center gap-x-2 gap-y-1">
             <span>Rust Core: Ferrous-panel/src/database.rs</span>
             <span>·</span>
             <span>MariaDB 11.4.4 LTS &amp; PostgreSQL 17.2</span>
             <span>·</span>
             <span>phpMyAdmin 5.2.1 (Port {pmaPort})</span>
           </div>
-          <h1 className="text-lg font-bold text-slate-900 dark:text-slate-100">
+          <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100">
             Quản trị Cơ sở Dữ liệu SQL, Cấu hình MySQL <code className="font-mono">my.cnf</code> &amp; phpMyAdmin 5.2
           </h1>
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
             Xử lý trực tiếp bởi module Rust <code className="font-mono">DatabaseManager</code>: quản lý CSDL MariaDB/PostgreSQL, thực thi SQL, phpMyAdmin 5.2 SSO và Nginx Guard.
           </p>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
+        <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
           <button
             onClick={() => setSubTab('phpmyadmin')}
             className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${

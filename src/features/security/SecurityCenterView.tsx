@@ -122,28 +122,28 @@ export const SecurityCenterView: React.FC<SecurityCenterViewProps> = ({
     <div className="space-y-8">
       {/* Section 0: Multi-Layer Anti-Hacking Shield (eBPF/XDP DDoS + Rust Pingora L7 WAF + FIM SHA-256) */}
       {shield && (
-        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">
-          <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-            <div className="space-y-1">
-              <div className="text-xs font-mono text-orange-600 dark:text-orange-400">
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden min-w-0">
+          <div className="p-4 sm:p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0">
+            <div className="space-y-1 min-w-0">
+              <div className="text-xs font-mono text-orange-600 dark:text-orange-400 break-words">
                 Ferrous-panel/src/security.rs · eBPF/XDP Driver Filter · Rust Pingora L7 WAF · SHA-256 FIM
               </div>
-              <h2 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Shield className="w-5 h-5 text-orange-600 dark:text-orange-400" />
-                Lá Chắn Chống Tấn Công Đa Tầng (eBPF/XDP Anti-DDoS &amp; Pingora Layer-7 WAF)
+              <h2 className="text-base sm:text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Shield className="w-5 h-5 text-orange-600 dark:text-orange-400 shrink-0" />
+                <span>Lá Chắn Chống Tấn Công Đa Tầng (eBPF/XDP Anti-DDoS &amp; Pingora Layer-7 WAF)</span>
               </h2>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
                 Chặn gói tin DDoS ngay tại tầng card mạng Linux (<code className="font-mono">XDP_DROP</code>) và lọc độc hại SQLi, RCE, SSRF, Path Traversal trên luồng proxy Rust trước khi chạm tới ứng dụng.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 shrink-0">
-              <div className="inline-flex items-center p-1 rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800">
+            <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+              <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 w-full sm:w-auto">
                 <button
                   type="button"
                   onClick={() => handleModeSwitch('normal')}
                   disabled={switchingMode !== null}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`flex-1 sm:flex-initial px-3 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
                     shield.protectionMode === 'normal'
                       ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -155,7 +155,7 @@ export const SecurityCenterView: React.FC<SecurityCenterViewProps> = ({
                   type="button"
                   onClick={() => handleModeSwitch('elevated')}
                   disabled={switchingMode !== null}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`flex-1 sm:flex-initial px-3 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer ${
                     shield.protectionMode === 'elevated'
                       ? 'bg-amber-600 text-white'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
@@ -167,14 +167,14 @@ export const SecurityCenterView: React.FC<SecurityCenterViewProps> = ({
                   type="button"
                   onClick={() => handleModeSwitch('under_attack')}
                   disabled={switchingMode !== null}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${
+                  className={`flex-1 sm:flex-initial justify-center px-3 py-1.5 text-xs font-semibold rounded-md transition-colors inline-flex items-center gap-1.5 cursor-pointer ${
                     shield.protectionMode === 'under_attack'
                       ? 'bg-rose-600 text-white'
                       : 'text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30'
                   }`}
                 >
-                  <Flame className="w-3.5 h-3.5" />
-                  Chống DDoS Khẩn cấp (Lockdown)
+                  <Flame className="w-3.5 h-3.5 shrink-0" />
+                  <span>Chống DDoS Khẩn cấp (Lockdown)</span>
                 </button>
               </div>
 
@@ -182,12 +182,12 @@ export const SecurityCenterView: React.FC<SecurityCenterViewProps> = ({
                 type="button"
                 onClick={handleFimScanClick}
                 disabled={scanningFim}
-                className="px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+                className="w-full sm:w-auto justify-center px-3.5 py-2 text-xs font-semibold text-slate-800 dark:text-slate-100 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg transition-colors inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <RefreshCw
-                  className={`w-3.5 h-3.5 text-emerald-500 ${scanningFim ? 'animate-spin' : ''}`}
+                  className={`w-3.5 h-3.5 text-emerald-500 shrink-0 ${scanningFim ? 'animate-spin' : ''}`}
                 />
-                {scanningFim ? 'Đang quét SHA-256...' : 'Quét Toàn Vẹn Tệp (FIM)'}
+                <span>{scanningFim ? 'Đang quét SHA-256...' : 'Quét Toàn Vẹn Tệp (FIM)'}</span>
               </button>
             </div>
           </div>

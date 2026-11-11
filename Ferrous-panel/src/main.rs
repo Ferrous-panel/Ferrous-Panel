@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 mod cpanel_tools;
 mod database;
+pub mod ebpf_xdp_shield;
+pub mod ferrousx_engine;
 mod file_manager;
 mod git_deploy;
 mod mail_server;
@@ -28,6 +30,7 @@ mod rust_packages;
 mod security;
 mod ssh_terminal;
 mod systemd;
+pub mod wasm_abi_kernel;
 
 use cpanel_tools::{BackupArchive, CronJobEntry, DnsRecordEntry, SftpChrootAccount};
 use database::{

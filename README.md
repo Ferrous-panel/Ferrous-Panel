@@ -2,10 +2,11 @@
 
 <img src="public/favicon.svg" alt="FerrousPanel Logo" width="96" height="96" />
 
-# FerrousPanel v2.5
+# FerrousPanel v2.5 (FerrousX)
 
 **100% Rust-Core Ubuntu Server Control Panel · Polyglot FFI/IPC Engine · Strict Rust Binary Execution Layer**
 
+[![GitHub Repo](https://img.shields.io/badge/GitHub-Ferrous--panel%2FFerrousX-181717?logo=github)](https://github.com/Ferrous-panel/FerrousX)
 [![Rust Engine](https://img.shields.io/badge/Rust-1.83%2B%20(LTO%20Release)-f97316?logo=rust)](Ferrous-panel/Cargo.toml)
 [![Actix-Web](https://img.shields.io/badge/Actix--Web-4.9.0-10b981)](Ferrous-panel/src/main.rs)
 [![Tokio Runtime](https://img.shields.io/badge/Tokio-1.41%20Async-38bdf8)](Ferrous-panel/src/main.rs)
@@ -132,13 +133,15 @@ FerrousPanel includes an integrated **Polyglot Compiler (`Ferrous-panel/src/poly
 
 ---
 
-## Quick Start & Installation
+## Quick Start & Installation (`https://github.com/Ferrous-panel/FerrousX`)
 
-### 1. One-Command Ubuntu 22.04 / 24.04 LTS Production Install
+### 1. Clone from Official GitHub & Run Ubuntu 22.04 / 24.04 LTS Production Installer
 
-Run the installer as `root` on a fresh Ubuntu VPS. You can customize the administrator credentials, SQL root password, and listening port via CLI flags:
+Run the installer as `root` on a fresh Ubuntu VPS to clone `https://github.com/Ferrous-panel/FerrousX.git` and provision the Rust core:
 
 ```bash
+git clone https://github.com/Ferrous-panel/FerrousX.git /opt/Ferrous-panel
+cd /opt/Ferrous-panel
 chmod +x Ferrous-panel/install-ubuntu.sh
 sudo ./Ferrous-panel/install-ubuntu.sh \
   --admin-user admin_ferrous \

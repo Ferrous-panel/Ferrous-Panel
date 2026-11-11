@@ -28,9 +28,25 @@ pub struct GitDeployResult {
     pub build_logs: Vec<String>,
 }
 
+pub const FERROUSX_GITHUB_REPO: &str = "https://github.com/Ferrous-panel/FerrousX.git";
+
 pub struct GitDeployEngine;
 
 impl GitDeployEngine {
+    /// Khởi tạo cấu hình Git Deploy mặc định cho dự án chính thức Ferrous-panel/FerrousX
+    pub fn default_ferrousx_spec(app_id: &str, domain: &str) -> GitDeploySpec {
+        GitDeploySpec {
+            app_id: app_id.to_string(),
+            domain: domain.to_string(),
+            repo_url: FERROUSX_GITHUB_REPO.to_string(),
+            branch: "main".to_string(),
+            working_dir: format!("/www/wwwroot/{}", domain),
+            build_script: "cd Ferrous-panel && cargo build --release && cd .. && npm run build"
+                .to_string(),
+            systemd_unit_name: format!("ferrous-{}", domain.replace('.', "-")),
+        }
+    }
+
     /// Thực thi quy trình kéo mã nguồn Git, biên dịch bản phát hành và reload Systemd service
     pub async fn trigger_atomic_deploy(spec: &GitDeploySpec) -> io::Result<GitDeployResult> {
         info!(

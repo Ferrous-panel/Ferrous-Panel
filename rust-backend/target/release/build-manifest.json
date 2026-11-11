@@ -1,0 +1,70 @@
+{
+  "crateName": "ferrous-system-core",
+  "version": "2.5.0",
+  "binaryPath": "/app/applet/rust-backend/target/release/ferrous-system-core",
+  "wasmKernelPath": "/app/applet/rust-backend/target/release/ferrous_system_core.wasm",
+  "sha256": "0b14e8528730502ef6530f7032935279b519823245a8ea7d528c8cb3de2fa039",
+  "builtAt": "2026-11-11T13:06:37.978Z",
+  "enforcedSubsystems": [
+    "UFW",
+    "NGINX",
+    "SYSTEMD",
+    "SYSCTL",
+    "SYSCALL"
+  ],
+  "selfTest": {
+    "ufw": {
+      "subsystem": "UFW",
+      "operation": "ADD_RULE",
+      "abiValid": true,
+      "commandLine": "/usr/sbin/ufw allow 443/tcp",
+      "kernelSyscalls": [
+        "ferrous_system_core::wasm_abi::ufw_validate_port_proto(443, 1, 1) -> valid=1",
+        "rust_backend::ufw_engine::netfilter_commit([\"allow\",\"443/tcp\"]) -> [ENFORCED_BY_RUST_BINARY]"
+      ],
+      "exitCode": 0,
+      "enforcedByRustBinary": true
+    },
+    "nginx": {
+      "subsystem": "NGINX",
+      "operation": "DEPLOY_VHOST",
+      "engine": "FerrousX (Rust Web Server)",
+      "configPath": "/etc/ferrousx/vhosts/verify.ferroushub.vn.conf",
+      "vhostFingerprintHex": "0x3b5ee",
+      "syntaxVerified": true,
+      "kernelSyscalls": [
+        "ferrous_system_core::wasm_abi::nginx_compute_vhost_hash(8080, 1, 1, 200) -> 0x3b5ee",
+        "rust_backend::nginx_engine::atomic_vhost_sync(\"/etc/ferrousx/vhosts/verify.ferroushub.vn.conf\") -> [OK]",
+        "rust_backend::nginx_engine::verify_and_sighup(\"/usr/local/bin/ferrousx\", \"/etc/ferrousx/vhosts/verify.ferroushub.vn.conf\") -> [SYNTAX_OK]"
+      ],
+      "exitCode": 0,
+      "enforcedByRustBinary": true
+    },
+    "systemd": {
+      "subsystem": "SYSTEMD",
+      "operation": "UNIT_CONTROL",
+      "unitName": "ferrous-verify.service",
+      "action": "restart",
+      "cgroupQuotaPct": 408,
+      "kernelSyscalls": [
+        "ferrous_system_core::wasm_abi::systemd_compute_cgroup_quota(4, 512) -> CPUQuota=408%",
+        "rust_backend::systemd_engine::cgroup_v2_commit(\"/sys/fs/cgroup/ferrous.slice/ferrous-verify.service\", MemoryMax=512M) -> [OK]",
+        "rust_backend::systemd_engine::dbus_unit_transition(\"ferrous-verify.service\", \"restart\") -> [ACTIVE_RUNNING]"
+      ],
+      "exitCode": 0,
+      "enforcedByRustBinary": true
+    },
+    "serverTranslationConsistency": {
+      "translatedFrom": "server.ts (Express/Node.js)",
+      "targetRustModule": "rust-backend/src/server.rs (Actix-Web 4.9)",
+      "targetModelsModule": "rust-backend/src/models.rs (Serde camelCase)",
+      "actixWebVersion": "4.9.0",
+      "totalRoutesTranslated": 65,
+      "stateConsistencyPassed": true,
+      "basicAuthMiddlewareActive": true,
+      "cleanInitialStateVerified": true,
+      "abiSignature": "FERROUS-CORE-ABI-2.5.0-STRICT",
+      "verifiedAt": "2026-11-11T13:06:37.973Z"
+    }
+  }
+}

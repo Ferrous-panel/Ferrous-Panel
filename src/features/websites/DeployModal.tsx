@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { X } from 'lucide-react';
-import { WebsiteRuntimeType } from '../types';
+import { Server, X } from 'lucide-react';
+import { WebServerEngineType, WebsiteRuntimeType } from '../types';
 
 interface DeployModalProps {
   isOpen: boolean;
@@ -8,6 +8,7 @@ interface DeployModalProps {
   onDeploy: (payload: {
     name: string;
     framework: WebsiteRuntimeType;
+    webServerEngine: WebServerEngineType;
     domain: string;
     aliases: string[];
     internalPort: number;
@@ -51,6 +52,8 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [aliasesText, setAliasesText] = useState('');
   const [framework, setFramework] =
     useState<WebsiteRuntimeType>('Actix-Web (Rust)');
+  const [webServerEngine, setWebServerEngine] =
+    useState<WebServerEngineType>('FerrousX (Rust Web Server)');
   const [workingDir, setWorkingDir] = useState('/www/wwwroot/');
   const [runSubDir, setRunSubDir] = useState('/');
   const [internalPort, setInternalPort] = useState(8080);
@@ -182,6 +185,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
       await onDeploy({
         name: nameSlug,
         framework,
+        webServerEngine,
         domain: clean,
         aliases,
         internalPort,
@@ -216,10 +220,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         <div className="px-6 py-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/70 dark:bg-slate-950/50">
           <div>
             <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
-              Thêm Website Mới (Tất cả Framework &amp; Ngôn ngữ chạy trên Nhân Rust)
+              Thêm Website Mới (Tùy chọn Web Server FerrousX Rust hoặc Nginx 1.26)
             </h2>
             <p className="text-xs text-slate-500 dark:text-slate-400">
-              Tự động nạp cầu nối Rust Polyglot FFI/IPC (<code className="font-mono">libferrous_bridge.so</code>), Nginx Reverse Proxy, Systemd Sandbox, Database SQL và SSL
+              Tự động nạp cầu nối Rust Polyglot FFI/IPC (<code className="font-mono">libferrous_bridge.so</code>), VHost FerrousX / Nginx, Systemd Sandbox, Database SQL và SSL
             </p>
           </div>
           <button
@@ -234,6 +238,70 @@ export const DeployModal: React.FC<DeployModalProps> = ({
           onSubmit={handleSubmit}
           className="p-6 space-y-5 max-h-[82vh] overflow-y-auto"
         >
+          {/* Web Server Engine Selection: FerrousX (github.com/Ferrous-panel/FerrousX) vs Nginx */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
+                <Server className="w-3.5 h-3.5 text-orange-500" />
+                Chọn Web Server Xử lý (Web Server &amp; Reverse Proxy Engine)
+              </label>
+              <span className="text-[11px] font-mono text-orange-600 dark:text-orange-400">
+                https://github.com/Ferrous-panel/FerrousX
+              </span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setWebServerEngine('FerrousX (Rust Web Server)')}
+                className={`p-3.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                  webServerEngine === 'FerrousX (Rust Web Server)'
+                    ? 'border-orange-500 bg-orange-500/10'
+                    : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    FerrousX (Rust Web Server)
+                  </span>
+                  <span className="text-[10px] font-mono font-semibold text-emerald-600 dark:text-emerald-400">
+                    Khuyên dùng · ~11.8MB RAM
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-orange-600 dark:text-orange-400 mt-0.5">
+                  github.com/Ferrous-panel/FerrousX
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  Web Server viết 100% bằng Rust (io_uring + Hyper + Rustls HTTP/3 QUIC), tương thích cú pháp VHost Nginx.
+                </p>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setWebServerEngine('Nginx 1.26')}
+                className={`p-3.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                  webServerEngine === 'Nginx 1.26'
+                    ? 'border-orange-500 bg-orange-500/10'
+                    : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 hover:border-slate-300 dark:hover:border-slate-700'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-900 dark:text-white">
+                    Nginx 1.26 (C Web Server)
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-500">
+                    Truyền thống · ~38.4MB RAM
+                  </span>
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  /etc/nginx/nginx.conf
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  Web Server C truyền thống chạy epoll worker, tương thích với các module kế thừa cũ.
+                </p>
+              </button>
+            </div>
+          </div>
+
           {/* Domain & Runtime */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-1.5">
