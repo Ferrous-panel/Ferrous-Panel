@@ -1,6 +1,0 @@
-{
-  "summary":  "Kế hoạch xây dựng cơ chế xác thực đăng nhập bắt buộc cho FerrousPanel:\n1. Tạo component LoginView.tsx phong cách aaPanel/cPanel hiện đại, hỗ trợ đăng nhập bằng tài khoản Admin (admin_ferrous), ghi nhớ đăng nhập, sao chép thông tin mặc định, và hiển thị trạng thái bảo mật.\n2. Nâng cấp server.ts với endpoint POST /api/auth/login, POST /api/auth/logout, GET /api/auth/session, kiểm tra mật khẩu admin, cấp session token bảo mật và bảo vệ các API quản trị.\n3. Tích hợp thanh Topbar với nút Đăng xuất (Logout), avatar Admin, hiển thị username và cơ chế tự động chuyển hướng về trang Login nếu chưa xác thực.",
-  "updatedAt":  "2026-11-09T17:03:13.519056040Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}

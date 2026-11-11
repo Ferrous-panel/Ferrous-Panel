@@ -1,7 +1,12 @@
 {
-  "name": "react-example",
-  "private": true,
-  "version": "0.0.0",
+  "name": "ferrous-panel",
+  "version": "2.5.0",
+  "description": "FerrousPanel - 100% Rust-Core Ubuntu Server Control Panel",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ferrous-panel/Ferrous-Panel.git"
+  },
   "type": "module",
   "scripts": {
     "build:rust": "node rust-backend/scripts/build-rust-backend.mjs",

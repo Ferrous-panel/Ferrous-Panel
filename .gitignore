@@ -1,8 +1,41 @@
+# Node & Frontend dependencies
 node_modules/
 build/
 dist/
 coverage/
-.DS_Store
-*.log
-.env*
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Compiled binaries and libraries
+*.so
+*.dylib
+*.dll
+*.wasm
+*.node
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
 !.env.example
+*.pem
+*.key
+*.crt
+
+# System & Editor files
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# AI Studio local metadata
+.aistudio/
