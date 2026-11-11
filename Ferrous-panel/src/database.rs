@@ -80,7 +80,7 @@ impl Default for MysqlPhpMyAdminConfig {
             pma_installed: true,
             pma_version: "5.2.1-deb12u1".to_string(),
             pma_port: 888,
-            pma_path: "/phpmyadmin_ferrous_89a2".to_string(),
+            pma_path: "/phpadmin".to_string(),
             pma_basic_auth: true,
             pma_ssl_only: false,
             pma_max_upload_mb: 256,

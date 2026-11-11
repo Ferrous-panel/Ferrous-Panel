@@ -13,12 +13,12 @@ INSTALL_DIR="/opt/Ferrous-panel"
 
 PANEL_PORT="${PANEL_PORT:-3000}"
 PMA_PORT="${PMA_PORT:-888}"
-PMA_PATH="${PMA_PATH:-/phpmyadmin_ferrous_89a2}"
+PMA_PATH="${PMA_PATH:-/phpadmin}"
 ADMIN_USER="${ADMIN_USER:-}"
 ADMIN_PASS="${ADMIN_PASS:-}"
 CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-}"
 SQL_ROOT_PASS="${SQL_ROOT_PASS:-}"
-SECURITY_ENTRANCE="${SECURITY_ENTRANCE:-/ferrous_admin_88a}"
+SECURITY_ENTRANCE="${SECURITY_ENTRANCE:-/panel}"
 
 # Parse CLI flags
 while [[ $# -gt 0 ]]; do

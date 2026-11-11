@@ -139,7 +139,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   // phpMyAdmin Config State
   const [pmaPort, setPmaPort] = useState(mysqlConfig?.pmaPort ?? 888);
   const [pmaPath, setPmaPath] = useState(
-    mysqlConfig?.pmaPath ?? '/phpmyadmin_ferrous_89a2'
+    mysqlConfig?.pmaPath ?? '/phpadmin'
   );
   const [pmaBasicAuth, setPmaBasicAuth] = useState(
     mysqlConfig?.pmaBasicAuth ?? true

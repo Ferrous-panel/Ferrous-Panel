@@ -419,7 +419,7 @@ slow_query_log_file     = /www/wwwlogs/mysql-slow.log
 long_query_time         = 1.5
 `,
   pmaVersion: 'phpMyAdmin 5.2.1 (Nginx SSL Reverse Proxy + PHP 8.3-FPM)',
-  pmaPath: '/phpmyadmin_ferrous_89a2',
+  pmaPath: '/phpadmin',
   pmaPort: 888,
   pmaSslOnly: true,
   pmaBasicAuth: true,
@@ -4093,7 +4093,7 @@ let panelAdminState = {
   adminPassword: 'Fp#2026!UbuntuRoot',
   passwordHashAlgo: 'Argon2id (m=65536,t=3,p=4)',
   panelPort: 3000,
-  securityEntrance: '/ferrous_admin_88a',
+  securityEntrance: '/panel',
   customDomain: '',
   sslEnabled: false,
   mysqlRootPassword: mysqlPmaConfig.rootPassword || 'Sql#2026!MariaDbRoot',

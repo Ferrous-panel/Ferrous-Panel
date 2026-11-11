@@ -19,7 +19,7 @@ ensure_admin_config() {
   "adminUsername": "admin_ferrous",
   "adminPassword": "Fp#2026!UbuntuRoot",
   "panelPort": 3000,
-  "securityEntrance": "/ferrous_admin_88a",
+  "securityEntrance": "/panel",
   "mysqlRootPassword": "Sql#2026!MariaDbRoot"
 }
 EOF
@@ -57,7 +57,7 @@ show_default_info() {
   user="$(read_json_field adminUsername admin_ferrous)"
   pass="$(read_json_field adminPassword Fp#2026!UbuntuRoot)"
   port="$(read_json_field panelPort 3000)"
-  entrance="$(read_json_field securityEntrance /ferrous_admin_88a)"
+  entrance="$(read_json_field securityEntrance /panel)"
   sqlpass="$(read_json_field mysqlRootPassword Sql#2026!MariaDbRoot)"
 
   echo "======================================================================"
@@ -66,7 +66,7 @@ show_default_info() {
   echo "  Tiến trình Core Server  : /usr/local/bin/ferrous-panel-daemon (Rust Actix-Web)"
   echo "  URL Truy cập Ngoại mạng : http://${ip}:${port}${entrance}"
   echo "  URL Truy cập Nội bộ     : http://127.0.0.1:${port}${entrance}"
-  echo "  URL phpMyAdmin 5.2      : http://${ip}:888/phpmyadmin_ferrous_89a2"
+  echo "  URL phpMyAdmin 5.2      : http://${ip}:888/phpadmin"
   echo "  Tài khoản Admin (User)  : ${user}"
   echo "  Mật khẩu Admin (Pass)   : ${pass}"
   echo "  Mật khẩu SQL Root       : ${sqlpass}"
@@ -242,7 +242,7 @@ EOF
       echo "----------------------------------------------------------------------"
       echo "🌐 Tên miền Panel     : ${new_domain}"
       echo "⚙️ Cấu hình Nginx     : /etc/nginx/conf.d/ferrous-panel-domain.conf"
-      echo "👉 URL Đăng nhập Web  : http://${new_domain}$(read_json_field securityEntrance /ferrous_admin_88a)"
+      echo "👉 URL Đăng nhập Web  : http://${new_domain}$(read_json_field securityEntrance /panel)"
       echo "💡 Lưu ý: Hãy trỏ bản ghi DNS loại A của ${new_domain} về IP của VPS."
       echo "======================================================================"
       ;;

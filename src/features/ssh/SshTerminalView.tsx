@@ -223,7 +223,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
     adminPassword: 'Fp#Admin9824!xK',
     passwordHashAlgo: 'Argon2id (Rust native)',
     panelPort: 8443,
-    securityEntrance: '/ferrous-secure',
+    securityEntrance: '/panel',
     customDomain: '',
     sslEnabled: false,
     mysqlRootPassword: 'Fp#SqlRoot9941!zM',

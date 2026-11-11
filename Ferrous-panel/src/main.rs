@@ -76,7 +76,7 @@ impl Default for PanelAdminConfig {
             admin_password: "Fp#2026!UbuntuRoot".to_string(),
             password_hash_algo: "Argon2id (m=65536,t=3,p=4)".to_string(),
             panel_port: 3000,
-            security_entrance: "/ferrous_admin_88a".to_string(),
+            security_entrance: "/panel".to_string(),
             custom_domain: String::new(),
             ssl_enabled: false,
             mysql_root_password: "Sql#2026!MariaDbRoot".to_string(),

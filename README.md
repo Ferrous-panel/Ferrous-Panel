@@ -40,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/in
   --admin-user admin_ferrous \
   --admin-pass "YourSecurePass123!" \
   --port 3000 \
-  --entrance /ferrous_admin_88a \
+  --entrance /panel \
   -y
 ```
 
@@ -57,9 +57,9 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/in
 ```
 
 Sau khi hoàn tất, màn hình sẽ hiển thị:
-- **URL Đăng nhập**: `http://IP_VPS:3000/ferrous_admin_88a`
+- **URL Đăng nhập**: `http://IP_VPS:3000/panel`
 - **Tài khoản**: Được nhập hoặc tự sinh an toàn
-- **phpMyAdmin 5.2**: `http://IP_VPS:888/phpmyadmin_ferrous_89a2`
+- **phpMyAdmin 5.2**: `http://IP_VPS:888/phpadmin`
 - **Công cụ dòng lệnh**: Gõ `fp` trên Terminal để mở bảng điều khiển cứu hộ tương tự lệnh `bt` của aaPanel.
 
 ---
