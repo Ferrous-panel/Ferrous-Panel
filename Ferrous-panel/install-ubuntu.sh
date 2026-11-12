@@ -201,12 +201,24 @@ server {
 EOF
 fi
 
-echo "[6/9] Generating fallback TLS certificate & linking Nginx Vhosts..."
+echo "[6/9] Generating fallback TLS certificate, FastCGI snippets & linking Nginx Vhosts..."
+sudo mkdir -p /etc/nginx/ssl /etc/nginx/snippets
 if [ ! -f /etc/nginx/ssl/ferrous-fallback.crt ]; then
   sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
     -keyout /etc/nginx/ssl/ferrous-fallback.key \
     -out /etc/nginx/ssl/ferrous-fallback.crt \
     -subj "/C=VN/ST=Hanoi/L=Hanoi/O=FerrousPanel/CN=localhost"
+fi
+
+if [ ! -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+  sudo tee /etc/nginx/snippets/fastcgi-php.conf > /dev/null <<'EOF_SNIP'
+fastcgi_split_path_info ^(.+\.php)(/.+)$;
+try_files $fastcgi_script_name =404;
+set $path_info $fastcgi_path_info;
+fastcgi_param PATH_INFO $path_info;
+fastcgi_index index.php;
+include fastcgi_params;
+EOF_SNIP
 fi
 
 sudo tee /etc/nginx/conf.d/ferrous-panel-vhosts.conf > /dev/null <<'EOF'

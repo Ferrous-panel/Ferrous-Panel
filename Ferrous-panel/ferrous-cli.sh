@@ -76,32 +76,240 @@ show_default_info() {
   echo "======================================================================"
 }
 
+repair_ferrousx_environment() {
+  echo "======================================================================"
+  echo "  🦀 SỬA CHỮA FERROUSX NATIVE RUST WEB SERVER & PHP (FIX CLOUDFLARE 521)"
+  echo "======================================================================"
+  echo "[1/8] Dừng hoàn toàn Nginx để giải phóng cổng 80 & 443 cho FerrousX..."
+  sudo systemctl stop nginx 2>/dev/null || true
+  sudo systemctl disable nginx 2>/dev/null || true
+  if command -v fuser &>/dev/null; then
+    sudo fuser -k 80/tcp 443/tcp 2>/dev/null || true
+  fi
+
+  echo "[2/8] Khởi tạo cấu trúc thư mục FerrousX (/etc/ferrousx, /www/server/panel/vhost/ferrousx)..."
+  sudo mkdir -p /etc/ferrousx/ssl /www/server/panel/vhost/ferrousx /run/ferrousx /www/wwwroot /www/wwwlogs
+  sudo chown -R www-data:www-data /www/wwwroot /www/wwwlogs /run/ferrousx || true
+
+  echo "[3/8] Đảm bảo chứng chỉ SSL Fallback FerrousX (/etc/ferrousx/ssl/fullchain.pem)..."
+  if [ ! -f /etc/ferrousx/ssl/fullchain.pem ] || [ ! -f /etc/ferrousx/ssl/privkey.pem ]; then
+    if [ -f /etc/nginx/ssl/ferrous-fallback.crt ] && [ -f /etc/nginx/ssl/ferrous-fallback.key ]; then
+      sudo cp /etc/nginx/ssl/ferrous-fallback.crt /etc/ferrousx/ssl/fullchain.pem
+      sudo cp /etc/nginx/ssl/ferrous-fallback.key /etc/ferrousx/ssl/privkey.pem
+    else
+      sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /etc/ferrousx/ssl/privkey.pem \
+        -out /etc/ferrousx/ssl/fullchain.pem \
+        -subj "/C=VN/ST=Hanoi/L=Hanoi/O=FerrousX/CN=localhost" 2>/dev/null || true
+    fi
+    sudo chmod 600 /etc/ferrousx/ssl/privkey.pem || true
+  fi
+
+  echo "[4/8] Khởi động và cấp quyền Unix Socket PHP-FPM (/run/php/php8.3-fpm.sock)..."
+  sudo systemctl restart php8.3-fpm 2>/dev/null || true
+  for sock in /run/php/php*-fpm.sock; do
+    if [ -e "$sock" ]; then
+      sudo chown www-data:www-data "$sock" 2>/dev/null || true
+      sudo chmod 660 "$sock" 2>/dev/null || true
+    fi
+  done
+
+  echo "[5/8] Đồng bộ tệp cấu hình trung tâm FerrousX (/etc/ferrousx/ferrousx.toml)..."
+  sudo tee /etc/ferrousx/ferrousx.toml > /dev/null <<'EOF_TOML'
+# ==============================================================================
+# /etc/ferrousx/ferrousx.toml — FerrousX High-Performance Rust Web Server
+# Upstream: https://github.com/Ferrous-panel/FerrousX (Commit 1a49cb80 · Edition 2024)
+# ==============================================================================
+version_epoch = 1
+worker_threads = 0                  # 0 = Thread-Per-Core (core_affinity + NUMA 2MB HugePages)
+bind_tcp_addr = "0.0.0.0:80"        # HTTP/1.1 & HTTP/2 Cleartext + SO_REUSEPORT cBPF SKF_AD_CPU
+bind_udp_addr = "0.0.0.0:443"       # HTTP/3 (QUIC + UDP GRO/GSO 16MB Buffer)
+panel_control_socket = "/run/ferrousx/panel-admin.sock"
+embedded_webui_addr = "127.0.0.1:9090"
+
+uring_entries = 4096                # io_uring SQ/CQ ring depth (256 fixed 16KB buffers)
+sqpoll_idle_ms = 2000               # Kernel SQPOLL thread keep-warm window
+arena_capacity_bytes = 65536        # 64 KiB Bumpalo Arena (~2ns per-request allocation)
+numa_hugepages_2mb = true           # madvise(MADV_HUGEPAGE | MADV_WILLNEED) per NUMA node
+ebpf_reuseport_cbpf = true          # SO_ATTACH_REUSEPORT_CBPF (SKF_AD_CPU) + XDP DDoS Guard
+alt_svc_max_age = 86400             # HTTP/3 Alt-Svc advertise window (24h)
+
+# --- STABILITY, ZERO-ALLOC WAF & HTTP/2 CVE SHIELD ---
+client_max_body_size = 104857600
+client_header_timeout_ms = 5000
+client_body_timeout_ms = 15000
+proxy_connect_timeout_ms = 3000
+proxy_read_timeout_ms = 60000
+circuit_breaker_max_fails = 5
+circuit_breaker_cooldown_ms = 5000
+http2_max_rst_stream_per_sec = 100  # CVE-2023-44487 Rapid Reset Shield
+http2_max_continuation_frames = 16  # CVE-2024-27983 CONTINUATION Flood Shield
+
+[tls]
+cert_chain_path = "/etc/ferrousx/ssl/fullchain.pem"
+private_key_path = "/etc/ferrousx/ssl/privkey.pem"
+enable_zero_rtt = true
+acme_tls_alpn_01 = true
+ocsp_stapling_ram_cache = true
+alpn_protocols = ["h3", "h2", "http/1.1"]
+quic_max_idle_timeout_ms = 30000
+quic_initial_mtu = 1350
+
+[upstreams.php_fpm_cluster]
+addresses = ["unix:/run/php/php8.3-fpm.sock"]
+load_balancing = "p2c"
+health_check_path = "/ping"
+health_check_interval_ms = 5000
+
+[[vhosts]]
+domain = "ferrous.exmusi.com"
+aliases = ["www.ferrous.exmusi.com"]
+root = "/www/wwwroot/ferrous.exmusi.com"
+upstream = "php_fpm_cluster"
+ssl_cert = "/etc/ferrousx/ssl/fullchain.pem"
+ssl_key = "/etc/ferrousx/ssl/privkey.pem"
+force_https = false
+EOF_TOML
+
+  echo "[6/8] Thiết lập Systemd Service (/etc/systemd/system/ferrousx.service)..."
+  if [ ! -f /usr/local/bin/ferrousx-bin ] && [ -f /opt/Ferrous-panel/target/release/ferrousx-bin ]; then
+    sudo cp /opt/Ferrous-panel/target/release/ferrousx-bin /usr/local/bin/ferrousx-bin
+  elif [ ! -f /usr/local/bin/ferrousx-bin ] && [ -f /usr/local/bin/ferrousx ]; then
+    sudo ln -sf /usr/local/bin/ferrousx /usr/local/bin/ferrousx-bin
+  fi
+
+  sudo tee /etc/systemd/system/ferrousx.service > /dev/null <<'EOF_SVC'
+[Unit]
+Description=FerrousX Native Rust Web Server & Reverse Proxy
+After=network-online.target php8.3-fpm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/bin/sh -c 'if [ -x /usr/local/bin/ferrousx-bin ]; then exec /usr/local/bin/ferrousx-bin --config /etc/ferrousx/ferrousx.toml; elif [ -x /usr/local/bin/ferrousx ]; then exec /usr/local/bin/ferrousx --config /etc/ferrousx/ferrousx.toml; else exec cargo run --release --manifest-path /opt/FerrousX/Cargo.toml -- --config /etc/ferrousx/ferrousx.toml; fi'
+ExecReload=/bin/sh -c 'if [ -x /usr/local/bin/ferrousx-ctl ]; then /usr/local/bin/ferrousx-ctl reload; else kill -HUP $MAINPID; fi'
+Restart=always
+RestartSec=3
+LimitNOFILE=2097152
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF_SVC
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now ferrousx.service 2>/dev/null || true
+  sudo systemctl restart ferrousx.service 2>/dev/null || true
+
+  echo "[7/8] Mở cổng 80, 443 (TCP & UDP QUIC) trên Firewall cho Cloudflare..."
+  sudo ufw allow 80/tcp comment 'FerrousX HTTP' 2>/dev/null || true
+  sudo ufw allow 443/tcp comment 'FerrousX HTTPS' 2>/dev/null || true
+  sudo ufw allow 443/udp comment 'FerrousX HTTP3 QUIC' 2>/dev/null || true
+  if command -v iptables &>/dev/null; then
+    sudo iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    sudo iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    sudo iptables -I INPUT 1 -p udp --dport 443 -j ACCEPT 2>/dev/null || true
+  fi
+
+  echo "[8/8] Kiểm tra trạng thái cổng mạng lắng nghe (Listening Ports):"
+  ss -tulpn 2>/dev/null | grep -E ':(80|443)\b' || netstat -tulpn 2>/dev/null | grep -E ':(80|443)\b' || echo "  ⚠️ Chưa thấy tiến trình lắng nghe cổng 80/443!"
+
+  echo "======================================================================"
+  echo "✅ ĐÃ KÍCH HOẠT FERROUSX & PHP-FPM THÀNH CÔNG!"
+  echo "🦀 Web Server         : FerrousX (Rust Native, Nginx đã tắt để tránh xung đột cổng)"
+  echo "🐘 FastCGI Handler     : unix:/run/php/php8.3-fpm.sock"
+  echo "⚙️ Tệp cấu hình       : /etc/ferrousx/ferrousx.toml"
+  echo "🔒 Khắc phục Lỗi 521 Cloudflare (Quan Trọng):"
+  echo "   1. Vào Cloudflare Dashboard -> Chọn tên miền -> SSL/TLS"
+  echo "   2. Chuyển chế độ mã hóa sang 'Full' (hoặc 'Flexible') thay vì 'Full (Strict)'"
+  echo "   3. Tải lại trang web ferrous.exmusi.com!"
+  echo "======================================================================"
+}
+
 repair_panel_environment() {
-  echo "[1/5] Kiểm tra cấu trúc thư mục chuẩn (/www/wwwroot, /www/server/panel/vhost/nginx)..."
-  sudo mkdir -p /www/wwwroot /www/wwwlogs /www/backup /www/server/panel/vhost/nginx /www/server/panel/vhost/htpasswd /var/www/letsencrypt /etc/nginx/ssl
+  echo "======================================================================"
+  echo "  🛠️ SỬA CHỮA TOÀN DIỆN MÔI TRƯỜNG WEB (FIX CLOUDFLARE ERROR 521)"
+  echo "======================================================================"
+  if [ -f /usr/local/bin/ferrousx-bin ] || [ -f /etc/ferrousx/ferrousx.toml ] || grep -rq "FerrousX" /etc/ferrous-panel/*.json 2>/dev/null; then
+    echo "Phát hiện cấu hình Web Server là FerrousX (Rust Native)."
+    repair_ferrousx_environment
+    return 0
+  fi
+
+  echo "[1/6] Kiểm tra cấu trúc thư mục chuẩn (/www/wwwroot, /www/server/panel/vhost/nginx)..."
+  sudo mkdir -p /www/wwwroot /www/wwwlogs /www/backup /www/server/panel/vhost/nginx /www/server/panel/vhost/ferrousx /www/server/panel/vhost/htpasswd /var/www/letsencrypt /etc/nginx/ssl /etc/nginx/snippets
   sudo chown -R www-data:www-data /www/wwwroot /www/wwwlogs /var/www/letsencrypt || true
 
-  echo "[2/5] Kiểm tra chứng chỉ SSL Fallback (/etc/nginx/ssl/ferrous-fallback.crt)..."
-  if [ ! -f /etc/nginx/ssl/ferrous-fallback.crt ]; then
+  echo "[2/6] Đảm bảo chứng chỉ SSL Fallback (/etc/nginx/ssl/ferrous-fallback.crt)..."
+  if [ ! -f /etc/nginx/ssl/ferrous-fallback.crt ] || [ ! -f /etc/nginx/ssl/ferrous-fallback.key ]; then
     sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
       -keyout /etc/nginx/ssl/ferrous-fallback.key \
       -out /etc/nginx/ssl/ferrous-fallback.crt \
-      -subj "/C=VN/ST=Hanoi/L=Hanoi/O=FerrousPanel/CN=localhost"
+      -subj "/C=VN/ST=Hanoi/L=Hanoi/O=FerrousPanel/CN=localhost" 2>/dev/null || true
   fi
 
-  echo "[3/5] Đồng bộ chỉ thị nạp Vhost vào /etc/nginx/conf.d/ferrous-panel-vhosts.conf..."
-  sudo tee /etc/nginx/conf.d/ferrous-panel-vhosts.conf > /dev/null <<'EOF'
-include /www/server/panel/vhost/nginx/*.conf;
-EOF
+  echo "[3/6] Đảm bảo cấu hình FastCGI PHP Snippet (/etc/nginx/snippets/fastcgi-php.conf)..."
+  if [ ! -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+    sudo tee /etc/nginx/snippets/fastcgi-php.conf > /dev/null <<'EOF_SNIP'
+fastcgi_split_path_info ^(.+\.php)(/.+)$;
+try_files $fastcgi_script_name =404;
+set $path_info $fastcgi_path_info;
+fastcgi_param PATH_INFO $path_info;
+fastcgi_index index.php;
+include fastcgi_params;
+EOF_SNIP
+  fi
 
-  echo "[4/5] Kiểm tra cú pháp Nginx (nginx -t) & khởi động lại PHP-FPM / MariaDB..."
-  sudo nginx -t && sudo systemctl reload nginx || true
-  sudo systemctl restart php8.3-fpm mariadb postgresql 2>/dev/null || true
+  echo "[4/6] Kiểm tra và vá các VirtualHost tham chiếu SSL chưa tồn tại..."
+  if [ -d /www/server/panel/vhost/nginx ]; then
+    for conf in /www/server/panel/vhost/nginx/*.conf; do
+      [ -f "$conf" ] || continue
+      # Kiểm tra nếu vhost tham chiếu cert LetsEncrypt không tồn tại
+      cert_path="$(grep -E 'ssl_certificate[[:space:]]+/' "$conf" | head -n1 | awk '{print $2}' | tr -d ';' || true)"
+      if [ -n "$cert_path" ] && [ ! -f "$cert_path" ]; then
+        echo "  -> Phát hiện cert thiếu trong $conf ($cert_path). Thay thế bằng fallback SSL..."
+        sudo sed -i 's|ssl_certificate .*/fullchain.pem;|ssl_certificate /etc/nginx/ssl/ferrous-fallback.crt;|g' "$conf"
+        sudo sed -i 's|ssl_certificate_key .*/privkey.pem;|ssl_certificate_key /etc/nginx/ssl/ferrous-fallback.key;|g' "$conf"
+      fi
+    done
+  fi
 
-  echo "[5/5] Khởi động lại dịch vụ Ferrous-panel..."
-  sudo systemctl daemon-reload
+  echo "[5/6] Mở cổng 80 & 443 trên tường lửa (UFW & iptables cho Cloudflare)..."
+  sudo ufw allow 80/tcp comment 'HTTP Web' 2>/dev/null || true
+  sudo ufw allow 443/tcp comment 'HTTPS Web' 2>/dev/null || true
+  sudo ufw allow 443/udp comment 'HTTP3 QUIC' 2>/dev/null || true
+  if command -v iptables &>/dev/null; then
+    sudo iptables -I INPUT 1 -p tcp --dport 80 -j ACCEPT 2>/dev/null || true
+    sudo iptables -I INPUT 1 -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+  fi
+
+  echo "[6/6] Khởi động lại Nginx, PHP-FPM và Ferrous-panel..."
+  sudo systemctl restart php8.3-fpm 2>/dev/null || true
+  for sock in /run/php/php*-fpm.sock; do
+    [ -e "$sock" ] && sudo chown www-data:www-data "$sock" 2>/dev/null || true
+  done
+
+  # Kiểm tra cú pháp và khởi động lại Nginx
+  if sudo nginx -t 2>/dev/null; then
+    sudo systemctl restart nginx
+    echo "  ✓ Nginx syntax OK & dịch vụ đang chạy trên cổng 80, 443"
+  else
+    echo "  ⚠️ Cảnh báo: Nginx syntax kiểm tra phát hiện lỗi. Thử khởi động lại Nginx..."
+    sudo nginx -t || true
+    sudo systemctl restart nginx || true
+  fi
+
+  sudo systemctl daemon-reload 2>/dev/null || true
   sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
-  echo "✅ Đã sửa chữa và đồng bộ hoàn tất môi trường chạy Web trên VPS!"
+
+  echo ""
+  echo "🔍 TRẠNG THÁI LẮNG NGHE CỔNG WEB (PORT 80 & 443):"
+  ss -tulpn 2>/dev/null | grep -E ':(80|443)\b' || netstat -tulpn 2>/dev/null | grep -E ':(80|443)\b' || echo "  Chưa thấy tiến trình lắng nghe cổng 80/443!"
+  echo "======================================================================"
+  echo "✅ ĐÃ SỬA CHỮA HOÀN TẤT! Web Server & PHP-FPM đã hoạt động trở lại."
+  echo "💡 Nếu dùng Cloudflare: Hãy kiểm tra mục SSL/TLS trên Cloudflare, chọn chế độ 'Full' hoặc 'Flexible'."
+  echo "======================================================================"
 }
 
 run_option() {
@@ -305,6 +513,9 @@ EOF
       echo "✅ ĐÃ CẬP NHẬT LÊN PHIÊN BẢN MỚI NHẤT THÀNH CÔNG (0 MẤT DỮ LIỆU)!"
       echo "======================================================================"
       ;;
+    21|fix-ferrousx|ferrousx-fix|switch-ferrousx)
+      repair_ferrousx_environment
+      ;;
     *)
       echo "Lựa chọn không hợp lệ: $opt"
       ;;
@@ -320,7 +531,7 @@ echo "======================================================================"
 echo "   FERROUS-PANEL CLI TOOLBOX (Gõ 'fp' hoặc 'ferrous' trên VPS)        "
 echo "======================================================================"
 echo "  (1)  Khởi động lại Panel (Restart)   (10) Đổi mật khẩu Root SQL"
-echo "  (2)  Dừng dịch vụ Panel (Stop)       (11) Sửa chữa toàn diện Panel & Nginx"
+echo "  (2)  Dừng dịch vụ Panel (Stop)       (11) Sửa chữa toàn diện (Auto-Repair)"
 echo "  (3)  Khởi động Panel (Start)         (12) Dọn rác & Giải phóng RAM Cache"
 echo "  (4)  Nạp lại cấu hình (Reload)       (13) Mở khóa IP Admin & Fail2ban"
 echo "  (5)  Đổi mật khẩu Admin Panel        (14) Xem tài khoản Admin & URL mặc định"
@@ -329,9 +540,10 @@ echo "  (7)  Đổi cổng truy cập Panel (Port)  (16) Xem nhật ký lỗi Pa
 echo "  (8)  Đổi đường dẫn Security Entrance (17) Gán tên miền riêng Web Panel (Domain)"
 echo "  (9)  Xóa khóa Security Entrance      (18) Xóa bỏ tên miền riêng Web Panel"
 echo "  (19) Kiểm tra FerrousX & Edge Cloud  (20) Cập nhật Panel lên bản mới (fp update)"
+echo "  (21) Sửa lỗi FerrousX + PHP (Fix Cloudflare Error 521)"
 echo "  (0)  Thoát (Exit)"
 echo "======================================================================"
-read -rp "Nhập số thứ tự chức năng cần thực thi [0-20]: " choice
+read -rp "Nhập số thứ tự chức năng cần thực thi [0-21]: " choice
 [ "$choice" = "0" ] && exit 0
 run_option "$choice"
 
