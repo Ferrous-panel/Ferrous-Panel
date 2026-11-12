@@ -2,8 +2,9 @@
 name = "ferrous-system-core"
 version = "2.5.0"
 edition = "2021"
-authors = ["FerrousPanel Systems Engineering"]
-description = "Dedicated compiled Rust system binary exclusively handling UFW firewall rule management, Nginx/FerrousX VirtualHost configurations, and Systemd service & Cgroups v2 lifecycle control."
+rust-version = "1.85"
+authors = ["FerrousPanel Systems Engineering", "FerrousX Systems Architecture Team"]
+description = "Dedicated compiled Rust system binary exclusively handling UFW firewall rule management, Nginx/FerrousX (io_uring + eBPF + NUMA + Zero-Alloc WAF) VirtualHost & TOML configurations, and Systemd service & Cgroups v2 lifecycle control."
 build = "build.rs"
 
 [[bin]]
@@ -17,13 +18,24 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 actix-web = "4.9"
-tokio = { version = "1.41", features = ["full"] }
-nix = { version = "0.29", features = ["process", "signal", "user", "fs"] }
+tokio = { version = "1.43", features = ["full"] }
+socket2 = { version = "0.5.8", features = ["all"] }
+nix = { version = "0.29.0", features = ["socket", "uio", "sched", "signal", "net", "process", "user", "fs"] }
+core_affinity = "0.8.1"
+libc = "0.2.169"
+bytes = "1.10.0"
+bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
+arc-swap = "1.7.1"
+ahash = "0.8.11"
 base64 = "0.22"
 futures-util = "0.3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+toml = "0.8.19"
+kdl = "6.3.3"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4"] }
 regex = "1.11"
-thiserror = "2.0"
+thiserror = "2.0.11"
+anyhow = "1.0.95"
+tracing = "0.1.41"

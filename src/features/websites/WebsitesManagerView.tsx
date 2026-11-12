@@ -1057,10 +1057,10 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                           }`}
                         >
                           <div className="text-xs font-bold font-mono text-orange-600 dark:text-orange-400">
-                            FerrousX (Rust Web Server)
+                            FerrousX (Rust Web Server · Commit 1a49cb80)
                           </div>
                           <div className="text-[11px] font-mono text-slate-500 mt-0.5">
-                            github.com/Ferrous-panel/FerrousX · Tokio + Hyper + io_uring
+                            io_uring SQPOLL · eBPF SKF_AD_CPU · NUMA 2MB HugePages · Zero-Alloc WAF · ArcSwap 42µs
                           </div>
                         </button>
 
@@ -1795,7 +1795,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                           <CheckCircle2 className="w-3.5 h-3.5" />
                           Kiểm tra cú pháp (
                           {webServerEngine === 'FerrousX (Rust Web Server)'
-                            ? 'ferrousx -t'
+                            ? 'ferrousx-ctl test'
                             : 'nginx -t'}
                           )
                         </button>

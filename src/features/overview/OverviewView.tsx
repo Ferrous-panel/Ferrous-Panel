@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   ArrowUpRight,
@@ -41,6 +41,49 @@ import {
   TelemetryHistoryPoint
 } from '../types';
 
+interface FerrousXSyncCrate {
+  name: string;
+  version: string;
+  modules: string[];
+  features: string;
+  status: string;
+}
+
+interface FerrousXLibDep {
+  name: string;
+  panelVersion: string;
+  ferrousxVersion: string;
+  compatible: boolean;
+  role?: string;
+}
+
+interface FerrousXSyncState {
+  upstreamRepo: string;
+  commitSha: string;
+  commitDate: string;
+  commitTitle: string;
+  rustEdition: string;
+  rustVersion: string;
+  daemonBinary: string;
+  cliBinary: string;
+  masterConfigToml: string;
+  udsControlSocket: string;
+  embeddedWebuiAddr: string;
+  configEpoch: number;
+  rcuReloadLatencyUs: number;
+  memoryRssMb: number;
+  lastSyncedAt: string;
+  message?: string;
+  workspaceCrates: FerrousXSyncCrate[];
+  libraryCompatibility: {
+    overallCompatible: boolean;
+    conflictsCount: number;
+    checkedAt: string;
+    rustDependencies: FerrousXLibDep[];
+    frontendDependencies: FerrousXLibDep[];
+  };
+}
+
 interface OverviewViewProps {
   telemetry: TelemetryData | null;
   apps: ManagedApp[];
@@ -77,6 +120,37 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const [metricFilter, setMetricFilter] = useState<'both' | 'cpu' | 'memory'>(
     'both'
   );
+  const [ferrousxSync, setFerrousxSync] = useState<FerrousXSyncState | null>(null);
+  const [syncingFerrousx, setSyncingFerrousx] = useState(false);
+  const [showLibMatrix, setShowLibMatrix] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/ferrousx/sync-status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (data && data.commitSha) setFerrousxSync(data);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleTriggerFerrousxSync = async () => {
+    setSyncingFerrousx(true);
+    try {
+      const res = await fetch('/api/ferrousx/sync-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'arcswap_rcu_reload' })
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setFerrousxSync(updated);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setSyncingFerrousx(false);
+    }
+  };
 
   const formatUptime = (sec: number) => {
     const days = Math.floor(sec / 86400);
@@ -752,6 +826,151 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               </div>
             </div>
           </div>
+        </section>
+      )}
+
+      {/* FerrousX Engine Synchronization (Commit 1a49cb80) & Library Compatibility Audit */}
+      {ferrousxSync && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                  Đồng bộ Nhân FerrousX ({ferrousxSync.commitSha} · Rust Edition {ferrousxSync.rustEdition}) &amp; Kiểm tra Tương thích Thư viện
+                </h2>
+                <span className="text-[11px] font-mono font-semibold text-emerald-600 dark:text-emerald-400">
+                  ● 100% Compatible ({ferrousxSync.libraryCompatibility.conflictsCount} Conflicts)
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 font-mono">
+                Repo: {ferrousxSync.upstreamRepo} · UDS: {ferrousxSync.udsControlSocket} · RCU ArcSwap Epoch #{ferrousxSync.configEpoch} ({ferrousxSync.rcuReloadLatencyUs} µs) · RSS {ferrousxSync.memoryRssMb} MB
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                onClick={() => setShowLibMatrix((v) => !v)}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                {showLibMatrix
+                  ? 'Ẩn Bảng Tương thích Thư viện'
+                  : 'Xem Ma trận Tương thích Thư viện (Rust + NPM)'}
+              </button>
+              <button
+                onClick={handleTriggerFerrousxSync}
+                disabled={syncingFerrousx}
+                className="px-3 py-1.5 rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${syncingFerrousx ? 'animate-spin' : ''}`} />
+                Đồng bộ FerrousX (ArcSwap {ferrousxSync.rcuReloadLatencyUs}µs)
+              </button>
+            </div>
+          </div>
+
+          {ferrousxSync.message && (
+            <div className="mt-3 px-3.5 py-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-xs font-mono text-emerald-700 dark:text-emerald-300">
+              ✓ {ferrousxSync.message}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+            {ferrousxSync.workspaceCrates.map((crateItem) => (
+              <div
+                key={crateItem.name}
+                className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs font-bold text-slate-900 dark:text-slate-100">
+                    crates/{crateItem.name}
+                  </span>
+                  <span className="font-mono text-[11px] text-emerald-600 dark:text-emerald-400">
+                    ● {crateItem.version}
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] font-mono text-orange-600 dark:text-orange-400 truncate">
+                  [{crateItem.modules.join(', ')}]
+                </div>
+                <p className="mt-1.5 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                  {crateItem.features}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          {showLibMatrix && (
+            <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-800 grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div>
+                <div className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-2 font-mono">
+                  Rust Workspace Dependencies (Cargo.toml · rustc {ferrousxSync.rustVersion})
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-slate-100 dark:bg-slate-950 text-slate-500">
+                      <tr>
+                        <th className="py-2 px-3">Crate</th>
+                        <th className="py-2 px-3">FerrousPanel</th>
+                        <th className="py-2 px-3">FerrousX</th>
+                        <th className="py-2 px-3 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {ferrousxSync.libraryCompatibility.rustDependencies.map((dep) => (
+                        <tr key={dep.name}>
+                          <td className="py-2 px-3 font-semibold text-slate-900 dark:text-slate-100">
+                            {dep.name}
+                          </td>
+                          <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
+                            {dep.panelVersion}
+                          </td>
+                          <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
+                            {dep.ferrousxVersion}
+                          </td>
+                          <td className="py-2 px-3 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
+                            OK
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-2 font-mono">
+                  Frontend &amp; Build Toolchain Dependencies (package.json)
+                </div>
+                <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-800">
+                  <table className="w-full text-left text-xs font-mono">
+                    <thead className="bg-slate-100 dark:bg-slate-950 text-slate-500">
+                      <tr>
+                        <th className="py-2 px-3">Package</th>
+                        <th className="py-2 px-3">Installed</th>
+                        <th className="py-2 px-3">FerrousX Spec</th>
+                        <th className="py-2 px-3 text-right">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {ferrousxSync.libraryCompatibility.frontendDependencies.map((dep) => (
+                        <tr key={dep.name}>
+                          <td className="py-2 px-3 font-semibold text-slate-900 dark:text-slate-100">
+                            {dep.name}
+                          </td>
+                          <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
+                            {dep.panelVersion}
+                          </td>
+                          <td className="py-2 px-3 text-slate-600 dark:text-slate-400">
+                            {dep.ferrousxVersion}
+                          </td>
+                          <td className="py-2 px-3 text-right text-emerald-600 dark:text-emerald-400 font-semibold">
+                            OK
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
 

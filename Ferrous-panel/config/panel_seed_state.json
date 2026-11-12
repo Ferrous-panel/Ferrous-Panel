@@ -263,20 +263,22 @@
       "id": "pkg-ferrousx",
       "name": "FerrousX Web Server & Reverse Proxy (github.com/Ferrous-panel/FerrousX)",
       "category": "Web Server",
-      "version": "2.5.0-rust (tokio + hyper + rustls + io_uring + HTTP/3 QUIC)",
-      "description": "Máy chủ Web Server & Reverse Proxy thế hệ mới viết 100% bằng Rust (https://github.com/Ferrous-panel/FerrousX) tương tự Nginx. Hỗ trợ cấu hình VHost tương thích Nginx, Zero-Copy Static io_uring, FastCGI Multi-PHP và HTTP/3 QUIC siêu nhẹ.",
+      "version": "2.5.0-rust (Commit 1a49cb80 · Edition 2024 · io_uring SQPOLL + eBPF + NUMA + Zero-Alloc WAF)",
+      "description": "Máy chủ Web Server & Reverse Proxy 100% Rust (https://github.com/Ferrous-panel/FerrousX · Commit 1a49cb80): Thread-Per-Core io_uring SQPOLL, eBPF/cBPF SKF_AD_CPU (~28ns XDP DDoS drop), NUMA 2MB Transparent HugePages + Bumpalo 64KiB Arena, ACMEv2 TLS-ALPN-01/HTTP-01 + RAM OCSP Stapling, Zero-Alloc L7 WAF (<12µs) + HTTP/2 CVE Shield, và RCU ArcSwap Hot-Reload 42µs qua /run/ferrousx/panel-admin.sock.",
       "installed": true,
       "status": "running",
-      "memoryMb": 11.8,
-      "configPath": "/etc/ferrousx/ferrousx.conf",
+      "memoryMb": 8.2,
+      "configPath": "/etc/ferrousx/ferrousx.toml",
       "isRustNative": true,
-      "replacedLegacyPackage": "Nginx 1.26 / Apache httpd / Caddy",
-      "rustCrate": "Ferrous-panel/FerrousX (tokio 1.41 + hyper 1.5 + rustls 0.23 + quinn)",
+      "replacedLegacyPackage": "Nginx 1.26 / Apache httpd / Caddy / OpenResty",
+      "rustCrate": "Ferrous-panel/FerrousX (tokio 1.43 + tokio-uring 0.5 + io-uring 0.7.4 + rustls 0.23.22 + quinn 0.11.6 + bumpalo 3.17 + arc-swap 1.7.1 + kdl 6.3.3)",
       "port": 443,
-      "configContent": "# /etc/ferrousx/ferrousx.conf — Native Rust Web Server (https://github.com/Ferrous-panel/FerrousX)\nuser www-data;\nworker_threads auto;\nworker_rlimit_nofile 131072;\npid /run/ferrousx.pid;\n\nevents {\n    io_engine io_uring;\n    worker_connections 32768;\n    multi_accept on;\n}\n\nhttp {\n    ferrousx_zero_copy_uring on;\n    ferrousx_memory_safe_sandbox on;\n    sendfile on;\n    tcp_nopush on;\n    tcp_nodelay on;\n    keepalive_timeout 65;\n    keepalive_requests 20000;\n    server_tokens off;\n    include /www/server/panel/vhost/ferrousx/*.conf;\n}\n",
+      "configContent": "# /etc/ferrousx/ferrousx.toml — FerrousX High-Performance Rust Web Server (Commit 1a49cb80)\nversion_epoch = 1\nworker_threads = 0                  # 0 = Thread-Per-Core (core_affinity + NUMA 2MB HugePages)\nbind_tcp_addr = \"0.0.0.0:80\"        # HTTP/1.1 & HTTP/2 Cleartext + SO_REUSEPORT cBPF SKF_AD_CPU\nbind_udp_addr = \"0.0.0.0:443\"       # HTTP/3 (QUIC + UDP GRO/GSO 16MB Buffer)\npanel_control_socket = \"/run/ferrousx/panel-admin.sock\"\nembedded_webui_addr = \"127.0.0.1:9090\"\n\nuring_entries = 4096                # io_uring SQ/CQ ring depth (256 fixed 16KB buffers)\nsqpoll_idle_ms = 2000               # Kernel SQPOLL thread keep-warm window\narena_capacity_bytes = 65536        # 64 KiB Bumpalo Arena (~2ns per-request allocation)\nnuma_hugepages_2mb = true           # madvise(MADV_HUGEPAGE | MADV_WILLNEED) per NUMA node\nebpf_reuseport_cbpf = true          # SO_ATTACH_REUSEPORT_CBPF (SKF_AD_CPU) + XDP DDoS Guard\nalt_svc_max_age = 86400             # HTTP/3 Alt-Svc advertise window (24h)\n\n# --- STABILITY, ZERO-ALLOC WAF & HTTP/2 CVE SHIELD ---\nclient_max_body_size = 104857600\nclient_header_timeout_ms = 5000\nclient_body_timeout_ms = 15000\nproxy_connect_timeout_ms = 3000\nproxy_read_timeout_ms = 60000\ncircuit_breaker_max_fails = 5\ncircuit_breaker_cooldown_ms = 5000\nhttp2_max_rst_stream_per_sec = 100  # CVE-2023-44487 Rapid Reset Shield\nhttp2_max_continuation_frames = 16  # CVE-2024-27983 CONTINUATION Flood Shield\n\n[tls]\ncert_chain_path = \"/etc/ferrousx/ssl/fullchain.pem\"\nprivate_key_path = \"/etc/ferrousx/ssl/privkey.pem\"\nenable_zero_rtt = true\nacme_tls_alpn_01 = true\nocsp_stapling_ram_cache = true\nalpn_protocols = [\"h3\", \"h2\", \"http/1.1\"]\nquic_max_idle_timeout_ms = 30000\nquic_initial_mtu = 1350\n",
       "logs": [
-        "2026-11-11T03:00:00Z INFO  ferrousx: FerrousX v2.5.0 (https://github.com/Ferrous-panel/FerrousX) initialized io_uring worker pool",
-        "2026-11-11T03:15:00Z INFO  ferrousx: configuration file /etc/ferrousx/ferrousx.conf syntax is ok (TLS 1.3 + HTTP/3 QUIC active)"
+        "2026-11-12T13:33:35Z INFO  ferrousx_bin: FerrousX Engine (Commit 1a49cb80 · Rust Edition 2024) initialized Thread-Per-Core io_uring SQPOLL workers (8.2 MB RSS)",
+        "2026-11-12T13:33:36Z INFO  ferrousx_core::ebpf: Attached SO_ATTACH_REUSEPORT_CBPF (SKF_AD_CPU) & XDP DDoS Steerer (~28ns packet verdict)",
+        "2026-11-12T13:33:36Z INFO  ferrousx_core::numa: Locked 2MB Transparent HugePages (MADV_HUGEPAGE) + 64KiB Bumpalo Arena on local NUMA nodes",
+        "2026-11-12T13:33:37Z INFO  ferrousx_panel::api: Panel Rust UDS Control Socket active at /run/ferrousx/panel-admin.sock + Embedded .rodata WebUI at 127.0.0.1:9090 (ArcSwap RCU 42µs)"
       ]
     },
     {

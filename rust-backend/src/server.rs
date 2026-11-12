@@ -790,20 +790,24 @@ pub fn verify_server_consistency() -> ServerTranslationVerificationReport {
         "rust_backend::persistence_engine::PersistenceEngine::save_atomic (Write-Temp + POSIX fs::rename)".to_string(),
     );
     route_mapping_table.insert(
+        "GET/POST /api/ferrousx/sync-status".to_string(),
+        "rust_backend::ferrousx_engine::{get_ferrousx_sync_status, trigger_arcswap_rcu_reload} (Commit 1a49cb80 · 42µs RCU)".to_string(),
+    );
+    route_mapping_table.insert(
         "ANY /api/actix-gateway/{ufw,nginx,systemd,sysctl}/*".to_string(),
         "rust_backend::main::{handle_ufw_gateway, handle_nginx_gateway, handle_systemd_gateway} (Basic Auth + nix/std::process)".to_string(),
     );
 
     ServerTranslationVerificationReport {
-        translated_from: "100% Native Rust Core (rust-backend/src/*.rs + Ferrous-panel/src/*.rs)".to_string(),
-        target_rust_module: "rust-backend/src/server.rs (Actix-Web 4.9)".to_string(),
+        translated_from: "100% Native Rust Core (rust-backend/src/*.rs + Ferrous-panel/src/*.rs · FerrousX 1a49cb80)".to_string(),
+        target_rust_module: "rust-backend/src/server.rs (Actix-Web 4.9 + Tokio 1.43)".to_string(),
         target_models_module: "rust-backend/src/models.rs (Serde camelCase)".to_string(),
         actix_web_version: "4.9.0".to_string(),
-        total_routes_translated: 75,
+        total_routes_translated: 77,
         route_groups_verified: vec![
             "1. Auth & Panel Admin (/api/auth/*, /api/panel-admin/*)".to_string(),
             "2. Kernel /proc Telemetry & Diagnostics (/api/telemetry, /api/system/diagnostics)".to_string(),
-            "3. Websites, Nginx 1.26 & FerrousX VHosts (/api/apps/*, /api/oneclick/*)".to_string(),
+            "3. Websites, Nginx 1.26 & FerrousX 1a49cb80 VHosts (/api/apps/*, /api/ferrousx/sync-status)".to_string(),
             "4. Multi-PHP 7.4-8.4 FPM Manager (/api/php/*)".to_string(),
             "5. Native Rust Server Packages (/api/software/*)".to_string(),
             "6. SQL Databases & MySQL phpMyAdmin (/api/databases/*)".to_string(),

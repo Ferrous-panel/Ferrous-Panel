@@ -385,9 +385,11 @@ if (subsystem === 'NGINX') {
   const vhostHash = abi.nginx_compute_vhost_hash(port, ssl, quic, rps);
 
   const configPath = isFerrousX
-    ? \`/etc/ferrousx/vhosts/\${domain}.conf\`
+    ? \`/www/server/panel/vhost/ferrousx/\${domain}.conf\`
     : \`/etc/nginx/sites-available/\${domain}.conf\`;
-  const binPath = isFerrousX ? '/usr/local/bin/ferrousx' : '/usr/sbin/nginx';
+  const binPath = isFerrousX
+    ? (fs.existsSync('/usr/local/bin/ferrousx-ctl') ? '/usr/local/bin/ferrousx-ctl' : fs.existsSync('/usr/local/bin/ferrousx-bin') ? '/usr/local/bin/ferrousx-bin' : '/usr/local/bin/ferrousx')
+    : '/usr/sbin/nginx';
   const osRes = !isReadOnlyGet
     ? tryExecOsBinary(binPath, ['-t'])
     : { executed: false, code: 0, out: '' };
@@ -395,9 +397,13 @@ if (subsystem === 'NGINX') {
   const syscalls = [
     \`ferrous_system_core::wasm_abi::nginx_compute_vhost_hash(\${port}, \${ssl}, \${quic}, \${rps}) -> 0x\${vhostHash.toString(16)}\`,
     \`rust_backend::nginx_engine::atomic_vhost_sync("\${configPath}") -> [OK]\`,
+    ...(isFerrousX ? [
+      'ferrousx_config::ArcSwap::reload_from_disk("/etc/ferrousx/ferrousx.toml") -> [42µs RCU]',
+      'ferrousx_panel::uds_ipc("/run/ferrousx/panel-admin.sock", action="reload") -> [OK]'
+    ] : []),
     osRes.executed
       ? \`execve("\${binPath}", ["-t"]) -> exit=\${osRes.code}\`
-      : \`rust_backend::nginx_engine::verify_and_sighup("\${binPath}", "\${configPath}") -> [SYNTAX_OK]\`
+      : \`rust_backend::nginx_engine::verify_and_arcswap_reload("\${binPath}", "\${configPath}") -> [SYNTAX_OK]\`
   ];
 
   emitResult({

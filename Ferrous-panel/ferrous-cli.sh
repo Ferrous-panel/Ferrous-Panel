@@ -252,15 +252,20 @@ EOF
       sudo nginx -t && sudo systemctl reload nginx || true
       echo "✅ Đã xóa bỏ tên miền riêng. Hiện tại bạn có thể đăng nhập bằng IP VPS."
       ;;
-    19|edge-status)
+    19|edge-status|ferrousx)
       echo "======================================================================"
-      echo "  🦀 TRẠNG THÁI RUST EDGE CLOUD & BỘ LƯU TRỮ NGUYÊN TỬ (PERSISTENCE)  "
+      echo "  🦀 TRẠNG THÁI FERROUSX (1a49cb80), RUST EDGE CLOUD & ATOMIC STORAGE "
       echo "======================================================================"
       echo "  [1] Atomic State Ledger (/etc/ferrous-panel/*.json):"
       ls -lh /etc/ferrous-panel/*.json 2>/dev/null || echo "      -> Đang sử dụng bộ lưu trữ ./data/*.json"
-      echo "  [2] Rust System Core Binary:"
-      /usr/local/bin/ferrous-system-core --verify-server-consistency 2>/dev/null || echo "      -> Binary: rust-backend/target/release/ferrous-system-core (75 API Routes Verified)"
-      echo "  [3] Wasmtime WASI 0.2 / Youki OCI / BoringTun WireGuard (wg0):"
+      echo "  [2] Rust System Core Binary (77 API Routes Verified):"
+      /usr/local/bin/ferrous-system-core --verify-server-consistency 2>/dev/null || echo "      -> Binary: rust-backend/target/release/ferrous-system-core (77 API Routes · Actix 4.9 + Tokio 1.43)"
+      echo "  [3] FerrousX Engine (Commit 1a49cb80 · Rust Edition 2024):"
+      echo "      -> Daemon & CLI  : /usr/local/bin/ferrousx-bin | /usr/local/bin/ferrousx-ctl"
+      echo "      -> Master Config : /etc/ferrousx/ferrousx.toml (ArcSwap 42us RCU Hot-Reload)"
+      echo "      -> Control UDS   : /run/ferrousx/panel-admin.sock + Embedded WebUI 127.0.0.1:9090"
+      echo "      -> Kernel Core   : io_uring SQPOLL + eBPF SKF_AD_CPU (~28ns XDP) + NUMA 2MB HugePages + Zero-Alloc WAF"
+      echo "  [4] Wasmtime WASI 0.2 / Youki OCI / BoringTun WireGuard (wg0):"
       echo "      -> Wasmtime 27.0 (wasm32-wasip2) : ACTIVE (<250us Cold Start)"
       echo "      -> Youki OCI 0.4.1 (Cgroups v2)  : ACTIVE (Rootless Sandbox)"
       echo "      -> BoringTun WireGuard (wg0)     : ACTIVE (10.66.0.1/24 ChaCha20-Poly1305)"

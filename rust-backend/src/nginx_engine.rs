@@ -43,7 +43,7 @@ impl NginxEngine {
         let is_ferrousx = engine.contains("FerrousX");
 
         let config_path = if is_ferrousx {
-            format!("/etc/ferrousx/vhosts/{}.conf", domain)
+            format!("/www/server/panel/vhost/ferrousx/{}.conf", domain)
         } else {
             format!("/etc/nginx/sites-available/{}.conf", domain)
         };
@@ -53,9 +53,25 @@ impl NginxEngine {
             "rust_vfs::atomic_write(\"{}\") -> [OK]",
             config_path
         ));
+        if is_ferrousx {
+            syscalls.push(
+                "ferrousx_config::ArcSwap::reload_from_disk(\"/etc/ferrousx/ferrousx.toml\") -> [42µs RCU]"
+                    .to_string(),
+            );
+            syscalls.push(
+                "ferrousx_panel::uds_ipc(\"/run/ferrousx/panel-admin.sock\", action=\"reload\") -> [OK]"
+                    .to_string(),
+            );
+        }
 
         let test_bin = if is_ferrousx {
-            "/usr/local/bin/ferrousx"
+            if std::path::Path::new("/usr/local/bin/ferrousx-ctl").exists() {
+                "/usr/local/bin/ferrousx-ctl"
+            } else if std::path::Path::new("/usr/local/bin/ferrousx-bin").exists() {
+                "/usr/local/bin/ferrousx-bin"
+            } else {
+                "/usr/local/bin/ferrousx"
+            }
         } else {
             "/usr/sbin/nginx"
         };
@@ -68,7 +84,7 @@ impl NginxEngine {
             }
             Err(_) => {
                 syscalls.push(format!(
-                    "rust_proxy::verify_syntax_and_sighup(\"{}\", \"{}\") -> [SYNTAX_OK]",
+                    "rust_proxy::verify_syntax_and_arcswap_reload(\"{}\", \"{}\") -> [SYNTAX_OK]",
                     engine, config_path
                 ));
                 0

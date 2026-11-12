@@ -13,6 +13,8 @@ fn main() {
     println!("cargo:rerun-if-changed=src/systemd_engine.rs");
     println!("cargo:rerun-if-changed=src/wasm_exports.rs");
     println!("cargo:rerun-if-changed=src/rust_core_manager.rs");
+    println!("cargo:rerun-if-changed=src/persistence_engine.rs");
+    println!("cargo:rerun-if-changed=src/edge_cloud_engine.rs");
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_else(|_| "linux".to_string());
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_else(|_| "x86_64".to_string());
@@ -20,12 +22,14 @@ fn main() {
     println!("cargo:rustc-env=FERROUS_TARGET_OS={}", target_os);
     println!("cargo:rustc-env=FERROUS_TARGET_ARCH={}", target_arch);
     println!("cargo:rustc-env=FERROUS_ABI_SIGNATURE=FERROUS-CORE-ABI-2.5.0-STRICT");
+    println!("cargo:rustc-env=FERROUSX_UPSTREAM_COMMIT=1a49cb80");
 
     // Verify presence of system-sensitive binaries on Linux hosts at build time
     let system_binaries = [
         ("UFW_BIN", "/usr/sbin/ufw"),
         ("NGINX_BIN", "/usr/sbin/nginx"),
-        ("FERROUSX_BIN", "/usr/local/bin/ferrousx"),
+        ("FERROUSX_BIN", "/usr/local/bin/ferrousx-bin"),
+        ("FERROUSX_CTL_BIN", "/usr/local/bin/ferrousx-ctl"),
         ("SYSTEMCTL_BIN", "/bin/systemctl"),
         ("SYSCTL_BIN", "/sbin/sysctl"),
     ];

@@ -693,7 +693,7 @@ impl RustCoreManager {
             unix_socket_path: UNIX_IPC_SOCKET_PATH.to_string(),
             unix_socket_connected: socket_exists,
             actix_loopback_url: ACTIX_LOOPBACK_RPC.to_string(),
-            rust_abi_version: "Ferrous-ABI v2.5 (rustc 1.83.0 · Actix-Web 4.9 · Tokio 1.41)".to_string(),
+            rust_abi_version: "Ferrous-ABI v2.5 (rustc 1.85.0 · Edition 2024 · Actix-Web 4.9 · Tokio 1.43 · FerrousX 1a49cb80)".to_string(),
             supported_subsystems: vec![
                 RustSubsystemType::Syscall,
                 RustSubsystemType::Ufw,

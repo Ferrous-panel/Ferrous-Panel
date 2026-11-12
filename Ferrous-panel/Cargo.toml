@@ -2,8 +2,9 @@
 name = "Ferrous-panel"
 version = "2.5.0"
 edition = "2021"
-authors = ["FerrousPanel Security Engineering"]
-description = "100% Native Rust Ubuntu Server Control Panel Daemon powered by Actix-Web & Polyglot C-ABI FFI/IPC Bridge, managing OpenSSH & Web PTY Terminal, Systemd, Nginx Reverse Proxy, Multi-PHP (7.4-8.4), File Manager ZIP/Unzip, SQL Databases, Postfix Mail, 1-Click Store, Git CI/CD, and Kernel Optimizer."
+rust-version = "1.85"
+authors = ["FerrousPanel Security Engineering", "FerrousX Systems Architecture Team"]
+description = "100% Native Rust Ubuntu Server Control Panel Daemon powered by Actix-Web, FerrousX Engine (io_uring + eBPF + NUMA + Zero-Alloc WAF), & Polyglot C-ABI FFI/IPC Bridge."
 
 [[bin]]
 name = "ferrous-panel"
@@ -15,24 +16,54 @@ path = "src/polyglot_compiler.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# --- Web Control Plane & Async Runtime (Synced with FerrousX 1.43) ---
 actix-web = { version = "4.9", features = ["rustls-0_23", "compress-gzip", "compress-brotli"] }
 actix-ws = "0.3"
 actix-cors = "0.7"
 actix-files = "0.6"
 actix-limitation = "0.5"
-tokio = { version = "1.41", features = ["full", "process", "fs", "sync"] }
+tokio = { version = "1.43", features = ["full", "process", "fs", "sync", "signal"] }
+tokio-uring = "0.5.0"
+io-uring = { version = "0.7.4", features = ["bindgen"] }
+
+# --- FerrousX Core Networking, TLS 1.3, HTTP/3 QUIC & Lock-Free Primitives ---
+socket2 = { version = "0.5.8", features = ["all"] }
+nix = { version = "0.29.0", features = ["socket", "uio", "sched", "signal", "net", "process", "user", "fs"] }
+core_affinity = "0.8.1"
+libc = "0.2.169"
+rustls = { version = "0.23.22", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = "0.26.1"
+rustls-pemfile = "2.2.0"
+quinn = { version = "0.11.6", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+h3 = "0.0.6"
+h3-quinn = "0.0.7"
+h2 = "0.4.7"
+httparse = "1.10.0"
+http = "1.2.0"
+bytes = "1.10.0"
+bumpalo = { version = "3.17.0", features = ["collections", "boxed"] }
+arc-swap = "1.7.1"
+crossbeam-utils = "0.8.21"
+ahash = "0.8.11"
+
+# --- Dynamic Config, Telemetry, Auth & Security ---
 portable-pty = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1.0.217", features = ["derive"] }
+serde_json = "1.0.138"
+toml = "0.8.19"
+kdl = "6.3.3"
+notify = "8.0.0"
+async-compression = { version = "0.4.18", features = ["tokio", "brotli", "zstd"] }
 sysinfo = "0.32"
 argon2 = { version = "0.5", features = ["std"] }
 jsonwebtoken = "9.3"
 totp-rs = { version = "5.6", features = ["qr", "otpauth"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-thiserror = "2.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
+thiserror = "2.0.11"
+anyhow = "1.0.95"
 regex = "1.11"
 
 [profile.release]
@@ -40,6 +71,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
+strip = "symbols"
+overflow-checks = false
 
 
