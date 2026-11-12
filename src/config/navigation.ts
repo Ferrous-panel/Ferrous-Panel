@@ -2,6 +2,7 @@ import React from 'react';
 import {
   Activity,
   Code2,
+  Cpu,
   Database,
   FileCode2,
   FolderKanban,
@@ -34,6 +35,11 @@ export function getSidebarItems(
       id: 'websites',
       label: tr('Websites & Modern JS', 'Websites & Modern JS'),
       icon: Globe
+    },
+    {
+      id: 'edge-cloud',
+      label: tr('Rust Edge, WASI & Container', 'Rust Edge, WASI & Containers'),
+      icon: Cpu
     },
     {
       id: 'php',

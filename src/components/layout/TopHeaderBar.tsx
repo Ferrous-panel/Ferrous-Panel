@@ -69,6 +69,20 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
           Websites
         </a>
         <a
+          href="#edge-cloud"
+          onClick={(e) => {
+            e.preventDefault();
+            onSelectTab('edge-cloud');
+          }}
+          className={`hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
+            activeTab === 'edge-cloud'
+              ? 'text-slate-900 dark:text-slate-100 font-semibold underline'
+              : ''
+          }`}
+        >
+          Rust Edge &amp; WASI
+        </a>
+        <a
           href="#php"
           onClick={(e) => {
             e.preventDefault();
@@ -81,20 +95,6 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
           }`}
         >
           Multi-PHP &amp; INI
-        </a>
-        <a
-          href="#files"
-          onClick={(e) => {
-            e.preventDefault();
-            onSelectTab('files');
-          }}
-          className={`hover:text-slate-900 dark:hover:text-slate-100 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 ${
-            activeTab === 'files'
-              ? 'text-slate-900 dark:text-slate-100 font-semibold underline'
-              : ''
-          }`}
-        >
-          File Manager (.ZIP)
         </a>
         <a
           href="#databases"
@@ -122,7 +122,7 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
               : ''
           }`}
         >
-          {tr('Cầu nối Đa ngôn ngữ', 'Polyglot FFI Bridge')}
+          {tr('Nhân Rust & FFI', 'Rust Core & FFI')}
         </a>
       </nav>
 

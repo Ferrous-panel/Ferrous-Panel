@@ -15,41 +15,58 @@ export function useAuthSession(onAuthenticatedFetch?: () => void) {
   );
 
   useEffect(() => {
+    let isMounted = true;
     const verifySession = async () => {
       const token = localStorage.getItem('fp_admin_session_token');
       if (!token) {
-        setIsAuthenticated(false);
-        setCurrentUser(null);
+        if (isMounted) {
+          setIsAuthenticated(false);
+          setCurrentUser(null);
+        }
         return;
       }
       try {
         const res = await fetch('/api/auth/session', {
-          headers: { Authorization: `Bearer ${token}` }
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'X-FP-Session': token
+          }
         });
+        if (!isMounted) return;
+
         if (res.ok) {
           const data = await res.json();
-          if (data.authenticated) {
+          if (data && data.authenticated) {
             setIsAuthenticated(true);
             setCurrentUser({
-              username: data.user?.username || 'admin_ferrous'
+              username: data.user?.username || localStorage.getItem('fp_admin_user') || 'admin_ferrous'
             });
-          } else {
-            setIsAuthenticated(false);
-            setCurrentUser(null);
-            localStorage.removeItem('fp_admin_session_token');
-            localStorage.removeItem('fp_admin_user');
+            return;
           }
-        } else {
-          setIsAuthenticated(false);
-          setCurrentUser(null);
-          localStorage.removeItem('fp_admin_session_token');
-          localStorage.removeItem('fp_admin_user');
+        }
+
+        // Only clear if server explicitly responds with 401 AND unauthorized
+        if (res.status === 401) {
+          try {
+            const errData = await res.json();
+            if (errData && errData.expired) {
+              setIsAuthenticated(false);
+              setCurrentUser(null);
+              localStorage.removeItem('fp_admin_session_token');
+              localStorage.removeItem('fp_admin_user');
+            }
+          } catch {
+            // Keep existing session on transient parse error
+          }
         }
       } catch {
-        // network issue - maintain offline session if present
+        // Network or server reload — keep local session alive
       }
     };
     verifySession();
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   const handleLoginSuccess = useCallback(

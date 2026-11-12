@@ -4,6 +4,7 @@ import {
   AntiCrashGuardState,
   CpanelData,
   DiagnosticCheckItem,
+  EdgeCloudData,
   EnvVar,
   MailServerData,
   ManagedApp,
@@ -22,6 +23,7 @@ import {
   SshPanelData,
   SystemOptimizerData,
   TelemetryData,
+  WasiWorkerInvokeResult,
   WebServerEngineType,
   WebSshCommandOutput,
   WebsiteLiveTestResult,
@@ -29,31 +31,134 @@ import {
 } from '../types';
 import { actixGatewayFetch } from '../services/actixGateway';
 
+const PANEL_CACHE_KEY = 'fp_panel_state_cache_v1';
+
+function readPanelCache<T>(field: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(PANEL_CACHE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed[field] !== undefined ? (parsed[field] as T) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export function usePanelController(
   activeTab: ActiveTab,
   setActiveTab: (tab: ActiveTab) => void
 ) {
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null);
+  const [selectedAppId, setSelectedAppIdState] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('fp_selected_app_id') || null;
+    } catch {
+      return null;
+    }
+  });
+  const setSelectedAppId = useCallback(
+    (
+      nextOrUpdater:
+        | string
+        | null
+        | ((prevId: string | null) => string | null)
+    ) => {
+      setSelectedAppIdState((prevId) => {
+        const nextId =
+          typeof nextOrUpdater === 'function'
+            ? nextOrUpdater(prevId)
+            : nextOrUpdater;
+        try {
+          if (nextId) localStorage.setItem('fp_selected_app_id', nextId);
+          else localStorage.removeItem('fp_selected_app_id');
+        } catch {
+          // ignore
+        }
+        return nextId;
+      });
+    },
+    []
+  );
+
   const [autoOpenSettingsCounter, setAutoOpenSettingsCounter] =
     useState<number>(0);
 
   const [telemetry, setTelemetry] = useState<TelemetryData | null>(null);
-  const [apps, setApps] = useState<ManagedApp[]>([]);
-  const [phpVersions, setPhpVersions] = useState<PhpVersionInstance[]>([]);
-  const [templates, setTemplates] = useState<OneClickTemplate[]>([]);
-  const [packages, setPackages] = useState<ServerPackageItem[]>([]);
-  const [sshData, setSshData] = useState<SshPanelData | null>(null);
-  const [databases, setDatabases] = useState<SqlDatabase[]>([]);
-  const [mysqlConfig, setMysqlConfig] = useState<MysqlPhpMyAdminConfig | null>(
-    null
+  const [apps, setApps] = useState<ManagedApp[]>(() =>
+    readPanelCache<ManagedApp[]>('apps', [])
   );
-  const [mailData, setMailData] = useState<MailServerData | null>(null);
-  const [optimizer, setOptimizer] = useState<SystemOptimizerData | null>(null);
+  const [phpVersions, setPhpVersions] = useState<PhpVersionInstance[]>(() =>
+    readPanelCache<PhpVersionInstance[]>('phpVersions', [])
+  );
+  const [templates, setTemplates] = useState<OneClickTemplate[]>(() =>
+    readPanelCache<OneClickTemplate[]>('templates', [])
+  );
+  const [packages, setPackages] = useState<ServerPackageItem[]>(() =>
+    readPanelCache<ServerPackageItem[]>('packages', [])
+  );
+  const [sshData, setSshData] = useState<SshPanelData | null>(() =>
+    readPanelCache<SshPanelData | null>('sshData', null)
+  );
+  const [databases, setDatabases] = useState<SqlDatabase[]>(() =>
+    readPanelCache<SqlDatabase[]>('databases', [])
+  );
+  const [mysqlConfig, setMysqlConfig] = useState<MysqlPhpMyAdminConfig | null>(
+    () => readPanelCache<MysqlPhpMyAdminConfig | null>('mysqlConfig', null)
+  );
+  const [mailData, setMailData] = useState<MailServerData | null>(() =>
+    readPanelCache<MailServerData | null>('mailData', null)
+  );
+  const [optimizer, setOptimizer] = useState<SystemOptimizerData | null>(() =>
+    readPanelCache<SystemOptimizerData | null>('optimizer', null)
+  );
   const [diagnostics, setDiagnostics] = useState<DiagnosticCheckItem[]>([]);
-  const [cpanel, setCpanel] = useState<CpanelData | null>(null);
-  const [security, setSecurity] = useState<SecurityData | null>(null);
+  const [cpanel, setCpanel] = useState<CpanelData | null>(() =>
+    readPanelCache<CpanelData | null>('cpanel', null)
+  );
+  const [security, setSecurity] = useState<SecurityData | null>(() =>
+    readPanelCache<SecurityData | null>('security', null)
+  );
+  const [edgeCloud, setEdgeCloud] = useState<EdgeCloudData | null>(() =>
+    readPanelCache<EdgeCloudData | null>('edgeCloud', null)
+  );
   const [rustFiles, setRustFiles] = useState<RustSourceFile[]>([]);
   const [refreshing, setRefreshing] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        PANEL_CACHE_KEY,
+        JSON.stringify({
+          apps,
+          phpVersions,
+          templates,
+          packages,
+          sshData,
+          databases,
+          mysqlConfig,
+          mailData,
+          optimizer,
+          cpanel,
+          security,
+          edgeCloud
+        })
+      );
+    } catch {
+      // ignore quota errors
+    }
+  }, [
+    apps,
+    phpVersions,
+    templates,
+    packages,
+    sshData,
+    databases,
+    mysqlConfig,
+    mailData,
+    optimizer,
+    cpanel,
+    security,
+    edgeCloud
+  ]);
 
   const fetchTelemetry = useCallback(async () => {
     try {
@@ -95,7 +200,8 @@ export function usePanelController(
         fetch('/api/system/diagnostics'),
         fetch('/api/cpanel'),
         actixGatewayFetch('UFW', '/api/security'),
-        fetch('/api/rust-source')
+        fetch('/api/rust-source'),
+        fetch('/api/edge-cloud')
       ]);
 
       const [
@@ -112,7 +218,8 @@ export function usePanelController(
         diagRes,
         cpRes,
         secRes,
-        rustRes
+        rustRes,
+        edgeRes
       ] = results;
 
       if (telRes.status === 'fulfilled' && telRes.value.ok) {
@@ -197,6 +304,12 @@ export function usePanelController(
         try {
           const data = await rustRes.value.json();
           setRustFiles(Array.isArray(data) ? data : []);
+        } catch {}
+      }
+      if (edgeRes && edgeRes.status === 'fulfilled' && edgeRes.value.ok) {
+        try {
+          const data = await edgeRes.value.json();
+          setEdgeCloud(data);
         } catch {}
       }
     } catch (err) {
@@ -1424,6 +1537,198 @@ export function usePanelController(
     }
   };
 
+  const handleDeployWasiWorker = async (payload: {
+    name: string;
+    routePattern: string;
+    targetDomain: string;
+    wasiTarget: 'wasm32-wasip2' | 'wasm32-wasip1';
+    memoryLimitKb: number;
+    fuelLimit: number;
+    kvNamespace: string;
+    rustSourceSnippet: string;
+  }) => {
+    try {
+      const res = await fetch('/api/edge-cloud/workers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDeployWasiWorker error:', err);
+    }
+  };
+
+  const handleInvokeWasiWorker = async (
+    workerId: string
+  ): Promise<WasiWorkerInvokeResult | null> => {
+    try {
+      const res = await fetch(`/api/edge-cloud/workers/${workerId}/invoke`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.edgeCloud) setEdgeCloud(data.edgeCloud);
+        return data.result || null;
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleInvokeWasiWorker error:', err);
+    }
+    return null;
+  };
+
+  const handleToggleWasiWorker = async (workerId: string) => {
+    try {
+      const res = await fetch(`/api/edge-cloud/workers/${workerId}/toggle`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleToggleWasiWorker error:', err);
+    }
+  };
+
+  const handleDeleteWasiWorker = async (workerId: string) => {
+    try {
+      const res = await fetch(`/api/edge-cloud/workers/${workerId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDeleteWasiWorker error:', err);
+    }
+  };
+
+  const handleDeployOciContainer = async (payload: {
+    name: string;
+    image: string;
+    runtimeEngine: 'Youki OCI (Rust Rootless)' | 'Firecracker MicroVM (Rust KVM)';
+    hostPort: number;
+    containerPort: number;
+    memoryMaxMb: number;
+    cpuQuotaPercent: number;
+  }) => {
+    try {
+      const res = await fetch('/api/edge-cloud/containers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDeployOciContainer error:', err);
+    }
+  };
+
+  const handleOciContainerAction = async (
+    containerId: string,
+    action: 'start' | 'stop' | 'restart' | 'delete'
+  ) => {
+    try {
+      const res = await fetch(
+        `/api/edge-cloud/containers/${containerId}/action`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        }
+      );
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleOciContainerAction error:', err);
+    }
+  };
+
+  const handleAddWireGuardPeer = async (payload: {
+    name: string;
+    region: string;
+    endpoint: string;
+    allowedIps: string;
+  }) => {
+    try {
+      const res = await fetch('/api/edge-cloud/wireguard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleAddWireGuardPeer error:', err);
+    }
+  };
+
+  const handleToggleWireGuardPeer = async (peerId: string) => {
+    try {
+      const res = await fetch(`/api/edge-cloud/wireguard/${peerId}/toggle`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleToggleWireGuardPeer error:', err);
+    }
+  };
+
+  const handleDeleteWireGuardPeer = async (peerId: string) => {
+    try {
+      const res = await fetch(`/api/edge-cloud/wireguard/${peerId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDeleteWireGuardPeer error:', err);
+    }
+  };
+
+  const handleCreateBlake3Snapshot = async (payload: {
+    snapshotName: string;
+    targetResource: string;
+    s3Endpoint: string;
+    bucket: string;
+    immutableLock: boolean;
+  }) => {
+    try {
+      const res = await fetch('/api/edge-cloud/snapshots', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleCreateBlake3Snapshot error:', err);
+    }
+  };
+
+  const handleDeleteBlake3Snapshot = async (snapshotId: string) => {
+    try {
+      const res = await fetch(`/api/edge-cloud/snapshots/${snapshotId}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setEdgeCloud(await res.json());
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDeleteBlake3Snapshot error:', err);
+    }
+  };
+
   return {
     selectedAppId,
     setSelectedAppId,
@@ -1441,6 +1746,7 @@ export function usePanelController(
     diagnostics,
     cpanel,
     security,
+    edgeCloud,
     rustFiles,
     refreshing,
     fetchAllData,
@@ -1505,6 +1811,17 @@ export function usePanelController(
     handlePhpAction,
     handleUpdatePhpSettings,
     handleTogglePhpExtension,
-    handleSwitchSitePhpVersion
+    handleSwitchSitePhpVersion,
+    handleDeployWasiWorker,
+    handleInvokeWasiWorker,
+    handleToggleWasiWorker,
+    handleDeleteWasiWorker,
+    handleDeployOciContainer,
+    handleOciContainerAction,
+    handleAddWireGuardPeer,
+    handleToggleWireGuardPeer,
+    handleDeleteWireGuardPeer,
+    handleCreateBlake3Snapshot,
+    handleDeleteBlake3Snapshot
   };
 }

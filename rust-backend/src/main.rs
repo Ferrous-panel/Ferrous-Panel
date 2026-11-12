@@ -11,8 +11,10 @@
 //! (`Authorization: Basic <base64(user:pass)>`) with constant-time credential verification.
 
 mod actix_gateway;
+pub mod edge_cloud_engine;
 pub mod models;
 mod nginx_engine;
+pub mod persistence_engine;
 pub mod rust_core_manager;
 pub mod server;
 mod systemd_engine;

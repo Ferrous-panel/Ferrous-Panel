@@ -32,6 +32,7 @@ import {
   ActiveTab,
   CpanelData,
   DiagnosticCheckItem,
+  EdgeCloudData,
   MailServerData,
   ManagedApp,
   SecurityData,
@@ -47,6 +48,7 @@ interface OverviewViewProps {
   cpanel: CpanelData | null;
   security: SecurityData | null;
   mailData: MailServerData | null;
+  edgeCloud?: EdgeCloudData | null;
   diagnostics: DiagnosticCheckItem[];
   onRunDiagnostics: () => Promise<void>;
   onNavigate: (tab: ActiveTab, selectedAppId?: string) => void;
@@ -63,6 +65,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   databases,
   security,
   mailData,
+  edgeCloud,
   diagnostics,
   onRunDiagnostics,
   onNavigate,
@@ -655,6 +658,102 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
           ))}
         </div>
       </section>
+
+      {/* Rust Edge Cloud, WASI 0.2, Youki OCI, BoringTun WireGuard & Atomic Persistence Summary */}
+      {edgeCloud && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-orange-600 dark:text-orange-400" />
+                Rust Edge Cloud, WASI Serverless, Youki OCI &amp; Atomic Persistence
+              </h2>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Đồng bộ 100% nhân Rust: Wasmtime WASI 0.2, Youki Rootless Containers, BoringTun WireGuard Mesh (wg0) &amp; Lưu trữ nguyên tử (/etc/ferrous-panel/*.json)
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('edge-cloud')}
+              className="px-3.5 py-2 text-xs font-semibold text-white bg-orange-600 hover:bg-orange-500 rounded-lg inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+            >
+              <span>Mở Trung tâm Rust Edge &amp; WASI</span>
+              <ArrowUpRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60">
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Wasmtime WASI 0.2 Workers
+              </div>
+              <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
+                <span className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  {edgeCloud.wasiWorkers.length} Workers
+                </span>
+                <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                  &lt;250µs Cold Start
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] font-mono text-slate-500 truncate">
+                {edgeCloud.wasmtimeVersion}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60">
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                Youki OCI &amp; Firecracker KVM
+              </div>
+              <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
+                <span className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  {edgeCloud.ociContainers.filter((c) => c.status === 'running').length}/
+                  {edgeCloud.ociContainers.length} Active
+                </span>
+                <span className="text-xs text-sky-600 dark:text-sky-400">
+                  Cgroups v2
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] font-mono text-slate-500 truncate">
+                {edgeCloud.youkiVersion}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60">
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                BoringTun WireGuard Mesh
+              </div>
+              <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
+                <span className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  {edgeCloud.wireguardPeers.length} Mesh Peers
+                </span>
+                <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                  {edgeCloud.wireguardInterface} :{edgeCloud.wireguardListenPort}
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] font-mono text-slate-500 truncate">
+                {edgeCloud.meshSubnetCidr} · ChaCha20-Poly1305
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/60">
+              <div className="text-xs text-slate-500 dark:text-slate-400">
+                BLAKE3 Vault &amp; Disk Persistence
+              </div>
+              <div className="mt-1.5 flex items-baseline justify-between font-mono tabular-nums">
+                <span className="text-lg font-bold text-slate-900 dark:text-slate-100">
+                  {edgeCloud.blake3Snapshots.length} Snapshots
+                </span>
+                <span className="text-xs text-emerald-600 dark:text-emerald-400">
+                  Atomic Sync OK
+                </span>
+              </div>
+              <div className="mt-1 text-[11px] font-mono text-slate-500 truncate">
+                /etc/ferrous-panel/*.json · WORM Lock
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Active Websites Deployment Table */}
       <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden">

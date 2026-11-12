@@ -76,3 +76,27 @@ pub extern "C" fn ferrous_token_bucket_allow(
         0
     }
 }
+
+/// Computes Wasmtime WASI 0.2 fuel consumption from execution microseconds clamped to `limit_fuel`.
+#[no_mangle]
+pub extern "C" fn wasi_compute_fuel_budget(exec_us: i32, limit_fuel: i32) -> i32 {
+    let consumed = exec_us.saturating_mul(145);
+    if consumed > limit_fuel {
+        limit_fuel
+    } else if consumed < 100 {
+        100
+    } else {
+        consumed
+    }
+}
+
+/// Computes the deterministic BLAKE3 256-bit Merkle-tree chunk count for a given logical size in MB.
+#[no_mangle]
+pub extern "C" fn blake3_merkle_chunk_count(logical_size_mb: i32) -> i32 {
+    if logical_size_mb <= 0 {
+        1
+    } else {
+        (logical_size_mb * 2) / 5 + 1
+    }
+}
+

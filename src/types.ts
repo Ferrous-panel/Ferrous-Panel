@@ -740,9 +740,116 @@ export interface PolyglotCompileResult {
   compiledAt: string;
 }
 
+export interface WasiEdgeWorker {
+  id: string;
+  name: string;
+  routePattern: string;
+  targetDomain: string;
+  wasiTarget: 'wasm32-wasip2' | 'wasm32-wasip1';
+  engineVersion: string;
+  coldStartUs: number;
+  memoryLimitKb: number;
+  memoryUsedKb: number;
+  fuelLimit: number;
+  invocations24h: number;
+  avgExecutionUs: number;
+  blake3Hash: string;
+  kvNamespace: string;
+  status: 'active' | 'paused';
+  rustSourceSnippet: string;
+  lastInvokedAt: string;
+}
+
+export interface WasiWorkerInvokeResult {
+  workerId: string;
+  workerName: string;
+  route: string;
+  statusCode: number;
+  coldStartUs: number;
+  executionTimeUs: number;
+  fuelConsumed: number;
+  memoryPeakKb: number;
+  blake3Verify: string;
+  responseHeaders: Record<string, string>;
+  responseBody: string;
+  invokedAt: string;
+}
+
+export interface OciContainerSandbox {
+  id: string;
+  name: string;
+  image: string;
+  runtimeEngine: 'Youki OCI (Rust Rootless)' | 'Firecracker MicroVM (Rust KVM)';
+  cgroupsV2Path: string;
+  internalIp: string;
+  hostPort: number;
+  containerPort: number;
+  memoryMaxMb: number;
+  memoryUsedMb: number;
+  cpuQuotaPercent: number;
+  cpuUsagePercent: number;
+  pidsCurrent: number;
+  pidsMax: number;
+  seccompProfile: string;
+  status: 'running' | 'stopped';
+  uptime: string;
+}
+
+export interface WireGuardPeerNode {
+  id: string;
+  name: string;
+  region: string;
+  interfaceName: string;
+  publicKey: string;
+  presharedKeyMasked: string;
+  endpoint: string;
+  allowedIps: string;
+  meshIp: string;
+  cipherSuite: string;
+  latestHandshake: string;
+  rxMb: number;
+  txMb: number;
+  latencyMs: number;
+  persistentKeepaliveSec: number;
+  status: 'connected' | 'standby';
+}
+
+export interface Blake3ObjectSnapshot {
+  id: string;
+  snapshotName: string;
+  targetResource: string;
+  s3Endpoint: string;
+  bucket: string;
+  merkleRootBlake3: string;
+  compression: string;
+  dedupRatio: string;
+  logicalSizeMb: number;
+  storedSizeMb: number;
+  chunksCount: number;
+  immutableLock: boolean;
+  createdAt: string;
+  status: 'verified' | 'syncing';
+}
+
+export interface EdgeCloudData {
+  wasmtimeVersion: string;
+  youkiVersion: string;
+  boringtunVersion: string;
+  blake3EngineVersion: string;
+  wireguardInterface: string;
+  wireguardListenPort: number;
+  serverPublicKey: string;
+  meshSubnetCidr: string;
+  wasiWorkers: WasiEdgeWorker[];
+  ociContainers: OciContainerSandbox[];
+  wireguardPeers: WireGuardPeerNode[];
+  blake3Snapshots: Blake3ObjectSnapshot[];
+}
+
 export type ActiveTab =
   | 'overview'
   | 'websites'
+  | 'edge-cloud'
   | 'php'
   | 'oneclick'
   | 'ssh'
@@ -753,6 +860,7 @@ export type ActiveTab =
   | 'cpanel'
   | 'security'
   | 'rust-source';
+
 
 
 

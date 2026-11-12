@@ -12,3 +12,5 @@ export { SystemOptimizerView } from './optimizer/SystemOptimizerView';
 export { CpanelSuiteView } from './cpanel/CpanelSuiteView';
 export { SecurityCenterView } from './security/SecurityCenterView';
 export { RustSourceView } from './rust-core/RustSourceView';
+export { RustEdgeCloudView } from './edge-cloud/RustEdgeCloudView';
+

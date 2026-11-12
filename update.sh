@@ -36,6 +36,13 @@ echo -e "${BLUE}[*] Building frontend & verifying Rust core...${NC}"
 npm install --legacy-peer-deps --prefer-offline 2>/dev/null || npm install --legacy-peer-deps
 npm run build
 
+# Deploy latest compiled binary
+if [ -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" ]; then
+  cp -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
+  cp -f "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-system-core 2>/dev/null || true
+  chmod +x /usr/local/bin/ferrous-panel-daemon /usr/local/bin/ferrous-system-core 2>/dev/null || true
+fi
+
 # Re-link CLI commands if needed
 if [ -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" ]; then
   cp -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" /usr/local/bin/fp

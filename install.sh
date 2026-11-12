@@ -401,4 +401,3 @@ echo -e "  👉 ${BOLD}Change Admin Password${NC}  : Type ${CYAN}fp 5${NC} in SS
 echo -e "  👉 ${BOLD}Bind Custom Domain${NC}     : Type ${CYAN}fp 17 <domain>${NC} in SSH terminal"
 echo -e "  👉 ${BOLD}Show Admin Credentials${NC} : Type ${CYAN}fp 14${NC} in SSH terminal"
 echo -e "${GREEN}==============================================================================${NC}"
-EOF

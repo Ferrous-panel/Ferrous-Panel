@@ -17,6 +17,7 @@ use uuid::Uuid;
 mod cpanel_tools;
 mod database;
 pub mod ebpf_xdp_shield;
+pub mod edge_cloud_mesh;
 pub mod ferrousx_engine;
 mod file_manager;
 mod git_deploy;

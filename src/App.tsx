@@ -19,6 +19,7 @@ import {
   OneClickAppsView,
   OverviewView,
   PhpManagerView,
+  RustEdgeCloudView,
   RustSourceView,
   SecurityCenterView,
   SqlDatabaseView,
@@ -31,8 +32,30 @@ export { actixGatewayFetch, type ActixGatewaySubsystem } from './services/actixG
 
 export default function App() {
   const { lang, setLang, toggleLang, tr } = usePanelLanguage();
-  const [activeTab, setActiveTab] = useState<ActiveTab>('overview');
-  const [isDark, setIsDark] = useState<boolean>(true);
+  const [activeTab, setActiveTabState] = useState<ActiveTab>(() => {
+    try {
+      const saved = localStorage.getItem('fp_active_tab') as ActiveTab | null;
+      return saved || 'overview';
+    } catch {
+      return 'overview';
+    }
+  });
+  const setActiveTab = (tab: ActiveTab) => {
+    setActiveTabState(tab);
+    try {
+      localStorage.setItem('fp_active_tab', tab);
+    } catch {
+      // ignore
+    }
+  };
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('fp_theme_dark');
+      return saved !== null ? saved === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
   const [isDeployModalOpen, setIsDeployModalOpen] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [commandOpen, setCommandOpen] = useState<boolean>(false);
@@ -44,6 +67,11 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', isDark);
+    try {
+      localStorage.setItem('fp_theme_dark', String(isDark));
+    } catch {
+      // ignore
+    }
   }, [isDark]);
 
   useEffect(() => {
@@ -223,6 +251,7 @@ export default function App() {
                   cpanel={controller.cpanel}
                   security={controller.security}
                   mailData={controller.mailData}
+                  edgeCloud={controller.edgeCloud}
                   diagnostics={controller.diagnostics}
                   onRunDiagnostics={controller.fetchDiagnostics}
                   onNavigate={controller.handleNavigate}
@@ -246,6 +275,23 @@ export default function App() {
                   onRenewSsl={controller.handleRenewSsl}
                   onDeleteWebsite={controller.handleDeleteWebsite}
                   onOpenDeployModal={() => setIsDeployModalOpen(true)}
+                />
+              )}
+
+              {activeTab === 'edge-cloud' && (
+                <RustEdgeCloudView
+                  edgeCloud={controller.edgeCloud}
+                  onDeployWasiWorker={controller.handleDeployWasiWorker}
+                  onInvokeWasiWorker={controller.handleInvokeWasiWorker}
+                  onToggleWasiWorker={controller.handleToggleWasiWorker}
+                  onDeleteWasiWorker={controller.handleDeleteWasiWorker}
+                  onDeployOciContainer={controller.handleDeployOciContainer}
+                  onOciContainerAction={controller.handleOciContainerAction}
+                  onAddWireGuardPeer={controller.handleAddWireGuardPeer}
+                  onToggleWireGuardPeer={controller.handleToggleWireGuardPeer}
+                  onDeleteWireGuardPeer={controller.handleDeleteWireGuardPeer}
+                  onCreateBlake3Snapshot={controller.handleCreateBlake3Snapshot}
+                  onDeleteBlake3Snapshot={controller.handleDeleteBlake3Snapshot}
                 />
               )}
 
