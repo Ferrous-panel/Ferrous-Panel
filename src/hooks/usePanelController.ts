@@ -222,9 +222,25 @@ export function usePanelController(
         edgeRes
       ] = results;
 
+      const clientHost =
+        typeof window !== 'undefined' &&
+        window.location.hostname &&
+        window.location.hostname !== 'localhost' &&
+        window.location.hostname !== '127.0.0.1'
+          ? window.location.hostname
+          : '';
+
       if (telRes.status === 'fulfilled' && telRes.value.ok) {
         try {
           const data = await telRes.value.json();
+          if (
+            clientHost &&
+            (!data.publicIp ||
+              data.publicIp === '103.145.88.210' ||
+              data.publicIp === '127.0.0.1')
+          ) {
+            data.publicIp = clientHost;
+          }
           setTelemetry(data);
         } catch {}
       }
@@ -255,6 +271,14 @@ export function usePanelController(
       if (sshRes.status === 'fulfilled' && sshRes.value.ok) {
         try {
           const data = await sshRes.value.json();
+          if (
+            clientHost &&
+            (!data.serverHost ||
+              data.serverHost === '103.145.88.210' ||
+              data.serverHost === '127.0.0.1')
+          ) {
+            data.serverHost = clientHost;
+          }
           setSshData(data);
         } catch {}
       }

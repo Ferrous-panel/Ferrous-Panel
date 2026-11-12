@@ -98,6 +98,15 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   const [runningQuery, setRunningQuery] = useState<boolean>(false);
   const [copiedConn, setCopiedConn] = useState<boolean>(false);
 
+  // Dynamic Server Host detection (auto-resolves VPS IP or domain)
+  const liveServerHost =
+    typeof window !== 'undefined' &&
+    window.location.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+      ? window.location.hostname
+      : '127.0.0.1';
+
   // Create New DB Form State (with Custom SQL Password)
   const [newDbName, setNewDbName] = useState('');
   const [newEngine, setNewEngine] =
@@ -641,24 +650,48 @@ ${
                 </span>
               </div>
             </div>
-            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setSubTab('phpmyadmin');
-                  setPmaActiveTab('databases');
-                }}
-                className="flex-1 py-1.5 px-2.5 text-center rounded-lg bg-orange-600/10 text-orange-600 dark:text-orange-400 font-semibold hover:bg-orange-600/20 transition-colors cursor-pointer"
-              >
-                Mở phpMyAdmin 5.2
-              </button>
-              <button
-                type="button"
-                onClick={() => setSubTab('mysql_tuning')}
-                className="flex-1 py-1.5 px-2.5 text-center rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer"
-              >
-                Tệp my.cnf
-              </button>
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-col gap-2">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSubTab('phpmyadmin');
+                    setPmaActiveTab('databases');
+                  }}
+                  className="flex-1 py-1.5 px-2.5 text-center text-xs rounded-lg bg-orange-600/10 text-orange-600 dark:text-orange-400 font-semibold hover:bg-orange-600/20 transition-colors cursor-pointer"
+                >
+                  Giao diện Panel
+                </button>
+                <a
+                  href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 py-1.5 px-2.5 text-center text-xs rounded-lg bg-orange-600 text-white font-semibold hover:bg-orange-500 transition-colors inline-flex items-center justify-center gap-1 cursor-pointer"
+                  title="Mở phpMyAdmin giao diện web gốc trên cổng 888"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Mở Tab Mới (:888)
+                </a>
+              </div>
+              <div className="flex gap-2">
+                <a
+                  href={`http://${liveServerHost}${pmaPath}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 py-1 px-2 text-center text-[11px] rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors inline-flex items-center justify-center gap-1 cursor-pointer"
+                  title="Mở phpMyAdmin qua đường dẫn /phpadmin (Cổng 80/443 tương thích Cloudflare)"
+                >
+                  <ExternalLink className="w-2.5 h-2.5" />
+                  Mở qua /phpadmin
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setSubTab('mysql_tuning')}
+                  className="py-1 px-2.5 text-center text-[11px] rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-medium hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                >
+                  my.cnf
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -813,9 +846,62 @@ ${
             </div>
           )}
 
-          {/* 2. PHPMYADMIN 5.2.1 EMBEDDED WEB GUI & NGINX SECURITY CONFIGURATION (ALWAYS ACCESSIBLE) */}
+          {/* 2. PHPMYADMIN 5.2.1 EMBEDDED WEB GUI & NGINX/FERROUSX SECURITY CONFIGURATION */}
           {subTab === 'phpmyadmin' && (
             <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden space-y-6 p-6">
+              {/* Direct Access & Cloudflare Guidance Banner */}
+              <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-xs">
+                <div className="space-y-1">
+                  <div className="font-bold flex items-center gap-1.5 text-slate-900 dark:text-slate-100">
+                    <ShieldCheck className="w-4 h-4 text-amber-600 dark:text-amber-400" />
+                    <span>Đường dẫn truy cập phpMyAdmin 5.2.1 trực tiếp:</span>
+                  </div>
+                  <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <span>IP Trực tiếp:</span>
+                    <a
+                      href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-bold text-orange-600 dark:text-orange-400 underline"
+                    >
+                      http://{liveServerHost}:{pmaPort}{pmaPath}
+                    </a>
+                    <span>·</span>
+                    <span>Tên miền (Cloudflare):</span>
+                    <a
+                      href={`http://${liveServerHost}${pmaPath}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-bold text-orange-600 dark:text-orange-400 underline"
+                    >
+                      http://{liveServerHost}{pmaPath}
+                    </a>
+                    <span>·</span>
+                    <span>User: <strong className="text-slate-900 dark:text-slate-100">root</strong></span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <a
+                    href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-orange-600 text-white font-semibold text-xs hover:bg-orange-500 transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Mở phpMyAdmin (:888)
+                  </a>
+                  <a
+                    href={`http://${liveServerHost}${pmaPath}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-semibold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    Qua /phpadmin
+                  </a>
+                </div>
+              </div>
+
               {/* phpMyAdmin 5.2.1 Full Interactive Frame */}
               <div className="rounded-xl border border-slate-300 dark:border-slate-700 overflow-hidden bg-slate-50 dark:bg-slate-950 shadow-sm">
                 {/* phpMyAdmin Top Header Bar */}
@@ -835,13 +921,22 @@ ${
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
+                    <a
+                      href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="px-2 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      Mở Tab Mới (:888)
+                    </a>
                     {activeDb && (
                       <button
                         type="button"
                         onClick={handlePmaInsertSampleRow}
-                        className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded text-[11px] cursor-pointer"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-amber-400 border border-slate-700 font-semibold rounded text-[11px] cursor-pointer"
                       >
-                        + Chèn dòng (Insert Row)
+                        + Chèn dòng
                       </button>
                     )}
                     <button

@@ -251,7 +251,14 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
         <div className="p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums">
-              <span>IP: {telemetry.publicIp || '103.145.88.210'}</span>
+              <span>
+                IP:{' '}
+                {telemetry.publicIp && telemetry.publicIp !== '103.145.88.210'
+                  ? telemetry.publicIp
+                  : typeof window !== 'undefined' && window.location.hostname
+                    ? window.location.hostname
+                    : '127.0.0.1'}
+              </span>
               <span aria-hidden="true">·</span>
               <span>{telemetry.osVersion}</span>
               <span aria-hidden="true">·</span>

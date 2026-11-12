@@ -586,6 +586,13 @@ if (fs.existsSync(apiDaemonSrcPath)) {
   fs.copyFileSync(apiDaemonSrcPath, apiDaemonOutPath);
 }
 
+const ferrousxSrcPath = path.resolve(WORKSPACE_ROOT, 'Ferrous-panel/bin/ferrousx-server.mjs');
+const ferrousxOutPath = path.resolve(RELEASE_DIR, 'ferrousx-bin');
+if (fs.existsSync(ferrousxSrcPath)) {
+  fs.copyFileSync(ferrousxSrcPath, ferrousxOutPath);
+  fs.chmodSync(ferrousxOutPath, 0o755);
+}
+
 const manifestPath = path.resolve(RELEASE_DIR, 'build-manifest.json');
 fs.writeFileSync(
   manifestPath,

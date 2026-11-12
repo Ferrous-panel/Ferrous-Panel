@@ -520,11 +520,18 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
     0
   );
 
-  const sshCliSnippet = `ssh -p ${sshData.config.port} root@${sshData.serverHost}`;
-  const sftpUriSnippet = `sftp://root@${sshData.serverHost}:${sshData.config.port}/www/wwwroot`;
+  const effectiveHost =
+    (sshData.serverHost && sshData.serverHost !== '103.145.88.210')
+      ? sshData.serverHost
+      : typeof window !== 'undefined' && window.location.hostname
+        ? window.location.hostname
+        : '127.0.0.1';
+
+  const sshCliSnippet = `ssh -p ${sshData.config.port} root@${effectiveHost}`;
+  const sftpUriSnippet = `sftp://root@${effectiveHost}:${sshData.config.port}/www/wwwroot`;
   const vscodeConfigSnippet = [
     'Host ferrous-ubuntu-prod',
-    `    HostName ${sshData.serverHost}`,
+    `    HostName ${effectiveHost}`,
     `    Port ${sshData.config.port}`,
     '    User root',
     '    IdentityFile ~/.ssh/id_ed25519',
@@ -604,7 +611,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
               Địa chỉ &amp; Cổng OpenSSH
             </div>
             <div className="text-sm font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-              {sshData.serverHost}:{sshData.config.port}
+              {effectiveHost}:{sshData.config.port}
             </div>
             <div className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
               sshd Active · UFW Allowed
@@ -1159,7 +1166,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
                   <div className="flex justify-between">
                     <span className="text-slate-500">Host / IP:</span>
                     <span className="font-semibold text-slate-900 dark:text-white select-all">
-                      {sshData.serverHost}
+                      {effectiveHost}
                     </span>
                   </div>
                   <div className="flex justify-between">

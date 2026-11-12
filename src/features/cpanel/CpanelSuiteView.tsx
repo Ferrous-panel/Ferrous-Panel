@@ -88,8 +88,15 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
   const [dnsType, setDnsType] = useState<
     'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'CAA'
   >('A');
+  const liveIp =
+    typeof window !== 'undefined' &&
+    window.location.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+      ? window.location.hostname
+      : '127.0.0.1';
   const [dnsHost, setDnsHost] = useState('edge.ferroushub.vn');
-  const [dnsValue, setDnsValue] = useState('103.145.88.210');
+  const [dnsValue, setDnsValue] = useState(liveIp);
   const [dnsTtl, setDnsTtl] = useState(300);
 
   // Backup state
@@ -524,7 +531,7 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
                   required
                   value={dnsValue}
                   onChange={(e) => setDnsValue(e.target.value)}
-                  placeholder="103.145.88.210"
+                  placeholder={liveIp}
                   className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
                 />
               </div>

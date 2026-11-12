@@ -119,10 +119,10 @@ if ! grep -rq "ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev
 fi
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y php8.3-fpm php8.3-cli php8.3-common php8.3-mysql php8.3-pgsql \
   php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip php8.3-bcmath php8.3-intl \
-  php8.3-opcache php8.3-redis php8.3-imagick phpmyadmin || true
+  php8.3-opcache php8.3-redis php8.3-imagick || true
 sudo systemctl enable --now php8.3-fpm || true
 
-echo "[4/9] Initializing MariaDB & PostgreSQL & phpMyAdmin Nginx Vhost..."
+echo "[4/9] Initializing MariaDB, PostgreSQL & phpMyAdmin 5.2.1 Standalone Engine..."
 sudo systemctl enable --now mariadb postgresql || true
 if [ "$IS_UPGRADE" -eq 0 ]; then
   sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${SQL_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>/dev/null || true
@@ -131,19 +131,74 @@ else
   echo "✓ Giữ nguyên mật khẩu Root MariaDB & PostgreSQL và toàn bộ Database hiện có."
 fi
 
-# Configure Nginx VirtualHost for phpMyAdmin 5.2 on Port 888
+# Ensure standalone phpMyAdmin 5.2.1 files exist
+sudo mkdir -p /www/server/phpmyadmin /var/lib/phpmyadmin/tmp /usr/share/phpmyadmin
+if [ ! -f /www/server/phpmyadmin/index.php ] && [ ! -f /usr/share/phpmyadmin/index.php ]; then
+  echo "Downloading official standalone phpMyAdmin 5.2.1..."
+  sudo curl -sSL --connect-timeout 5 https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz | sudo tar -xz --strip-components=1 -C /www/server/phpmyadmin 2>/dev/null || true
+fi
+if [ -f /usr/share/phpmyadmin/index.php ] && [ ! -f /www/server/phpmyadmin/index.php ]; then
+  sudo cp -r /usr/share/phpmyadmin/. /www/server/phpmyadmin/ 2>/dev/null || true
+elif [ -f /www/server/phpmyadmin/index.php ] && [ ! -d /usr/share/phpmyadmin/templates ]; then
+  sudo ln -sf /www/server/phpmyadmin /usr/share/phpmyadmin 2>/dev/null || true
+fi
+
+# phpMyAdmin Blowfish Secret Configuration
+if [ -d /www/server/phpmyadmin ] && [ ! -f /www/server/phpmyadmin/config.inc.php ]; then
+  sudo tee /www/server/phpmyadmin/config.inc.php > /dev/null <<'EOF_PMA_CFG'
+<?php
+declare(strict_types=1);
+$cfg['blowfish_secret'] = 'ferrous2026_pma_secret_blowfish_key_9988_prod';
+$i = 0;
+$i++;
+$cfg['Servers'][$i]['auth_type'] = 'cookie';
+$cfg['Servers'][$i]['host'] = '127.0.0.1';
+$cfg['Servers'][$i]['port'] = '3306';
+$cfg['Servers'][$i]['compress'] = false;
+$cfg['Servers'][$i]['AllowNoPassword'] = false;
+$cfg['UploadDir'] = '';
+$cfg['SaveDir'] = '';
+$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+EOF_PMA_CFG
+fi
+sudo chown -R www-data:www-data /www/server/phpmyadmin /var/lib/phpmyadmin 2>/dev/null || true
+sudo chmod -R 755 /www/server/phpmyadmin 2>/dev/null || true
+sudo chmod 777 /var/lib/phpmyadmin/tmp 2>/dev/null || true
+
+# Standalone phpMyAdmin Systemd Service on Port 888 (Works with both FerrousX and Nginx)
+sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<'EOF_PMA_SVC'
+[Unit]
+Description=FerrousPanel phpMyAdmin Standalone Service (Port 888)
+After=network.target mariadb.service php8.3-fpm.service
+Wants=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/www/server/phpmyadmin
+ExecStart=/usr/bin/php -S 0.0.0.0:888 -t /www/server/phpmyadmin
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF_PMA_SVC
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now ferrous-pma.service 2>/dev/null || true
+sudo systemctl restart ferrous-pma.service 2>/dev/null || true
+
+# Also configure Nginx bridge if Nginx is active
 sudo mkdir -p /etc/nginx/conf.d
 sudo tee /etc/nginx/conf.d/ferrous-phpmyadmin.conf > /dev/null <<EOF
-# Ferrous-panel — phpMyAdmin 5.2 Guard on Port ${PMA_PORT}
 server {
     listen ${PMA_PORT};
     server_name _;
     client_max_body_size 256M;
-
     location ${PMA_PATH} {
-        alias /usr/share/phpmyadmin/;
+        alias /www/server/phpmyadmin/;
         index index.php;
-
         location ~ \.php$ {
             fastcgi_pass unix:/run/php/php8.3-fpm.sock;
             fastcgi_param SCRIPT_FILENAME \$request_filename;
@@ -253,6 +308,12 @@ if [ -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" ]; then
   sudo chmod +x /usr/local/bin/fp /usr/local/bin/ferrous
 fi
 
+# Install FerrousX Web Server & Reverse Proxy Binary
+if [ -f "${INSTALL_DIR}/Ferrous-panel/bin/ferrousx-server.mjs" ]; then
+  sudo cp "${INSTALL_DIR}/Ferrous-panel/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-bin
+  sudo chmod +x /usr/local/bin/ferrousx-bin
+fi
+
 # 1. Build static frontend bundle (`dist/`)
 cd "${INSTALL_DIR}"
 npm install --legacy-peer-deps
@@ -335,6 +396,12 @@ PUBLIC_IP="$(curl -s4 --connect-timeout 2 --max-time 3 https://api.ipify.org 2>/
              hostname -I 2>/dev/null | awk '{print $1}' || \
              echo 'YOUR_SERVER_IP')"
 PUBLIC_IP="${PUBLIC_IP:-YOUR_SERVER_IP}"
+sudo mkdir -p /etc/ferrous-panel
+echo "${PUBLIC_IP}" | sudo tee /etc/ferrous-panel/server_ip > /dev/null
+if command -v jq &>/dev/null && [ -f /etc/ferrous-panel/admin.json ]; then
+  sudo jq ".serverHost = \"${PUBLIC_IP}\"" /etc/ferrous-panel/admin.json > /tmp/admin.json.tmp && sudo mv /tmp/admin.json.tmp /etc/ferrous-panel/admin.json
+  sudo chmod 600 /etc/ferrous-panel/admin.json
+fi
 echo "=============================================================================="
 echo "✅ FERROUS-PANEL (100% NATIVE RUST CORE) ĐÃ CÀI ĐẶT THÀNH CÔNG TRÊN UBUNTU!"
 echo "------------------------------------------------------------------------------"

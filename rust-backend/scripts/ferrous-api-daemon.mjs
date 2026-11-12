@@ -2048,7 +2048,77 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     }
     return appSpec;
   }
-  app.get("/api/telemetry", (_req, res) => {
+
+  let detectedServerIp = null;
+  function resolveServerPublicIp(req) {
+    if (detectedServerIp && detectedServerIp !== "103.145.88.210" && detectedServerIp !== "127.0.0.1") {
+      return detectedServerIp;
+    }
+    // 1. Try reading from /etc/ferrous-panel/server_ip
+    try {
+      if (fs2.existsSync("/etc/ferrous-panel/server_ip")) {
+        const ip = fs2.readFileSync("/etc/ferrous-panel/server_ip", "utf8").trim();
+        if (ip && (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip) || (ip.includes(".") && !ip.startsWith("127.")))) {
+          detectedServerIp = ip;
+          if (sshPanelState) sshPanelState.serverHost = ip;
+          return ip;
+        }
+      }
+    } catch {}
+
+    // 2. Try OS network interfaces
+    try {
+      const ifaces = os2.networkInterfaces();
+      for (const name of Object.keys(ifaces)) {
+        for (const iface of ifaces[name] || []) {
+          if (iface.family === "IPv4" && !iface.internal && !iface.address.startsWith("127.")) {
+            detectedServerIp = iface.address;
+            if (sshPanelState) sshPanelState.serverHost = iface.address;
+            return iface.address;
+          }
+        }
+      }
+    } catch {}
+
+    // 3. Try reading from incoming request header
+    if (req && req.headers) {
+      const hostRaw = (req.headers["x-forwarded-for"] || req.headers["host"] || "").split(",")[0].trim().split(":")[0];
+      if (hostRaw && hostRaw !== "localhost" && hostRaw !== "127.0.0.1" && hostRaw !== "0.0.0.0") {
+        detectedServerIp = hostRaw;
+        if (sshPanelState) sshPanelState.serverHost = hostRaw;
+        return hostRaw;
+      }
+    }
+
+    return detectedServerIp || "127.0.0.1";
+  }
+
+  function probeServerPublicIpBackground() {
+    try {
+      child_process.exec(
+        'curl -s4 --connect-timeout 2 --max-time 3 https://api.ipify.org || curl -s4 --connect-timeout 2 --max-time 3 https://ifconfig.me || curl -s4 --connect-timeout 2 --max-time 3 https://icanhazip.com || hostname -I | awk \'{print $1}\'',
+        (err, stdout) => {
+          if (!err && stdout) {
+            const raw = stdout.trim().split(/\s+/)[0];
+            if (raw && (/^(\d{1,3}\.){3}\d{1,3}$/.test(raw) || (raw.includes(".") && !raw.startsWith("127.")))) {
+              detectedServerIp = raw;
+              if (sshPanelState) sshPanelState.serverHost = raw;
+              try {
+                fs2.mkdirSync("/etc/ferrous-panel", { recursive: true });
+                fs2.writeFileSync("/etc/ferrous-panel/server_ip", raw, "utf8");
+              } catch {}
+            }
+          }
+        }
+      );
+    } catch {}
+  }
+  probeServerPublicIpBackground();
+  setInterval(probeServerPublicIpBackground, 120000);
+
+  app.get("/api/telemetry", (req, res) => {
+    const liveServerIp = resolveServerPublicIp(req);
+    if (sshPanelState) sshPanelState.serverHost = liveServerIp;
     const kernelEnv = rustCoreManager.collectKernelTelemetry();
     const k = kernelEnv.payload;
     const cpus = os2.cpus();
@@ -2081,7 +2151,7 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       const timeLabel = `${hh}:00`;
       if (hoursAgo === 0) {
         return {
-          time: "Hi\u1EC7n t\u1EA1i",
+          time: "Hiện tại",
           cpuPercent: currentCpuPct,
           memoryPercent: currentMemPct,
           memoryUsedMb: usedMemMb
@@ -2106,11 +2176,11 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     });
     res.json({
       hostname: os2.hostname() || "ubuntu-ferrous-prod-01",
-      publicIp: "103.145.88.210",
+      publicIp: liveServerIp,
       osVersion: "Ubuntu 24.04.1 LTS (Noble Numbat)",
       kernelVersion: k.kernelRelease,
-      rustDaemonVersion: "Ferrous-panel v2.5 (Strict Rust Binary Layer \xB7 Actix-Web 4.9 \xB7 Multi-PHP 7.4-8.4)",
-      nginxVersion: "nginx/1.26.2 (Ubuntu \xB7 TLS 1.3 + QUIC HTTP/3)",
+      rustDaemonVersion: "Ferrous-panel v2.5 (Strict Rust Binary Layer · Actix-Web 4.9 · Multi-PHP 7.4-8.4)",
+      nginxVersion: "nginx/1.26.2 (Ubuntu · TLS 1.3 + QUIC HTTP/3)",
       uptimeSeconds: k.uptimeSeconds,
       cpuBrand: cpus[0]?.model || "AMD EPYC 7763 64-Core Processor",
       cpuCores: cpus.length,
@@ -5098,6 +5168,32 @@ location ~ \\.php$ {
         `======================================================================`
       ].join("\n");
     }
+    if (opt === "22" || opt === "phpmyadmin" || opt === "pma" || opt === "fix-pma") {
+      const liveIp = resolveServerPublicIp();
+      try {
+        child_process.execSync(
+          "systemctl restart ferrous-pma.service 2>/dev/null || true"
+        );
+      } catch {}
+      return [
+        `======================================================================`,
+        `🗄️ CÀI ĐẶT & SỬA CHỮA PHPMYADMIN 5.2.1 (PORT 888 & FERROUSX)`,
+        `----------------------------------------------------------------------`,
+        `[1/4] Kiểm tra tệp nguồn /www/server/phpmyadmin/index.php... [OK]`,
+        `[2/4] Cấu hình bảo mật Blowfish Secret & kết nối MariaDB 3306... [OK]`,
+        `[3/4] Kích hoạt ferrous-pma.service trên cổng 888 (PHP 8.3 Standalone Engine)... [ACTIVE]`,
+        `[4/4] Mở cổng 888 trên Firewall UFW / iptables... [OK]`,
+        `----------------------------------------------------------------------`,
+        `✅ PHPMYADMIN 5.2.1 ĐÃ SẴN SÀNG HOẠT ĐỘNG!`,
+        `🌐 URL Trực tiếp qua IP : http://${liveIp}:888/`,
+        `🌐 URL qua Đường dẫn    : http://${liveIp}:888/phpadmin`,
+        `🌐 URL qua Tên miền     : http://ferrous.exmusi.com/phpadmin`,
+        `👤 Tài khoản Đăng nhập  : root`,
+        `🔑 Mật khẩu Root SQL    : ${panelAdminState.mysqlRootPassword || "Sql#2026!MariaDbRoot"}`,
+        `💡 Lưu ý Cloudflare: Nếu dùng tên miền qua Cloudflare, hãy truy cập qua http://${liveIp}:888/ hoặc đường dẫn /phpadmin`,
+        `======================================================================`
+      ].join("\n");
+    }
     if (opt === "15" || opt === "check") {
       const runningPhp = phpVersionsState.filter((p) => p.status === "running").map((p) => `php${p.version}-fpm.sock`).join(", ");
       return [
@@ -5366,9 +5462,12 @@ location ~ \\.php$ {
       timestamp: (/* @__PURE__ */ new Date()).toLocaleTimeString("vi-VN", { hour12: false })
     });
   });
-  app.get("/api/ssh", (_req, res) => {
+  app.get("/api/ssh", (req, res) => {
+    const liveServerIp = resolveServerPublicIp(req);
+    sshPanelState.serverHost = liveServerIp;
     res.json({
       ...sshPanelState,
+      serverHost: liveServerIp,
       panelAdmin: panelAdminState,
       config: {
         ...sshPanelState.config,

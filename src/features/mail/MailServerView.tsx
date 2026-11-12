@@ -76,6 +76,14 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
     null
   );
 
+  const serverIp =
+    typeof window !== 'undefined' &&
+    window.location.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+      ? window.location.hostname
+      : '127.0.0.1';
+
   const activeDnsDomain =
     mailData.domains.find((d) => d.id === activeDnsDomainId) ||
     mailData.domains[0] ||
@@ -540,7 +548,7 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
                       onClick={() =>
                         handleCopy(
                           'spf',
-                          `v=spf1 a mx ip4:103.145.88.210 include:_spf.${activeDnsDomain.domain} ~all`
+                          `v=spf1 a mx ip4:${serverIp} include:_spf.${activeDnsDomain.domain} ~all`
                         )
                       }
                       className="inline-flex items-center gap-1 text-[11px] font-mono text-emerald-600 dark:text-emerald-400 hover:underline cursor-pointer"
@@ -550,7 +558,7 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
                     </button>
                   </div>
                   <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 bg-white dark:bg-slate-900 p-2.5 rounded border border-slate-200 dark:border-slate-800 break-all">
-                    v=spf1 a mx ip4:103.145.88.210 include:_spf.{activeDnsDomain.domain} ~all
+                    v=spf1 a mx ip4:{serverIp} include:_spf.{activeDnsDomain.domain} ~all
                   </div>
                 </div>
 

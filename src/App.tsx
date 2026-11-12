@@ -96,7 +96,14 @@ export default function App() {
       <LoginView
         onLoginSuccess={handleLoginSuccess}
         panelAdminConfig={controller.sshData?.panelAdmin}
-        serverHost={controller.sshData?.serverHost || '103.145.88.210'}
+        serverHost={
+          (controller.sshData?.serverHost &&
+            controller.sshData.serverHost !== '103.145.88.210')
+            ? controller.sshData.serverHost
+            : typeof window !== 'undefined' && window.location.hostname
+              ? window.location.hostname
+              : '127.0.0.1'
+        }
         isDark={isDark}
         onToggleTheme={() => setIsDark(!isDark)}
         lang={lang}
