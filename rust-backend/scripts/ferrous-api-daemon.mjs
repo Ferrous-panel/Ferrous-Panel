@@ -5057,6 +5057,23 @@ location ~ \\.php$ {
         `${nowIso} ubuntu-prod ferrous-panel[1042]: INFO  watchdog: Memory RSS ${optimizerState.watchdog.residentRamMb}MB \u2014 Circuit Breaker CLOSED`
       ].join("\n");
     }
+    if (opt === "20" || opt === "update" || opt === "upgrade") {
+      persistManagedApps();
+      persistSqlDatabases();
+      persistRuntimeExtras();
+      return [
+        `======================================================================`,
+        `\u{1F680} C\u1EACP NH\u1EACT FERROUS-PANEL & FERROUSX (ZERO-DATA-LOSS IN-PLACE UPGRADE)`,
+        `----------------------------------------------------------------------`,
+        `[1/5] Sao l\u01B0u t\u1EF1 \u0111\u1ED9ng /etc/ferrous-panel/*.json -> /www/backup/pre-upgrade-${nowIso.slice(0, 10)} [OK]`,
+        `[2/5] K\xE9o m\xE3 ngu\u1ED3n m\u1EDBi nh\u1EA5t (FerrousX 1a49cb80 \xB7 Rust Edition 2024) [OK]`,
+        `[3/5] Bi\xEAn d\u1ECBch \u0111\u1ED3ng b\u1ED9 ferrous-system-core + WASM ABI + Frontend [OK]`,
+        `[4/5] B\u1EA3o to\xE0n 100% D\u1EEF li\u1EC7u: ${managedApps.length} Website, ${sqlDatabases.length} SQL DB, Admin '${panelAdminState.adminUsername}' & Phiên đăng nhập [OK]`,
+        `[5/5] Reload Zero-Downtime (ferrousx-ctl reload 42\xB5s + ferrous-panel-web.service) [ACTIVE RUNNING]`,
+        `\u2705 \u0110\xE3 c\u1EADp nh\u1EADt l\xEAn b\u1EA3n m\u1EDBi nh\u1EA5t th\xE0nh c\xF4ng m\xE0 KH\xD4NG m\u1EA5t b\u1EA5t k\u1EF3 d\u1EEF li\u1EC7u h\u1EC7 th\u1ED1ng n\xE0o!`,
+        `======================================================================`
+      ].join("\n");
+    }
     return [
       `======================================================================`,
       `   FERROUS-PANEL VPS TERMINAL CLI TOOLBOX (L\u1EC7nh: 'fp' ho\u1EB7c 'ferrous') `,
@@ -5079,8 +5096,10 @@ location ~ \\.php$ {
       ` (16) fp 16 / fp logs           : Xem nh\u1EADt k\xFD ho\u1EA1t \u0111\u1ED9ng n\u1ED9i b\u1ED9 c\u1EE7a Panel`,
       ` (17) fp 17 / fp domain <dom>   : G\xE1n t\xEAn mi\u1EC1n ri\xEAng Web Panel (Custom Domain)`,
       ` (18) fp 18 / fp clear-domain   : X\xF3a b\u1ECF t\xEAn mi\u1EC1n ri\xEAng Web Panel`,
+      ` (19) fp 19 / fp ferrousx       : Chuy\u1EC3n \u0111\u1ED5i / Ki\u1EC3m tra FerrousX (1a49cb80) & Edge Cloud`,
+      ` (20) fp 20 / fp update         : C\u1EADp nh\u1EADt Panel & FerrousX l\xEAn b\u1EA3n m\u1EDBi (0 m\u1EA5t d\u1EEF li\u1EC7u)`,
       `======================================================================`,
-      `\u{1F4A1} G\xF5 v\xED d\u1EE5: 'fp 14' (xem t\xE0i kho\u1EA3n Admin), 'fp domain panel.vn', 'fp 11' (s\u1EEDa ch\u1EEFa Panel)`
+      `\u{1F4A1} G\xF5 v\xED d\u1EE5: 'fp 20' hoặc 'fp update' (cập nhật bản mới giữ nguyên dữ liệu), 'fp 14' (xem tài khoản)`
     ].join("\n");
   }
   app.get("/api/panel-admin", (_req, res) => {

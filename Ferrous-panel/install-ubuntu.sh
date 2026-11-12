@@ -37,8 +37,35 @@ echo "==========================================================================
 echo "  Ferrous-panel v2.5 (Native Rust Actix-Web Core) — Ubuntu VPS Installer"
 echo "=============================================================================="
 
-# Interactive prompt for Web Panel Admin Account login credentials
-if [ -t 0 ]; then
+EXISTING_ADMIN_JSON="/etc/ferrous-panel/admin.json"
+IS_UPGRADE=0
+if [ -f "$EXISTING_ADMIN_JSON" ]; then
+  IS_UPGRADE=1
+  BACKUP_STAMP="$(date -u +"%Y%m%d-%H%M%S")"
+  PRE_UPGRADE_BACKUP_DIR="/www/backup/pre-upgrade-${BACKUP_STAMP}"
+  sudo mkdir -p "$PRE_UPGRADE_BACKUP_DIR"
+  sudo cp -a /etc/ferrous-panel/*.json "$PRE_UPGRADE_BACKUP_DIR/" 2>/dev/null || true
+  echo "🔄 PHÁT HIỆN BẢN CÀI ĐẶT CŨ TRÊN VPS -> CHUYỂN SANG CHẾ ĐỘ CẬP NHẬT AN TOÀN (IN-PLACE UPGRADE)"
+  echo "📦 Đã tự động sao lưu toàn bộ cấu hình & dữ liệu cũ tại: ${PRE_UPGRADE_BACKUP_DIR}"
+
+  # Đọc lại cấu hình hiện có từ admin.json để không làm mất tài khoản hay mật khẩu SQL
+  EXISTING_USER="$(grep -oE '"adminUsername"[[:space:]]*:[[:space:]]*"[^"]*"' "$EXISTING_ADMIN_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+  EXISTING_PASS="$(grep -oE '"adminPassword"[[:space:]]*:[[:space:]]*"[^"]*"' "$EXISTING_ADMIN_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+  EXISTING_SQL="$(grep -oE '"mysqlRootPassword"[[:space:]]*:[[:space:]]*"[^"]*"' "$EXISTING_ADMIN_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+  EXISTING_PORT="$(grep -oE '"panelPort"[[:space:]]*:[[:space:]]*[0-9]+' "$EXISTING_ADMIN_JSON" | head -n1 | grep -oE '[0-9]+$' || true)"
+  EXISTING_ENTRANCE="$(grep -oE '"securityEntrance"[[:space:]]*:[[:space:]]*"[^"]*"' "$EXISTING_ADMIN_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+  EXISTING_DOMAIN="$(grep -oE '"customDomain"[[:space:]]*:[[:space:]]*"[^"]*"' "$EXISTING_ADMIN_JSON" | head -n1 | sed -E 's/.*"([^"]*)"$/\1/' || true)"
+
+  ADMIN_USER="${ADMIN_USER:-${EXISTING_USER:-admin_ferrous}}"
+  ADMIN_PASS="${ADMIN_PASS:-${EXISTING_PASS:-}}"
+  SQL_ROOT_PASS="${SQL_ROOT_PASS:-${EXISTING_SQL:-}}"
+  PANEL_PORT="${EXISTING_PORT:-$PANEL_PORT}"
+  SECURITY_ENTRANCE="${EXISTING_ENTRANCE:-$SECURITY_ENTRANCE}"
+  CUSTOM_DOMAIN="${CUSTOM_DOMAIN:-${EXISTING_DOMAIN:-}}"
+fi
+
+# Interactive prompt for Web Panel Admin Account login credentials (only on fresh install)
+if [ "$IS_UPGRADE" -eq 0 ] && [ -t 0 ]; then
   echo ""
   echo "🔑 THIẾT LẬP TÀI KHOẢN ADMIN ĐĂNG NHẬP PANEL (WEB CONTROL PANEL LOGIN):"
   echo "----------------------------------------------------------------------"
@@ -65,14 +92,17 @@ ADMIN_USER="${ADMIN_USER:-admin_ferrous}"
 ADMIN_PASS="${ADMIN_PASS:-Fp#$(openssl rand -hex 4 2>/dev/null || echo '2026Ubuntu')!99}"
 SQL_ROOT_PASS="${SQL_ROOT_PASS:-Sql#$(openssl rand -hex 4 2>/dev/null || echo '2026MariaDB')!88}"
 
-echo "[1/9] Creating standard hosting directory structure (/www/* & /etc/ferrous-panel)..."
+echo "[1/9] Creating standard hosting directory structure (/www/*, /etc/ferrousx & /etc/ferrous-panel)..."
 sudo mkdir -p /www/wwwroot
 sudo mkdir -p /www/wwwlogs
 sudo mkdir -p /www/backup
 sudo mkdir -p /www/server/panel/vhost/nginx
+sudo mkdir -p /www/server/panel/vhost/ferrousx
 sudo mkdir -p /www/server/panel/vhost/htpasswd
 sudo mkdir -p /var/www/letsencrypt
 sudo mkdir -p /etc/nginx/ssl
+sudo mkdir -p /etc/ferrousx/ssl
+sudo mkdir -p /run/ferrousx
 sudo mkdir -p /etc/ferrous-panel
 sudo chown -R www-data:www-data /www/wwwroot /www/wwwlogs /var/www/letsencrypt || true
 
@@ -92,10 +122,14 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y php8.3-fpm php8.3-cli php
   php8.3-opcache php8.3-redis php8.3-imagick phpmyadmin || true
 sudo systemctl enable --now php8.3-fpm || true
 
-echo "[4/9] Initializing MariaDB & PostgreSQL with Custom SQL Root Password & phpMyAdmin Nginx Vhost..."
+echo "[4/9] Initializing MariaDB & PostgreSQL & phpMyAdmin Nginx Vhost..."
 sudo systemctl enable --now mariadb postgresql || true
-sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${SQL_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>/dev/null || true
-sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${SQL_ROOT_PASS}';" 2>/dev/null || true
+if [ "$IS_UPGRADE" -eq 0 ]; then
+  sudo mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '${SQL_ROOT_PASS}'; FLUSH PRIVILEGES;" 2>/dev/null || true
+  sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '${SQL_ROOT_PASS}';" 2>/dev/null || true
+else
+  echo "✓ Giữ nguyên mật khẩu Root MariaDB & PostgreSQL và toàn bộ Database hiện có."
+fi
 
 # Configure Nginx VirtualHost for phpMyAdmin 5.2 on Port 888
 sudo mkdir -p /etc/nginx/conf.d
@@ -120,7 +154,8 @@ server {
 EOF
 
 echo "[5/9] Provisioning Panel Admin Account (/etc/ferrous-panel/admin.json & default.pl)..."
-sudo tee /etc/ferrous-panel/admin.json > /dev/null <<EOF
+if [ "$IS_UPGRADE" -eq 0 ] || [ ! -f "$EXISTING_ADMIN_JSON" ]; then
+  sudo tee /etc/ferrous-panel/admin.json > /dev/null <<EOF
 {
   "adminUsername": "${ADMIN_USER}",
   "adminPassword": "${ADMIN_PASS}",
@@ -138,7 +173,10 @@ sudo tee /etc/ferrous-panel/admin.json > /dev/null <<EOF
   "lastModifiedAt": "$(date -u +"%Y-%m-%d %H:%M:%S")"
 }
 EOF
-sudo chmod 600 /etc/ferrous-panel/admin.json
+  sudo chmod 600 /etc/ferrous-panel/admin.json
+else
+  echo "✓ Bảo toàn nguyên vẹn /etc/ferrous-panel/admin.json, managed_apps.json, databases.json, runtime_extras.json & sessions.json."
+fi
 echo "${SECURITY_ENTRANCE}" | sudo tee /www/server/panel/default.pl > /dev/null
 
 if [ -n "${CUSTOM_DOMAIN:-}" ]; then

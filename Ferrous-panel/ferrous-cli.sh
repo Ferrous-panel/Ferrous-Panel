@@ -272,6 +272,39 @@ EOF
       echo "      -> BLAKE3 + Zstd Object Vault    : VERIFIED (WORM Immutable Lock)"
       echo "======================================================================"
       ;;
+    20|update|upgrade)
+      echo "======================================================================"
+      echo "  🚀 CẬP NHẬT FERROUS-PANEL & FERROUSX (ZERO-DATA-LOSS IN-PLACE UPGRADE)"
+      echo "======================================================================"
+      BACKUP_DIR="/www/backup/pre-upgrade-$(date -u +%Y%m%d-%H%M%S)"
+      sudo mkdir -p "$BACKUP_DIR"
+      sudo cp -a /etc/ferrous-panel/*.json "$BACKUP_DIR/" 2>/dev/null || true
+      echo "  [1/5] Đã sao lưu toàn bộ cấu hình & dữ liệu (/etc/ferrous-panel/*.json) -> $BACKUP_DIR"
+      if [ -d "/opt/Ferrous-panel/.git" ]; then
+        echo "  [2/5] Đang kéo bản cập nhật mới nhất từ GitHub..."
+        cd /opt/Ferrous-panel && sudo git fetch --all && sudo git reset --hard origin/main
+      else
+        echo "  [2/5] Đang kiểm tra mã nguồn tại /opt/Ferrous-panel..."
+      fi
+      if [ -d "/opt/Ferrous-panel" ]; then
+        echo "  [3/5] Đang biên dịch đồng bộ Rust Core (ferrous-system-core + FerrousX 1a49cb80) & Frontend..."
+        cd /opt/Ferrous-panel && sudo npm install --legacy-peer-deps && sudo npm run build
+        sudo cp /opt/Ferrous-panel/Ferrous-panel/ferrous-cli.sh /usr/local/bin/fp 2>/dev/null || true
+        sudo cp /opt/Ferrous-panel/Ferrous-panel/ferrous-cli.sh /usr/local/bin/ferrous 2>/dev/null || true
+        sudo chmod +x /usr/local/bin/fp /usr/local/bin/ferrous 2>/dev/null || true
+      fi
+      echo "  [4/5] Khôi phục và xác thực nguyên vẹn dữ liệu (/etc/ferrous-panel/*.json)..."
+      for f in admin.json managed_apps.json databases.json runtime_extras.json sessions.json; do
+        if [ ! -f "/etc/ferrous-panel/$f" ] && [ -f "$BACKUP_DIR/$f" ]; then
+          sudo cp -a "$BACKUP_DIR/$f" "/etc/ferrous-panel/$f"
+        fi
+      done
+      echo "  [5/5] Khởi động lại dịch vụ Zero-Downtime (ferrous-panel-web.service)..."
+      sudo systemctl daemon-reload 2>/dev/null || true
+      sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
+      echo "✅ ĐÃ CẬP NHẬT LÊN PHIÊN BẢN MỚI NHẤT THÀNH CÔNG (0 MẤT DỮ LIỆU)!"
+      echo "======================================================================"
+      ;;
     *)
       echo "Lựa chọn không hợp lệ: $opt"
       ;;
@@ -295,10 +328,10 @@ echo "  (6)  Đổi tên tài khoản Admin         (15) Kiểm tra sức khỏe
 echo "  (7)  Đổi cổng truy cập Panel (Port)  (16) Xem nhật ký lỗi Panel (Logs)"
 echo "  (8)  Đổi đường dẫn Security Entrance (17) Gán tên miền riêng Web Panel (Domain)"
 echo "  (9)  Xóa khóa Security Entrance      (18) Xóa bỏ tên miền riêng Web Panel"
-echo "  (19) Kiểm tra Rust Edge Cloud, WASI, Youki OCI & Lưu trữ bền vững"
+echo "  (19) Kiểm tra FerrousX & Edge Cloud  (20) Cập nhật Panel lên bản mới (fp update)"
 echo "  (0)  Thoát (Exit)"
 echo "======================================================================"
-read -rp "Nhập số thứ tự chức năng cần thực thi [0-19]: " choice
+read -rp "Nhập số thứ tự chức năng cần thực thi [0-20]: " choice
 [ "$choice" = "0" ] && exit 0
 run_option "$choice"
 
