@@ -244,9 +244,15 @@ function executePhpFpm(req, res, scriptFilename, documentRoot, queryString, pref
   const reqBodyChunks = [];
   req.on('data', (chunk) => reqBodyChunks.push(chunk));
   req.on('end', () => {
+    if (res.writableEnded) return;
     const reqBody = Buffer.concat(reqBodyChunks);
     const client = net.connect(sockPath);
+    client.setTimeout(60000);
     const reqId = 1;
+
+    res.on('close', () => {
+      if (!client.destroyed) client.destroy();
+    });
 
     // FCGI_BEGIN_REQUEST (type 1), role RESPONDER (1)
     const beginBody = Buffer.from([0, 1, 0, 0, 0, 0, 0, 0]);
@@ -349,6 +355,10 @@ function executePhpFpm(req, res, scriptFilename, documentRoot, queryString, pref
       res.end(body);
     });
 
+    client.on('timeout', () => {
+      client.destroy(new Error('PHP-FPM FastCGI upstream timeout (60s)'));
+    });
+
     client.on('error', (err) => {
       if (!res.headersSent) {
         res.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' });
@@ -396,6 +406,20 @@ function handleRequest(req, res) {
       if (matchedApp.status === 'stopped') {
         res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(`<h1>503 Service Paused — ${matchedApp.domain}</h1><p>Website is currently stopped in FerrousPanel.</p>`);
+        return;
+      }
+
+      // Optional Force-HTTPS redirect (Cloudflare-safe: respects X-Forwarded-Proto & Cf-Visitor)
+      const cfVisitor = String(req.headers['cf-visitor'] || '');
+      const fwdProto = String(req.headers['x-forwarded-proto'] || '');
+      const isSecureRequest = Boolean(
+        req.socket.encrypted ||
+        fwdProto.includes('https') ||
+        cfVisitor.includes('"https"')
+      );
+      if (matchedApp.forceHttps && matchedApp.sslEnabled && !isSecureRequest && req.headers.host) {
+        res.writeHead(301, { Location: `https://${req.headers.host}${urlPath}` });
+        res.end();
         return;
       }
 
@@ -474,6 +498,10 @@ function proxyHttp(req, res, targetHost, targetPort) {
     }
   );
 
+  proxyReq.on('timeout', () => {
+    proxyReq.destroy(new Error('Upstream gateway timeout (120s)'));
+  });
+
   proxyReq.on('error', (err) => {
     if (!res.headersSent) {
       res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -495,6 +523,10 @@ function proxyHttp(req, res, targetHost, targetPort) {
     }
   });
 
+  res.on('close', () => {
+    if (!proxyReq.destroyed) proxyReq.destroy();
+  });
+
   req.pipe(proxyReq);
 }
 
@@ -508,8 +540,14 @@ function handleUpgrade(req, clientSocket, head) {
 
   if (hostHeader && hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== configuredDomain) {
     const matchedApp = findManagedAppByHost(hostHeader);
-    if (matchedApp && Number(matchedApp.internalPort) > 0 && !isPhpManagedApp(matchedApp) && !isStaticSpaManagedApp(matchedApp)) {
-      targetPort = Number(matchedApp.internalPort);
+    if (matchedApp) {
+      if (matchedApp.status === 'stopped') {
+        clientSocket.destroy();
+        return;
+      }
+      if (Number(matchedApp.internalPort) > 0 && !isPhpManagedApp(matchedApp) && !isStaticSpaManagedApp(matchedApp)) {
+        targetPort = Number(matchedApp.internalPort);
+      }
     }
   }
 
@@ -532,12 +570,48 @@ function handleUpgrade(req, clientSocket, head) {
   clientSocket.on('error', () => targetSocket.destroy());
 }
 
+const STATIC_MIME_MAP = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.mjs': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.pdf': 'application/pdf',
+  '.wasm': 'application/wasm',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf'
+};
+
 /**
  * Static file, SPA HTML5 History & PHP-FPM Website handler
  */
 function serveWebsite(req, res, siteRoot, opts = {}) {
   const parsedUrl = new URL(req.url || '/', 'http://localhost');
-  let relPath = decodeURIComponent(parsedUrl.pathname);
+  let relPath;
+  try {
+    relPath = decodeURIComponent(parsedUrl.pathname);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('400 Bad Request');
+    return;
+  }
 
   // Protect sensitive dotfiles (.env, .git, .htaccess)
   if (/\/\.(env|git|svn|htaccess|htpasswd)/i.test(relPath)) {
@@ -548,12 +622,12 @@ function serveWebsite(req, res, siteRoot, opts = {}) {
 
   if (relPath.endsWith('/')) {
     const idxPhp = path.join(siteRoot, relPath, 'index.php');
-    const idxHtml = path.join(siteRoot, relPath, 'index.html');
     relPath += fs.existsSync(idxPhp) ? 'index.php' : 'index.html';
   }
-  let filePath = path.resolve(siteRoot, '.' + relPath);
+  const resolvedSiteRoot = path.resolve(siteRoot);
+  let filePath = path.resolve(resolvedSiteRoot, '.' + relPath);
 
-  if (!filePath.startsWith(path.resolve(siteRoot))) {
+  if (filePath !== resolvedSiteRoot && !filePath.startsWith(resolvedSiteRoot + path.sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('403 Forbidden');
     return;
@@ -566,25 +640,29 @@ function serveWebsite(req, res, siteRoot, opts = {}) {
     return;
   }
 
-  if (!fs.existsSync(filePath)) {
-    const phpFallback = path.join(siteRoot, 'index.php');
+  const sendFallbackOrNotFound = () => {
+    const phpFallback = path.join(resolvedSiteRoot, 'index.php');
     if (fs.existsSync(phpFallback)) {
-      executePhpFpm(req, res, phpFallback, siteRoot, parsedUrl.search.slice(1), opts.phpVersion);
+      executePhpFpm(req, res, phpFallback, resolvedSiteRoot, parsedUrl.search.slice(1), opts.phpVersion);
       return;
     }
-    const htmlFallback = path.join(siteRoot, 'index.html');
+    const htmlFallback = path.join(resolvedSiteRoot, 'index.html');
     if (opts.isSpa && !path.extname(parsedUrl.pathname) && fs.existsSync(htmlFallback)) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
       fs.createReadStream(htmlFallback).pipe(res);
       return;
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('404 Not Found');
+  };
+
+  if (!fs.existsSync(filePath)) {
+    sendFallbackOrNotFound();
     return;
   }
 
   try {
-    const stat = fs.statSync(filePath);
+    let stat = fs.statSync(filePath);
     if (stat.isDirectory()) {
       if (!parsedUrl.pathname.endsWith('/')) {
         res.writeHead(301, { Location: `${parsedUrl.pathname}/${parsedUrl.search}` });
@@ -592,44 +670,43 @@ function serveWebsite(req, res, siteRoot, opts = {}) {
         return;
       }
       const idxPhp = path.join(filePath, 'index.php');
-      filePath = fs.existsSync(idxPhp) ? idxPhp : path.join(filePath, 'index.html');
+      const idxHtml = path.join(filePath, 'index.html');
+      filePath = fs.existsSync(idxPhp) ? idxPhp : idxHtml;
+      if (!fs.existsSync(filePath)) {
+        sendFallbackOrNotFound();
+        return;
+      }
+      stat = fs.statSync(filePath);
     }
 
     if (filePath.endsWith('.php')) {
-      executePhpFpm(req, res, filePath, siteRoot, parsedUrl.search.slice(1), opts.phpVersion);
+      executePhpFpm(req, res, filePath, resolvedSiteRoot, parsedUrl.search.slice(1), opts.phpVersion);
       return;
     }
 
-    const mimeMap = {
-      '.html': 'text/html; charset=utf-8',
-      '.htm': 'text/html; charset=utf-8',
-      '.css': 'text/css; charset=utf-8',
-      '.js': 'application/javascript; charset=utf-8',
-      '.mjs': 'application/javascript; charset=utf-8',
-      '.json': 'application/json; charset=utf-8',
-      '.wasm': 'application/wasm',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.svg': 'image/svg+xml',
-      '.ico': 'image/x-icon',
-      '.woff': 'font/woff',
-      '.woff2': 'font/woff2'
-    };
     const ext = path.extname(filePath).toLowerCase();
-    const contentType = mimeMap[ext] || 'application/octet-stream';
+    const contentType = STATIC_MIME_MAP[ext] || 'application/octet-stream';
 
     res.writeHead(200, {
       'Content-Type': contentType,
-      'Content-Length': fs.statSync(filePath).size,
+      'Content-Length': stat.size,
       'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600'
     });
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', () => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('500 File Read Error');
+      } else {
+        res.destroy();
+      }
+    });
+    stream.pipe(res);
   } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('500 Internal Server Error: ' + err.message);
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('500 Internal Server Error: ' + err.message);
+    }
   }
 }
 

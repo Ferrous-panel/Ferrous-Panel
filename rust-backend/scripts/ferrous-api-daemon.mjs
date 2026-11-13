@@ -664,7 +664,7 @@ Environment="LD_LIBRARY_PATH=${spec.workingDir}/lib:/opt/Ferrous-panel/lib:/usr/
         langRuntimeEnvs = `Environment="NODE_ENV=production"
 Environment="BUN_INSTALL=/usr/local"`;
       } else if (fwLower.includes("deno")) {
-        langRuntimeEnvs = `Environment="DENO_DIR=/var/cache/deno"
+        langRuntimeEnvs = `Environment="DENO_DIR=/tmp/deno_cache"
 Environment="DENO_NO_UPDATE_CHECK=1"`;
       } else if (fwLower.includes("node") || fwLower.includes("next") || fwLower.includes("nuxt") || fwLower.includes("svelte") || fwLower.includes("astro") || fwLower.includes("remix") || fwLower.includes("nest")) {
         langRuntimeEnvs = `Environment="NODE_ENV=production"
@@ -684,12 +684,16 @@ Environment="CGO_ENABLED=1"`;
       } else if (fwLower.includes(".net") || fwLower.includes("c#")) {
         langRuntimeEnvs = `Environment="ASPNETCORE_ENVIRONMENT=Production"
 Environment="ASPNETCORE_URLS=http://127.0.0.1:${spec.internalPort}"
+Environment="DOTNET_ROOT=/usr/share/dotnet"
 Environment="DOTNET_CLI_TELEMETRY_OPTOUT=1"`;
       } else if (fwLower.includes("ruby") || fwLower.includes("rails")) {
         langRuntimeEnvs = `Environment="RACK_ENV=production"
 Environment="RAILS_ENV=production"`;
       }
-      const envBlock = (spec.envVars || []).map((e) => `Environment="${e.key}=${e.value}"`).join("\n");
+      const envBlock = (spec.envVars || [])
+        .filter((e) => e && /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(e.key || "")) && e.key !== "PORT" && e.key !== "HOST")
+        .map((e) => `Environment="${e.key}=${String(e.value ?? "").replace(/[\r\n]+/g, " ").replace(/"/g, '\\"')}"`)
+        .join("\n");
       unitContent = `[Unit]
 Description=Ferrous-panel Managed Polyglot Service: ${spec.name} (${spec.framework})
 After=network-online.target
@@ -722,10 +726,11 @@ RestrictSUIDSGID=true
 LockPersonality=true
 
 # Polyglot Runtime Environment
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="HOME=/tmp"
 Environment="PORT=${spec.internalPort}"
 Environment="HOST=127.0.0.1"
-${langRuntimeEnvs}
-${envBlock}
+${langRuntimeEnvs}${envBlock ? `\n${envBlock}` : ""}
 
 [Install]
 WantedBy=multi-user.target`;
@@ -2237,8 +2242,14 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     const activePhpCount = phpVersionsState.filter(
       (p) => p.status === "running"
     ).length;
+    const ferrousxPkg = serverPackages.find((p) => p.id === "pkg-ferrousx");
     const nginxPkg = serverPackages.find((p) => p.id === "pkg-nginx");
-    const nginxHealthy = !nginxPkg || nginxPkg.status === "running";
+    const ferrousxActive = !ferrousxPkg || ferrousxPkg.status === "running";
+    const nginxActive = Boolean(nginxPkg && nginxPkg.status === "running");
+    const webServerHealthy = ferrousxActive || nginxActive;
+    const activeEngineLabel = ferrousxActive
+      ? "FerrousX 2.5.0-edge (Native Rust HTTP/3 + Reverse Proxy)"
+      : "Nginx 1.26 Reverse Proxy, Upstream Keepalive & HTTP/3 QUIC";
     const rustStatus = rustCoreManager.getStatusReport();
     const brokenPhpSites = managedApps.filter((a) => {
       if (a.status !== "running") return false;
@@ -2266,11 +2277,13 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       },
       {
         id: "diag-nginx",
-        subsystem: "Nginx 1.26 Reverse Proxy, Upstream Keepalive & HTTP/3 QUIC",
-        target: "/www/server/panel/vhost/nginx/*.conf",
-        status: nginxHealthy ? "passed" : "warning",
-        latencyMs: 0.8,
-        detail: nginxHealthy ? `nginx -t syntax is ok \xB7 ${managedApps.length} VirtualHosts \u0111\u1ED3ng b\u1ED9 TLS 1.3 & client_max_body_size` : "C\u1EA3nh b\xE1o: D\u1ECBch v\u1EE5 Nginx Reverse Proxy \u0111ang t\u1EA1m d\u1EEBng trong Kho Ph\u1EA7n m\u1EC1m"
+        subsystem: activeEngineLabel,
+        target: ferrousxActive ? "/etc/ferrous-panel/managed_apps.json & /www/server/panel/vhost/ferrousx/*.conf" : "/www/server/panel/vhost/nginx/*.conf",
+        status: webServerHealthy ? "passed" : "warning",
+        latencyMs: ferrousxActive ? 0.3 : 0.8,
+        detail: webServerHealthy
+          ? `${ferrousxActive ? "FerrousX SIGHUP routes ok" : "nginx -t syntax ok"} \xB7 ${managedApps.length} VirtualHosts \u0111\u1ED3ng b\u1ED9 TLS 1.3 & HTTP/3 QUIC`
+          : "C\u1EA3nh b\xE1o: C\u1EA3 FerrousX l\u1EABn Nginx \u0111\u1EC1u \u0111ang d\u1EEBng trong Kho Ph\u1EA7n m\u1EC1m"
       },
       {
         id: "diag-multiphp",
@@ -2324,7 +2337,9 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
   });
   app.get("/api/apps", (_req, res) => {
     const enriched = managedApps.map((a) => {
-      syncArchitectureForApp(a);
+      if (!a.systemdUnit || !a.nginxVhost) {
+        syncArchitectureForApp(a);
+      }
       return a;
     });
     res.json(enriched);
@@ -2477,24 +2492,32 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(php): PHP 8.3-FPM + extensions + Composer ready`);
     } else if (fw.includes("bun")) {
       const res = await execShellAsync(
-        `if ! command -v bun >/dev/null 2>&1 && [ ! -x /usr/local/bin/bun ]; then
+        `if [ ! -x /usr/local/bin/bun ]; then
           apt-get install -y -qq unzip curl >/dev/null 2>&1 || true;
-          curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash >/dev/null 2>&1 || true;
+          if [ -x /root/.bun/bin/bun ]; then
+            install -m 755 /root/.bun/bin/bun /usr/local/bin/bun;
+          else
+            curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash >/dev/null 2>&1 || true;
+          fi;
         fi;
-        [ -x /root/.bun/bin/bun ] && [ ! -e /usr/local/bin/bun ] && ln -sf /root/.bun/bin/bun /usr/local/bin/bun || true;
-        command -v bun >/dev/null 2>&1 || [ -x /usr/local/bin/bun ]`,
+        [ -x /root/.bun/bin/bun ] && [ ! -e /usr/local/bin/bun ] && install -m 755 /root/.bun/bin/bun /usr/local/bin/bun || true;
+        [ -x /usr/local/bin/bun ] || command -v bun >/dev/null 2>&1`,
         12e4
       );
       markServerPackageRunning("pkg-nodejs", 64);
       logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(bun): Bun runtime ${res.ok ? "ready at /usr/local/bin/bun" : "install check failed"}`);
     } else if (fw.includes("deno")) {
       const res = await execShellAsync(
-        `if ! command -v deno >/dev/null 2>&1 && [ ! -x /usr/local/bin/deno ]; then
+        `if [ ! -x /usr/local/bin/deno ]; then
           apt-get install -y -qq unzip curl >/dev/null 2>&1 || true;
-          curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y >/dev/null 2>&1 || true;
+          if [ -x /root/.deno/bin/deno ]; then
+            install -m 755 /root/.deno/bin/deno /usr/local/bin/deno;
+          else
+            curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y >/dev/null 2>&1 || true;
+          fi;
         fi;
-        [ -x /root/.deno/bin/deno ] && [ ! -e /usr/local/bin/deno ] && ln -sf /root/.deno/bin/deno /usr/local/bin/deno || true;
-        command -v deno >/dev/null 2>&1 || [ -x /usr/local/bin/deno ]`,
+        [ -x /root/.deno/bin/deno ] && [ ! -e /usr/local/bin/deno ] && install -m 755 /root/.deno/bin/deno /usr/local/bin/deno || true;
+        [ -x /usr/local/bin/deno ] || command -v deno >/dev/null 2>&1`,
         12e4
       );
       markServerPackageRunning("pkg-deno", 28);
@@ -2539,8 +2562,8 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
           DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev curl >/dev/null 2>&1;
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable >/dev/null 2>&1;
         fi;
-        [ -x /root/.cargo/bin/cargo ] && [ ! -e /usr/local/bin/cargo ] && ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo || true;
-        [ -x /root/.cargo/bin/rustc ] && [ ! -e /usr/local/bin/rustc ] && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc || true;
+        [ -x /root/.cargo/bin/cargo ] && [ ! -e /usr/local/bin/cargo ] && install -m 755 /root/.cargo/bin/cargo /usr/local/bin/cargo || true;
+        [ -x /root/.cargo/bin/rustc ] && [ ! -e /usr/local/bin/rustc ] && install -m 755 /root/.cargo/bin/rustc /usr/local/bin/rustc || true;
         rustc --version`,
         24e4
       );
@@ -2620,6 +2643,417 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     await reloadWebServerAndPhp(selectedWebServer, logs);
   }
 
+  async function provisionFrameworkStarter(opts, logs) {
+    const {
+      framework,
+      templateId = "",
+      templateName = framework,
+      cleanDomain,
+      cleanName,
+      siteRoot,
+      port,
+      dbName,
+      dbUser,
+      dbPass,
+      defaultExecCommand = ""
+    } = opts;
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+    const fwLow = String(framework || "").toLowerCase();
+    const tplLow = `${templateId} ${templateName}`.toLowerCase();
+    const isWordPress = tplLow.includes("wordpress");
+    const isLaravel = tplLow.includes("laravel");
+    const isSymfony = tplLow.includes("symfony") || fwLow.includes("symfony");
+    const isPhp = fwLow.includes("php");
+    const isStaticSpa = fwLow.includes("vite") || fwLow.includes("static") || Number(port) === 80;
+
+    let resolvedExecCmd = defaultExecCommand;
+    let resolvedRunSubDir = isLaravel || isSymfony || (isPhp && !isWordPress) ? "/public" : isStaticSpa ? "/dist" : "/";
+    let wpConfigContent = "";
+
+    const envFileLines = [
+      `PORT=${port}`,
+      `HOST=127.0.0.1`,
+      `APP_ENV=production`,
+      `APP_URL=https://${cleanDomain}`,
+      ...(dbName
+        ? [
+            `DB_CONNECTION=${opts.dbEngine && String(opts.dbEngine).includes("PostgreSQL") ? "pgsql" : "mysql"}`,
+            `DB_HOST=127.0.0.1`,
+            `DB_PORT=${opts.dbEngine && String(opts.dbEngine).includes("PostgreSQL") ? 5432 : 3306}`,
+            `DB_DATABASE=${dbName}`,
+            `DB_USERNAME=${dbUser || "root"}`,
+            `DB_PASSWORD=${dbPass || ""}`
+          ]
+        : [])
+    ];
+    if (fs2.existsSync(siteRoot)) {
+      try {
+        fs2.writeFileSync(path2.join(siteRoot, ".env"), envFileLines.join("\n") + "\n", { mode: 0o600 });
+      } catch {}
+    }
+
+    if (!fs2.existsSync(siteRoot)) {
+      return { resolvedExecCmd, resolvedRunSubDir, wpConfigContent, isWordPress, isPhp, isStaticSpa };
+    }
+
+    if (isWordPress) {
+      resolvedRunSubDir = "/";
+      const wpCheckPath = path2.join(siteRoot, "wp-login.php");
+      if (!fs2.existsSync(wpCheckPath)) {
+        const dlCmd = [
+          `if command -v wp >/dev/null 2>&1; then wp core download --path="${siteRoot}" --allow-root --force;`,
+          `else`,
+          `  if [ ! -s /tmp/ferrous-wp-latest.tar.gz ]; then`,
+          `    curl -fsSL --connect-timeout 10 --max-time 60 https://wordpress.org/latest.tar.gz -o /tmp/ferrous-wp-latest.tar.gz || curl -fsSL --connect-timeout 10 --max-time 60 https://vi.wordpress.org/latest-vi.tar.gz -o /tmp/ferrous-wp-latest.tar.gz;`,
+          `  fi;`,
+          `  tar -xzf /tmp/ferrous-wp-latest.tar.gz --strip-components=1 -C "${siteRoot}";`,
+          `fi`
+        ].join(" ");
+        const wpDl = await execShellAsync(dlCmd, 9e4);
+        logs.push(
+          wpDl.ok
+            ? `${nowIso()} INFO  wordpress: Downloaded & extracted WordPress core into ${siteRoot}`
+            : `${nowIso()} ERROR wordpress: Download failed (${wpDl.stderr})`
+        );
+      }
+      const genSalt = () => crypto.randomBytes(48).toString("base64").replace(/['"\\]/g, "x");
+      wpConfigContent = `<?php
+/**
+ * Auto-generated by FerrousPanel 1-Click WordPress Installer
+ * Domain: ${cleanDomain}
+ */
+define( 'DB_NAME', '${dbName || "wordpress"}' );
+define( 'DB_USER', '${dbUser || "root"}' );
+define( 'DB_PASSWORD', '${dbPass || ""}' );
+define( 'DB_HOST', '127.0.0.1' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+
+define( 'AUTH_KEY',         '${genSalt()}' );
+define( 'SECURE_AUTH_KEY',  '${genSalt()}' );
+define( 'LOGGED_IN_KEY',    '${genSalt()}' );
+define( 'NONCE_KEY',        '${genSalt()}' );
+define( 'AUTH_SALT',        '${genSalt()}' );
+define( 'SECURE_AUTH_SALT', '${genSalt()}' );
+define( 'LOGGED_IN_SALT',   '${genSalt()}' );
+define( 'NONCE_SALT',       '${genSalt()}' );
+
+$table_prefix = 'wp_';
+define( 'WP_DEBUG', false );
+define( 'FS_METHOD', 'direct' );
+
+if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false ) {
+    $_SERVER['HTTPS'] = 'on';
+}
+
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+`;
+      try {
+        fs2.writeFileSync(path2.join(siteRoot, "wp-config.php"), wpConfigContent, { mode: 0o640 });
+        await execShellAsync(`chown -R www-data:www-data "${siteRoot}" && find "${siteRoot}" -type d -exec chmod 755 {} + && find "${siteRoot}" -type f -exec chmod 644 {} + && chmod 640 "${siteRoot}/wp-config.php"`);
+        logs.push(`${nowIso()} INFO  wordpress: Generated wp-config.php & set www-data permissions`);
+      } catch {}
+    } else if (isPhp) {
+      resolvedRunSubDir = "/public";
+      const pubDir = path2.join(siteRoot, "public");
+      fs2.mkdirSync(pubDir, { recursive: true });
+      if (isLaravel && !fs2.existsSync(path2.join(siteRoot, "artisan"))) {
+        const larRes = await execShellAsync(
+          `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction --prefer-dist laravel/laravel "${siteRoot}/_tmp_lar" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_lar/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_lar"; fi`,
+          18e4
+        );
+        if (fs2.existsSync(path2.join(siteRoot, "artisan"))) {
+          const envPath = path2.join(siteRoot, ".env");
+          let larEnv = fs2.existsSync(envPath) ? fs2.readFileSync(envPath, "utf8") : "";
+          larEnv = larEnv
+            .replace(/^APP_URL=.*/m, `APP_URL=https://${cleanDomain}`)
+            .replace(/^#?\s*DB_CONNECTION=.*/m, "DB_CONNECTION=mysql")
+            .replace(/^#?\s*DB_HOST=.*/m, "DB_HOST=127.0.0.1")
+            .replace(/^#?\s*DB_PORT=.*/m, "DB_PORT=3306")
+            .replace(/^#?\s*DB_DATABASE=.*/m, `DB_DATABASE=${dbName || "laravel"}`)
+            .replace(/^#?\s*DB_USERNAME=.*/m, `DB_USERNAME=${dbUser || "root"}`)
+            .replace(/^#?\s*DB_PASSWORD=.*/m, `DB_PASSWORD=${dbPass || ""}`);
+          fs2.writeFileSync(envPath, larEnv);
+          await execShellAsync(`cd "${siteRoot}" && php artisan key:generate --force && chmod -R 775 storage bootstrap/cache`, 3e4);
+          logs.push(`${nowIso()} INFO  laravel: Installed Laravel 11 + generated APP_KEY & DB .env`);
+        } else {
+          logs.push(`${nowIso()} WARN  laravel: Composer create-project unavailable (${larRes.stderr || "offline"}), wrote PHP /public starter`);
+        }
+      } else if (isSymfony && !fs2.existsSync(path2.join(siteRoot, "composer.json"))) {
+        await execShellAsync(
+          `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction symfony/skeleton "${siteRoot}/_tmp_sym" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_sym/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_sym"; fi`,
+          15e4
+        );
+      }
+      if (!fs2.existsSync(path2.join(pubDir, "index.php"))) {
+        fs2.writeFileSync(
+          path2.join(pubDir, "index.php"),
+          `<?php\nheader('Content-Type: text/html; charset=utf-8');\necho "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:40px'><h1>${cleanDomain} (${templateName})</h1><p>PHP " . PHP_VERSION . " + FerrousX Ready at /public</p></body></html>";\n`
+        );
+      }
+      await execShellAsync(`chown -R www-data:www-data "${siteRoot}"`);
+    } else if (isStaticSpa) {
+      resolvedRunSubDir = "/dist";
+      const distDir = path2.join(siteRoot, "dist");
+      fs2.mkdirSync(distDir, { recursive: true });
+      if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+        fs2.writeFileSync(
+          path2.join(siteRoot, "package.json"),
+          JSON.stringify({ name: cleanName, private: true, version: "1.0.0", scripts: { build: "mkdir -p dist" } }, null, 2)
+        );
+      }
+      if (!fs2.existsSync(path2.join(distDir, "index.html"))) {
+        fs2.writeFileSync(
+          path2.join(distDir, "index.html"),
+          `<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${cleanDomain}</title></head><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="margin:0 0 12px;color:#fb923c">${cleanDomain}</h1><p>Tri\u1EC3n khai th\xE0nh c\xF4ng <strong>${templateName}</strong> qua FerrousX Static/SPA Engine.</p><p style="color:#94a3b8;font-size:14px">Document Root: <code>${distDir}</code></p></div></body></html>`
+        );
+      }
+      logs.push(`${nowIso()} INFO  static-spa: Built /dist/index.html with HTML5 History fallback`);
+    } else if (fwLow.includes("bun")) {
+      fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
+      const bunEntry = path2.join(siteRoot, "src", "index.ts");
+      if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+        fs2.writeFileSync(
+          path2.join(siteRoot, "package.json"),
+          JSON.stringify({ name: cleanName, module: "src/index.ts", scripts: { start: "bun run src/index.ts" } }, null, 2)
+        );
+      }
+      if (!fs2.existsSync(bunEntry)) {
+        fs2.writeFileSync(
+          bunEntry,
+          `const port = Number(process.env.PORT || ${port});
+Bun.serve({
+  port,
+  hostname: "127.0.0.1",
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/api/health") {
+      return Response.json({ status: "ok", runtime: "Bun " + Bun.version, domain: "${cleanDomain}" });
+    }
+    return new Response("<h1>${cleanDomain} \u2014 Bun " + Bun.version + " + FerrousX Ready</h1>", {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    });
+  }
+});
+console.log("Bun server listening on 127.0.0.1:" + port);
+`
+        );
+      }
+      const bunBin = (await execShellAsync("command -v bun || echo /usr/local/bin/bun")).stdout || "/usr/local/bin/bun";
+      resolvedExecCmd = `${bunBin} run ${bunEntry}`;
+      logs.push(`${nowIso()} INFO  bun: Prepared TypeScript server ${bunEntry}`);
+    } else if (fwLow.includes("deno")) {
+      const denoEntry = path2.join(siteRoot, "main.ts");
+      if (!fs2.existsSync(path2.join(siteRoot, "deno.json"))) {
+        fs2.writeFileSync(path2.join(siteRoot, "deno.json"), JSON.stringify({ tasks: { start: "deno run --allow-net --allow-env --allow-read main.ts" } }, null, 2));
+      }
+      if (!fs2.existsSync(denoEntry)) {
+        fs2.writeFileSync(
+          denoEntry,
+          `const port = Number(Deno.env.get("PORT") || ${port});
+Deno.serve({ port, hostname: "127.0.0.1" }, (req) => {
+  const url = new URL(req.url);
+  if (url.pathname === "/api/health") {
+    return Response.json({ status: "ok", runtime: "Deno " + Deno.version.deno, domain: "${cleanDomain}" });
+  }
+  return new Response("<h1>${cleanDomain} \u2014 Deno " + Deno.version.deno + " + FerrousX Ready</h1>", {
+    headers: { "content-type": "text/html; charset=utf-8" }
+  });
+});
+`
+        );
+      }
+      const denoBin = (await execShellAsync("command -v deno || echo /usr/local/bin/deno")).stdout || "/usr/local/bin/deno";
+      resolvedExecCmd = `${denoBin} run --allow-net --allow-env --allow-read ${denoEntry}`;
+      logs.push(`${nowIso()} INFO  deno: Prepared TypeScript server ${denoEntry}`);
+    } else if (fwLow.includes("next") || fwLow.includes("nuxt") || fwLow.includes("svelte") || fwLow.includes("astro") || fwLow.includes("remix") || fwLow.includes("nest")) {
+      const entryFallback = path2.join(siteRoot, "server.mjs");
+      if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+        fs2.writeFileSync(
+          path2.join(siteRoot, "package.json"),
+          JSON.stringify({ name: cleanName, version: "1.0.0", type: "module", scripts: { start: "node server.mjs" } }, null, 2)
+        );
+      }
+      if (!fs2.existsSync(entryFallback)) {
+        fs2.writeFileSync(
+          entryFallback,
+          `import http from 'http';
+const port = Number(process.env.PORT || ${port});
+http.createServer((req, res) => {
+  if (req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', framework: '${framework}', domain: '${cleanDomain}', node: process.version }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(\`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="color:#fb923c">${cleanDomain}</h1><p><strong>${templateName}</strong> \u0111ang ch\u1EA1y v\u1EDBi Node \${process.version} sau FerrousX Reverse Proxy.</p><p style="color:#94a3b8;font-size:14px">Upstream Port: 127.0.0.1:\${port} \xB7 Database: ${dbName || "None"}</p></div></body></html>\`);
+}).listen(port, '127.0.0.1', () => console.log('Listening on 127.0.0.1:' + port));
+`
+        );
+      }
+      const nodeBin = (await execShellAsync("command -v node || echo /usr/bin/node")).stdout || "/usr/bin/node";
+      const candidateEntries = [
+        path2.join(siteRoot, ".next/standalone/server.js"),
+        path2.join(siteRoot, ".output/server/index.mjs"),
+        path2.join(siteRoot, "build/index.js"),
+        path2.join(siteRoot, "dist/server/entry.mjs"),
+        path2.join(siteRoot, "dist/main.js"),
+        entryFallback
+      ];
+      const chosenEntry = candidateEntries.find((p) => fs2.existsSync(p)) || entryFallback;
+      resolvedExecCmd = `${nodeBin} ${chosenEntry}`;
+      logs.push(`${nowIso()} INFO  node: Provisioned ${framework} entrypoint ${chosenEntry}`);
+    } else if (fwLow.includes("python") || fwLow.includes("fastapi") || fwLow.includes("django") || fwLow.includes("flask")) {
+      const venvDir = path2.join(siteRoot, ".venv");
+      const isDjango = fwLow.includes("django");
+      const isFlask = fwLow.includes("flask");
+      if (isVpsHost()) {
+        await execShellAsync(`if [ ! -x "${venvDir}/bin/python" ]; then python3 -m venv "${venvDir}"; fi`, 6e4);
+      }
+      const pyMain = path2.join(siteRoot, isFlask ? "app.py" : "main.py");
+      if (isDjango) {
+        fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "django>=5.0\ngunicorn>=22.0\n");
+        if (isVpsHost()) {
+          const djPip = await execShellAsync(`"${venvDir}/bin/pip" install -q django gunicorn >/dev/null 2>&1 && if [ ! -f "${siteRoot}/manage.py" ]; then "${venvDir}/bin/django-admin" startproject config "${siteRoot}"; fi`, 15e4);
+          if (djPip.ok && fs2.existsSync(path2.join(siteRoot, "config/settings.py"))) {
+            await execShellAsync(`sed -i "s/ALLOWED_HOSTS = \\[\\]/ALLOWED_HOSTS = ['*']/" "${siteRoot}/config/settings.py" && "${venvDir}/bin/python" "${siteRoot}/manage.py" migrate --noinput >/dev/null 2>&1 || true`, 3e4);
+            resolvedExecCmd = `${venvDir}/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${port} --workers 2`;
+            logs.push(`${nowIso()} INFO  django: Initialized Django 5 project & Gunicorn in .venv`);
+          }
+        }
+      } else if (isFlask) {
+        fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "flask>=3.0\ngunicorn>=22.0\n");
+        if (!fs2.existsSync(pyMain)) {
+          fs2.writeFileSync(pyMain, `from flask import Flask, jsonify\napp = Flask(__name__)\n@app.route("/")\ndef index():\n    return "<h1>${cleanDomain} \u2014 Flask 3 + FerrousX Ready</h1>"\n@app.route("/api/health")\ndef health():\n    return jsonify(status="ok", framework="Flask 3", domain="${cleanDomain}")\n`);
+        }
+        if (isVpsHost()) {
+          const flPip = await execShellAsync(`"${venvDir}/bin/pip" install -q flask gunicorn >/dev/null 2>&1`, 12e4);
+          if (flPip.ok) {
+            resolvedExecCmd = `${venvDir}/bin/gunicorn app:app --bind 127.0.0.1:${port} --workers 2`;
+            logs.push(`${nowIso()} INFO  flask: Installed Flask + Gunicorn in .venv`);
+          }
+        }
+      } else {
+        fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "fastapi>=0.115\nuvicorn>=0.30\n");
+        if (!fs2.existsSync(pyMain)) {
+          fs2.writeFileSync(pyMain, `from fastapi import FastAPI\nfrom fastapi.responses import HTMLResponse\napp = FastAPI(title="${cleanDomain}")\n@app.get("/", response_class=HTMLResponse)\ndef home():\n    return "<h1>${cleanDomain} \u2014 Python FastAPI + FerrousX Ready</h1><p><a href='/docs'>Swagger /docs</a></p>"\n@app.get("/api/health")\ndef health():\n    return {"status": "ok", "framework": "FastAPI", "domain": "${cleanDomain}"}\n`);
+        }
+        if (isVpsHost()) {
+          const faPip = await execShellAsync(`"${venvDir}/bin/pip" install -q fastapi uvicorn >/dev/null 2>&1`, 12e4);
+          if (faPip.ok) {
+            resolvedExecCmd = `${venvDir}/bin/uvicorn main:app --host 127.0.0.1 --port ${port}`;
+            logs.push(`${nowIso()} INFO  fastapi: Installed FastAPI + Uvicorn in .venv`);
+          }
+        }
+      }
+      if (!resolvedExecCmd.includes("uvicorn") && !resolvedExecCmd.includes("gunicorn") || (isVpsHost() && !fs2.existsSync(`${venvDir}/bin/uvicorn`) && !fs2.existsSync(`${venvDir}/bin/gunicorn`))) {
+        const fallbackPy = path2.join(siteRoot, "ferrous_fallback.py");
+        fs2.writeFileSync(fallbackPy, `import os\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.send_header('Content-Type', 'text/html; charset=utf-8')\n        self.end_headers()\n        self.wfile.write(b"<h1>${cleanDomain} (${framework}) - Python Ready</h1>")\nHTTPServer(('127.0.0.1', int(os.environ.get('PORT', ${port}))), H).serve_forever()\n`);
+        const pyBin = fs2.existsSync(`${venvDir}/bin/python`) ? `${venvDir}/bin/python` : "/usr/bin/python3";
+        resolvedExecCmd = `${pyBin} ${fallbackPy}`;
+      }
+    } else if (fwLow.includes("go /") || fwLow.includes("fiber") || fwLow.includes("gin")) {
+      const binDir = path2.join(siteRoot, "bin");
+      fs2.mkdirSync(binDir, { recursive: true });
+      const binOut = path2.join(binDir, "server");
+      if (!fs2.existsSync(path2.join(siteRoot, "go.mod"))) {
+        fs2.writeFileSync(path2.join(siteRoot, "go.mod"), `module ${cleanName}\n\ngo 1.21\n`);
+        fs2.writeFileSync(
+          path2.join(siteRoot, "main.go"),
+          `package main
+import (
+\t"fmt"
+\t"net/http"
+\t"os"
+)
+func main() {
+\tport := os.Getenv("PORT")
+\tif port == "" { port = "${port}" }
+\thttp.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+\t\tw.Header().Set("Content-Type", "application/json")
+\t\tfmt.Fprintf(w, "{\\"status\\":\\"ok\\",\\"framework\\":\\"${framework}\\",\\"domain\\":\\"${cleanDomain}\\"}")
+\t})
+\thttp.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+\t\tw.Header().Set("Content-Type", "text/html; charset=utf-8")
+\t\tfmt.Fprintf(w, "<h1>${cleanDomain} \u2014 ${framework} + FerrousX Ready</h1>")
+\t})
+\thttp.ListenAndServe("127.0.0.1:"+port, nil)
+}
+`
+        );
+      }
+      if (isVpsHost()) {
+        const goRes = await execShellAsync(`cd "${siteRoot}" && go build -o "${binOut}" .`, 9e4);
+        logs.push(`${nowIso()} ${goRes.ok ? "INFO" : "WARN"}  go: Compiled ${binOut}`);
+      }
+      resolvedExecCmd = binOut;
+    } else if (fwLow.includes("rust") || fwLow.includes("actix") || fwLow.includes("axum") || fwLow.includes("rocket")) {
+      const targetDir = path2.join(siteRoot, "target/release");
+      fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
+      fs2.mkdirSync(targetDir, { recursive: true });
+      const binOut = path2.join(targetDir, cleanName);
+      if (!fs2.existsSync(path2.join(siteRoot, "Cargo.toml"))) {
+        const depLine = fwLow.includes("axum") ? 'axum = "0.7"\ntokio = { version = "1", features = ["full"] }' : fwLow.includes("rocket") ? 'rocket = "0.5"' : 'actix-web = "4.9"';
+        fs2.writeFileSync(path2.join(siteRoot, "Cargo.toml"), `[package]\nname = "${cleanName}"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n${depLine}\n`);
+        fs2.writeFileSync(
+          path2.join(siteRoot, "src/main.rs"),
+          `use std::io::{Read, Write};\nuse std::net::TcpListener;\nfn main() {\n    let port = std::env::var("PORT").unwrap_or_else(|_| "${port}".to_string());\n    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).expect("bind failed");\n    for stream in listener.incoming().flatten() {\n        let mut s = stream;\n        let mut buf = [0u8; 1024];\n        let _ = s.read(&mut buf);\n        let body = "<h1>${cleanDomain} \u2014 ${framework} Native Rust + FerrousX Ready</h1>";\n        let resp = format!("HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}", body.len(), body);\n        let _ = s.write_all(resp.as_bytes());\n    }\n}\n`
+        );
+      }
+      if (isVpsHost() && !fs2.existsSync(binOut)) {
+        const rsRes = await execShellAsync(`rustc -O "${path2.join(siteRoot, "src/main.rs")}" -o "${binOut}"`, 9e4);
+        logs.push(`${nowIso()} ${rsRes.ok ? "INFO" : "WARN"}  rust: Compiled native release binary ${binOut}`);
+      }
+      resolvedExecCmd = binOut;
+    } else if (fwLow.includes("java") || fwLow.includes("spring")) {
+      const targetDir = path2.join(siteRoot, "target");
+      const srcDir = path2.join(siteRoot, "src/main/java");
+      fs2.mkdirSync(targetDir, { recursive: true });
+      fs2.mkdirSync(srcDir, { recursive: true });
+      const jarOut = path2.join(targetDir, "app.jar");
+      if (!fs2.existsSync(path2.join(srcDir, "Main.java"))) {
+        fs2.writeFileSync(
+          path2.join(srcDir, "Main.java"),
+          `import com.sun.net.httpserver.HttpServer;\nimport java.io.OutputStream;\nimport java.net.InetSocketAddress;\nimport java.nio.charset.StandardCharsets;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "${port}"));\n    HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);\n    srv.createContext("/", ex -> {\n      byte[] b = "<h1>${cleanDomain} \u2014 Java 21 + FerrousX Ready</h1>".getBytes(StandardCharsets.UTF_8);\n      ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");\n      ex.sendResponseHeaders(200, b.length);\n      try (OutputStream os = ex.getResponseBody()) { os.write(b); }\n    });\n    srv.start();\n  }\n}\n`
+        );
+      }
+      if (isVpsHost() && !fs2.existsSync(jarOut)) {
+        const jRes = await execShellAsync(`cd "${srcDir}" && javac Main.java && jar cfe "${jarOut}" Main Main.class`, 6e4);
+        logs.push(`${nowIso()} ${jRes.ok ? "INFO" : "WARN"}  java: Packaged ${jarOut}`);
+      }
+      const javaBin = (await execShellAsync("command -v java || echo /usr/bin/java")).stdout || "/usr/bin/java";
+      resolvedExecCmd = `${javaBin} -XX:+UseZGC -jar ${jarOut}`;
+    } else if (fwLow.includes(".net") || fwLow.includes("c#")) {
+      const pubDir = path2.join(siteRoot, "publish");
+      fs2.mkdirSync(pubDir, { recursive: true });
+      if (isVpsHost() && !fs2.existsSync(path2.join(siteRoot, "app.csproj"))) {
+        const dnRes = await execShellAsync(`cd "${siteRoot}" && dotnet new web --name app --force >/dev/null 2>&1 && dotnet publish -c Release -o "${pubDir}" >/dev/null 2>&1`, 18e4);
+        logs.push(`${nowIso()} ${dnRes.ok ? "INFO" : "WARN"}  dotnet: Published ASP.NET Core 8 app to ${pubDir}`);
+      }
+      const dotnetBin = (await execShellAsync("command -v dotnet || echo /usr/bin/dotnet")).stdout || "/usr/bin/dotnet";
+      resolvedExecCmd = `${dotnetBin} ${pubDir}/app.dll --urls http://127.0.0.1:${port}`;
+    } else if (fwLow.includes("ruby") || fwLow.includes("rails")) {
+      const rbFile = path2.join(siteRoot, "app.rb");
+      if (!fs2.existsSync(path2.join(siteRoot, "Gemfile"))) {
+        fs2.writeFileSync(path2.join(siteRoot, "Gemfile"), `source "https://rubygems.org"\n`);
+      }
+      if (!fs2.existsSync(rbFile)) {
+        fs2.writeFileSync(
+          rbFile,
+          `require 'socket'\nport = (ENV['PORT'] || '${port}').to_i\nserver = TCPServer.new('127.0.0.1', port)\nloop do\n  client = server.accept\n  _req = client.gets\n  body = "<h1>${cleanDomain} \u2014 Ruby + FerrousX Ready</h1>"\n  client.print "HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: #{body.bytesize}\\r\\nConnection: close\\r\\n\\r\\n#{body}"\n  client.close\nend\n`
+        );
+      }
+      const rubyBin = (await execShellAsync("command -v ruby || echo /usr/bin/ruby")).stdout || "/usr/bin/ruby";
+      resolvedExecCmd = `${rubyBin} ${rbFile}`;
+      logs.push(`${nowIso()} INFO  ruby: Prepared Ruby server ${rbFile}`);
+    }
+
+    return { resolvedExecCmd, resolvedRunSubDir, wpConfigContent, isWordPress, isPhp, isStaticSpa };
+  }
+
   app.post("/api/apps", async (req, res) => {
     const {
       name,
@@ -2647,12 +3081,24 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       gitBranch,
       webServerEngine
     } = req.body;
-    const cleanDomain = String(domain || "newsite.ferroushub.vn").toLowerCase().trim().replace(/[^a-z0-9.-]/g, "");
+    const cleanDomain = String(domain || "").toLowerCase().trim().replace(/[^a-z0-9.-]/g, "");
+    if (!cleanDomain || !cleanDomain.includes(".")) {
+      res.status(400).json({ error: "Tên miền không hợp lệ. Vui lòng nhập domain đầy đủ (vd: app.example.com)." });
+      return;
+    }
+    if (managedApps.some((a) => String(a.domain || "").toLowerCase() === cleanDomain)) {
+      res.status(409).json({ error: `Tên miền ${cleanDomain} đã tồn tại trên hệ thống.` });
+      return;
+    }
+
     const cleanName = String(name || cleanDomain.split(".")[0] || "new-web-service").toLowerCase().replace(/[^a-z0-9-]/g, "-");
     const appId = `svc-${Date.now()}`;
-    const siteRoot = workingDir || `/www/wwwroot/${cleanDomain}`;
+    const siteRoot = workingDir && workingDir !== "/www/wwwroot/" ? workingDir : `/www/wwwroot/${cleanDomain}`;
     const fw = framework || "Actix-Web (Rust)";
-    const allocatedPort = Number(internalPort) === 80 ? 80 : pickAvailablePort(Number(internalPort) || 8086);
+    const fwLow = fw.toLowerCase();
+    const isPhpFw = fwLow.includes("php");
+    const isStaticFw = fwLow.includes("static") || fwLow.includes("vite");
+    const allocatedPort = isPhpFw ? 9000 : isStaticFw || Number(internalPort) === 80 ? 80 : pickAvailablePort(Number(internalPort) || 8086);
     const provisionLogs = [];
     const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 
@@ -2667,11 +3113,11 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     let createdDbName = null;
     let createdDbPassword = null;
     let createdDbUserStr = null;
+    const selectedEngine = dbEngine || "PostgreSQL 17";
     if (createDatabase) {
       const cleanDb = String(dbName || cleanName.replace(/-/g, "_") + "_db").toLowerCase().replace(/[^a-z0-9_]/g, "_");
       const cleanDbUser = String(dbUser || `${cleanDb}_user`).toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 28);
       const customDbPass = String(dbPassword || "").trim() || `Sql#${crypto.randomBytes(6).toString("hex")}!99`;
-      const selectedEngine = dbEngine || "PostgreSQL 17";
       createdDbName = cleanDb;
       createdDbPassword = customDbPass;
       createdDbUserStr = cleanDbUser;
@@ -2719,21 +3165,24 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       ttl: 300
     });
 
-    const isPhpFw = fw.toLowerCase().includes("php");
-    const isStaticFw = fw.toLowerCase().includes("static") || fw.toLowerCase().includes("vite");
-    const resolvedSubDir = runSubDir || (isPhpFw ? "/public" : isStaticFw ? "/dist" : "/");
-    if (fs2.existsSync(siteRoot)) {
-      try {
-        const targetSub = resolvedSubDir !== "/" ? path2.join(siteRoot, resolvedSubDir.replace(/^\/+/, "")) : siteRoot;
-        fs2.mkdirSync(targetSub, { recursive: true });
-        if (isPhpFw && !fs2.existsSync(path2.join(targetSub, "index.php"))) {
-          fs2.writeFileSync(path2.join(targetSub, "index.php"), `<?php\nheader('Content-Type: text/html; charset=utf-8');\necho "<h1>${cleanDomain}</h1><p>PHP " . PHP_VERSION . " + FerrousX Ready</p>";\n`);
-        } else if (isStaticFw && !fs2.existsSync(path2.join(targetSub, "index.html"))) {
-          fs2.writeFileSync(path2.join(targetSub, "index.html"), `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${cleanDomain}</title></head><body style="font-family:sans-serif;padding:40px"><h1>${cleanDomain}</h1><p>Static/SPA WebRoot Ready on FerrousX</p></body></html>`);
-        }
-      } catch {}
-    }
+    const scaffold = await provisionFrameworkStarter(
+      {
+        framework: fw,
+        templateName: fw,
+        cleanDomain,
+        cleanName,
+        siteRoot,
+        port: allocatedPort,
+        dbEngine: selectedEngine,
+        dbName: createdDbName,
+        dbUser: createdDbUserStr,
+        dbPass: createdDbPassword,
+        defaultExecCommand: execCommand || `${siteRoot}/target/release/${cleanName}`
+      },
+      provisionLogs
+    );
 
+    const resolvedSubDir = runSubDir && runSubDir !== "/" ? runSubDir : scaffold.resolvedRunSubDir;
     const preset = getPresetForFw(fw);
     const selectedWebServer = webServerEngine === "Nginx 1.26" ? "Nginx 1.26" : "FerrousX (Rust Web Server)";
     const newApp = {
@@ -2741,13 +3190,14 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       name: cleanName,
       framework: fw,
       webServerEngine: selectedWebServer,
+      phpVersion: isPhpFw ? "8.3" : "None",
       runtimeVersion: runtimeLabelMap[fw] || fw,
       domain: cleanDomain,
       aliases: Array.isArray(aliases) ? aliases : [],
       internalPort: allocatedPort,
       workingDir: siteRoot,
       runSubDir: resolvedSubDir,
-      execCommand: execCommand || `${siteRoot}/target/release/${cleanName}`,
+      execCommand: scaffold.resolvedExecCmd || execCommand || `${siteRoot}/target/release/${cleanName}`,
       workers: Number(workers) || 4,
       memoryLimitMb: Number(memoryLimitMb) || 512,
       memoryUsedMb: 24.8,
@@ -2818,25 +3268,30 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     const { templateId, domain, createDb, webServerEngine } = req.body;
     const tpl = oneClickTemplates.find((t) => t.id === templateId) || oneClickTemplates[0];
     const selectedWebServer = webServerEngine === "Nginx 1.26" ? "Nginx 1.26" : "FerrousX (Rust Web Server)";
-    const cleanDomain = String(domain || "app.ferroushub.vn")
+    const cleanDomain = String(domain || "")
       .toLowerCase()
       .trim()
       .replace(/[^a-z0-9.-]/g, "");
+    if (!cleanDomain || !cleanDomain.includes(".")) {
+      res.status(400).json({ error: "Tên miền không hợp lệ. Vui lòng nhập domain đầy đủ (vd: blog.example.com)." });
+      return;
+    }
+    if (managedApps.some((a) => String(a.domain || "").toLowerCase() === cleanDomain)) {
+      res.status(409).json({ error: `Tên miền ${cleanDomain} đã tồn tại trên hệ thống.` });
+      return;
+    }
+
     const cleanName = cleanDomain.replace(/[^a-z0-9-]/g, "-");
     const appId = `svc-${Date.now()}`;
     const siteRoot = `/www/wwwroot/${cleanDomain}`;
     const fw = tpl.framework;
     const fwLow = fw.toLowerCase();
-    const isWordPress = tpl.id.includes("wordpress") || tpl.name.toLowerCase().includes("wordpress");
-    const isLaravel = tpl.id.includes("laravel") || tpl.name.toLowerCase().includes("laravel");
-    const isSymfony = tpl.id.includes("symfony") || fwLow.includes("symfony");
     const isPhp = fwLow.includes("php");
     const isStaticSpa = fwLow.includes("vite") || fwLow.includes("static") || Number(tpl.defaultPort) === 80;
     const port = isPhp ? 9000 : isStaticSpa ? 80 : pickAvailablePort(tpl.defaultPort || 8080);
     const provisionLogs = [];
     const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 
-    // 1. Create real WebRoot
     try {
       fs2.mkdirSync(siteRoot, { recursive: true });
       fs2.mkdirSync("/www/wwwlogs", { recursive: true });
@@ -2845,13 +3300,11 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       provisionLogs.push(`${nowIso()} WARN  fs: Could not create ${siteRoot}: ${err.message}`);
     }
 
-    // 2. Ensure language runtime / toolchain is automatically installed & ready
     await ensureRuntimeEnvironment(fw, provisionLogs);
 
-    // 3. Provision real SQL database & user
     let dbCreatedName = null;
     let dbCreatedUser = null;
-    let dbCreatedPass = `Fp#${crypto.randomBytes(6).toString("hex")}!26`;
+    const dbCreatedPass = `Fp#${crypto.randomBytes(6).toString("hex")}!26`;
     if (createDb && tpl.requiresDb !== "None") {
       const prefix = cleanDomain.split(".")[0].replace(/[^a-z0-9]/g, "_").slice(0, 12) || "site";
       const suffix = tpl.id.split("-")[1]?.replace(/[^a-z0-9]/g, "_").slice(0, 8) || "app";
@@ -2876,7 +3329,7 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
         maxConnections: 100,
         status: "online",
         createdAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
-        tables: isWordPress
+        tables: tpl.id.includes("wordpress")
           ? [
               {
                 tableName: "wp_options",
@@ -2893,387 +3346,23 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       });
     }
 
-    // 4. Scaffold, Install Dependencies & Build per Framework (100% Real Auto-Setup)
-    let resolvedExecCmd = tpl.execCommandTemplate.replace(/\$DOMAIN/g, cleanDomain).replace(/\$PORT/g, String(port));
-    let resolvedRunSubDir = isLaravel || isSymfony ? "/public" : isStaticSpa ? "/dist" : "/";
-    let wpConfigContent = "";
-    const envFileLines = [
-      `PORT=${port}`,
-      `HOST=127.0.0.1`,
-      `APP_ENV=production`,
-      `APP_URL=https://${cleanDomain}`,
-      ...(dbCreatedName ? [
-        `DB_CONNECTION=${tpl.requiresDb.includes("PostgreSQL") ? "pgsql" : "mysql"}`,
-        `DB_HOST=127.0.0.1`,
-        `DB_PORT=${tpl.requiresDb.includes("PostgreSQL") ? 5432 : 3306}`,
-        `DB_DATABASE=${dbCreatedName}`,
-        `DB_USERNAME=${dbCreatedUser}`,
-        `DB_PASSWORD=${dbCreatedPass}`
-      ] : [])
-    ];
-    if (fs2.existsSync(siteRoot)) {
-      try {
-        fs2.writeFileSync(path2.join(siteRoot, ".env"), envFileLines.join("\n") + "\n", { mode: 0o600 });
-      } catch {}
-    }
-
-    if (fs2.existsSync(siteRoot)) {
-      if (isWordPress) {
-        resolvedRunSubDir = "/";
-        const wpCheckPath = path2.join(siteRoot, "wp-login.php");
-        if (!fs2.existsSync(wpCheckPath)) {
-          const dlCmd = [
-            `if command -v wp >/dev/null 2>&1; then wp core download --path="${siteRoot}" --allow-root --force;`,
-            `else`,
-            `  if [ ! -s /tmp/ferrous-wp-latest.tar.gz ]; then`,
-            `    curl -fsSL --connect-timeout 10 --max-time 60 https://wordpress.org/latest.tar.gz -o /tmp/ferrous-wp-latest.tar.gz || curl -fsSL --connect-timeout 10 --max-time 60 https://vi.wordpress.org/latest-vi.tar.gz -o /tmp/ferrous-wp-latest.tar.gz;`,
-            `  fi;`,
-            `  tar -xzf /tmp/ferrous-wp-latest.tar.gz --strip-components=1 -C "${siteRoot}";`,
-            `fi`
-          ].join(" ");
-          const wpDl = await execShellAsync(dlCmd, 9e4);
-          provisionLogs.push(
-            wpDl.ok
-              ? `${nowIso()} INFO  wordpress: Downloaded & extracted WordPress core into ${siteRoot}`
-              : `${nowIso()} ERROR wordpress: Download failed (${wpDl.stderr})`
-          );
-        }
-        const genSalt = () => crypto.randomBytes(48).toString("base64").replace(/['"\\]/g, "x");
-        wpConfigContent = `<?php
-/**
- * Auto-generated by FerrousPanel 1-Click WordPress Installer
- * Domain: ${cleanDomain}
- */
-define( 'DB_NAME', '${dbCreatedName || "wordpress"}' );
-define( 'DB_USER', '${dbCreatedUser || "root"}' );
-define( 'DB_PASSWORD', '${dbCreatedPass}' );
-define( 'DB_HOST', '127.0.0.1' );
-define( 'DB_CHARSET', 'utf8mb4' );
-define( 'DB_COLLATE', '' );
-
-define( 'AUTH_KEY',         '${genSalt()}' );
-define( 'SECURE_AUTH_KEY',  '${genSalt()}' );
-define( 'LOGGED_IN_KEY',    '${genSalt()}' );
-define( 'NONCE_KEY',        '${genSalt()}' );
-define( 'AUTH_SALT',        '${genSalt()}' );
-define( 'SECURE_AUTH_SALT', '${genSalt()}' );
-define( 'LOGGED_IN_SALT',   '${genSalt()}' );
-define( 'NONCE_SALT',       '${genSalt()}' );
-
-$table_prefix = 'wp_';
-define( 'WP_DEBUG', false );
-define( 'FS_METHOD', 'direct' );
-
-if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false ) {
-    $_SERVER['HTTPS'] = 'on';
-}
-
-if ( ! defined( 'ABSPATH' ) ) {
-    define( 'ABSPATH', __DIR__ . '/' );
-}
-require_once ABSPATH . 'wp-settings.php';
-`;
-        try {
-          fs2.writeFileSync(path2.join(siteRoot, "wp-config.php"), wpConfigContent, { mode: 0o640 });
-          await execShellAsync(`chown -R www-data:www-data "${siteRoot}" && find "${siteRoot}" -type d -exec chmod 755 {} + && find "${siteRoot}" -type f -exec chmod 644 {} + && chmod 640 "${siteRoot}/wp-config.php"`);
-          provisionLogs.push(`${nowIso()} INFO  wordpress: Generated wp-config.php & set www-data permissions`);
-        } catch {}
-      } else if (isLaravel || isSymfony) {
-        resolvedRunSubDir = "/public";
-        const pubDir = path2.join(siteRoot, "public");
-        fs2.mkdirSync(pubDir, { recursive: true });
-        if (isLaravel && !fs2.existsSync(path2.join(siteRoot, "artisan"))) {
-          const larRes = await execShellAsync(
-            `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction --prefer-dist laravel/laravel "${siteRoot}/_tmp_lar" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_lar/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_lar"; fi`,
-            18e4
-          );
-          if (fs2.existsSync(path2.join(siteRoot, "artisan"))) {
-            const envPath = path2.join(siteRoot, ".env");
-            let larEnv = fs2.existsSync(envPath) ? fs2.readFileSync(envPath, "utf8") : "";
-            larEnv = larEnv
-              .replace(/^APP_URL=.*/m, `APP_URL=https://${cleanDomain}`)
-              .replace(/^#?\s*DB_CONNECTION=.*/m, "DB_CONNECTION=mysql")
-              .replace(/^#?\s*DB_HOST=.*/m, "DB_HOST=127.0.0.1")
-              .replace(/^#?\s*DB_PORT=.*/m, "DB_PORT=3306")
-              .replace(/^#?\s*DB_DATABASE=.*/m, `DB_DATABASE=${dbCreatedName || "laravel"}`)
-              .replace(/^#?\s*DB_USERNAME=.*/m, `DB_USERNAME=${dbCreatedUser || "root"}`)
-              .replace(/^#?\s*DB_PASSWORD=.*/m, `DB_PASSWORD=${dbCreatedPass}`);
-            fs2.writeFileSync(envPath, larEnv);
-            await execShellAsync(`cd "${siteRoot}" && php artisan key:generate --force && chmod -R 775 storage bootstrap/cache`, 3e4);
-            provisionLogs.push(`${nowIso()} INFO  laravel: Installed Laravel 11 + generated APP_KEY & DB .env`);
-          } else {
-            provisionLogs.push(`${nowIso()} WARN  laravel: Composer create-project unavailable (${larRes.stderr || "offline"}), wrote PHP /public starter`);
-          }
-        } else if (isSymfony && !fs2.existsSync(path2.join(siteRoot, "composer.json"))) {
-          await execShellAsync(
-            `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction symfony/skeleton "${siteRoot}/_tmp_sym" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_sym/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_sym"; fi`,
-            15e4
-          );
-        }
-        if (!fs2.existsSync(path2.join(pubDir, "index.php"))) {
-          fs2.writeFileSync(
-            path2.join(pubDir, "index.php"),
-            `<?php\nheader('Content-Type: text/html; charset=utf-8');\necho "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:40px'><h1>${cleanDomain} (${tpl.name})</h1><p>PHP " . PHP_VERSION . " + FerrousX Ready at /public</p></body></html>";\n`
-          );
-        }
-        await execShellAsync(`chown -R www-data:www-data "${siteRoot}"`);
-      } else if (isStaticSpa) {
-        resolvedRunSubDir = "/dist";
-        const distDir = path2.join(siteRoot, "dist");
-        fs2.mkdirSync(distDir, { recursive: true });
-        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
-          fs2.writeFileSync(
-            path2.join(siteRoot, "package.json"),
-            JSON.stringify({ name: cleanName, private: true, version: "1.0.0", scripts: { build: "mkdir -p dist" } }, null, 2)
-          );
-        }
-        if (!fs2.existsSync(path2.join(distDir, "index.html"))) {
-          fs2.writeFileSync(
-            path2.join(distDir, "index.html"),
-            `<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${cleanDomain}</title></head><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="margin:0 0 12px;color:#fb923c">${cleanDomain}</h1><p>Triển khai thành công <strong>${tpl.name}</strong> qua FerrousX Static/SPA Engine.</p><p style="color:#94a3b8;font-size:14px">Document Root: <code>${distDir}</code></p></div></body></html>`
-          );
-        }
-        provisionLogs.push(`${nowIso()} INFO  static-spa: Built /dist/index.html with HTML5 History fallback`);
-      } else if (fwLow.includes("bun")) {
-        fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
-        const bunEntry = path2.join(siteRoot, "src", "index.ts");
-        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
-          fs2.writeFileSync(
-            path2.join(siteRoot, "package.json"),
-            JSON.stringify({ name: cleanName, module: "src/index.ts", scripts: { start: "bun run src/index.ts" } }, null, 2)
-          );
-        }
-        if (!fs2.existsSync(bunEntry)) {
-          fs2.writeFileSync(
-            bunEntry,
-            `const port = Number(process.env.PORT || ${port});
-Bun.serve({
-  port,
-  hostname: "127.0.0.1",
-  fetch(req) {
-    const url = new URL(req.url);
-    if (url.pathname === "/api/health") {
-      return Response.json({ status: "ok", runtime: "Bun " + Bun.version, domain: "${cleanDomain}" });
-    }
-    return new Response("<h1>${cleanDomain} — Bun " + Bun.version + " + FerrousX Ready</h1>", {
-      headers: { "content-type": "text/html; charset=utf-8" }
-    });
-  }
-});
-console.log("Bun server listening on 127.0.0.1:" + port);
-`
-          );
-        }
-        const bunBin = (await execShellAsync("command -v bun || echo /usr/local/bin/bun")).stdout || "/usr/local/bin/bun";
-        resolvedExecCmd = `${bunBin} run ${bunEntry}`;
-        provisionLogs.push(`${nowIso()} INFO  bun: Prepared TypeScript server ${bunEntry}`);
-      } else if (fwLow.includes("deno")) {
-        const denoEntry = path2.join(siteRoot, "main.ts");
-        if (!fs2.existsSync(path2.join(siteRoot, "deno.json"))) {
-          fs2.writeFileSync(path2.join(siteRoot, "deno.json"), JSON.stringify({ tasks: { start: "deno run --allow-net --allow-env --allow-read main.ts" } }, null, 2));
-        }
-        if (!fs2.existsSync(denoEntry)) {
-          fs2.writeFileSync(
-            denoEntry,
-            `const port = Number(Deno.env.get("PORT") || ${port});
-Deno.serve({ port, hostname: "127.0.0.1" }, (req) => {
-  const url = new URL(req.url);
-  if (url.pathname === "/api/health") {
-    return Response.json({ status: "ok", runtime: "Deno " + Deno.version.deno, domain: "${cleanDomain}" });
-  }
-  return new Response("<h1>${cleanDomain} — Deno " + Deno.version.deno + " + FerrousX Ready</h1>", {
-    headers: { "content-type": "text/html; charset=utf-8" }
-  });
-});
-`
-          );
-        }
-        const denoBin = (await execShellAsync("command -v deno || echo /usr/local/bin/deno")).stdout || "/usr/local/bin/deno";
-        resolvedExecCmd = `${denoBin} run --allow-net --allow-env --allow-read ${denoEntry}`;
-        provisionLogs.push(`${nowIso()} INFO  deno: Prepared TypeScript server ${denoEntry}`);
-      } else if (fwLow.includes("next") || fwLow.includes("nuxt") || fwLow.includes("svelte") || fwLow.includes("astro") || fwLow.includes("remix") || fwLow.includes("nest")) {
-        const entryFallback = path2.join(siteRoot, "server.mjs");
-        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
-          fs2.writeFileSync(
-            path2.join(siteRoot, "package.json"),
-            JSON.stringify({ name: cleanName, version: "1.0.0", type: "module", scripts: { start: "node server.mjs" } }, null, 2)
-          );
-        }
-        if (!fs2.existsSync(entryFallback)) {
-          fs2.writeFileSync(
-            entryFallback,
-            `import http from 'http';
-const port = Number(process.env.PORT || ${port});
-http.createServer((req, res) => {
-  if (req.url === '/api/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok', framework: '${fw}', domain: '${cleanDomain}', node: process.version }));
-    return;
-  }
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  res.end(\`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="color:#fb923c">${cleanDomain}</h1><p><strong>${tpl.name}</strong> đang chạy với Node \${process.version} sau FerrousX Reverse Proxy.</p><p style="color:#94a3b8;font-size:14px">Upstream Port: 127.0.0.1:\${port} · Database: ${dbCreatedName || "None"}</p></div></body></html>\`);
-}).listen(port, '127.0.0.1', () => console.log('Listening on 127.0.0.1:' + port));
-`
-          );
-        }
-        const nodeBin = (await execShellAsync("command -v node || echo /usr/bin/node")).stdout || "/usr/bin/node";
-        const candidateEntries = [
-          path2.join(siteRoot, ".next/standalone/server.js"),
-          path2.join(siteRoot, ".output/server/index.mjs"),
-          path2.join(siteRoot, "build/index.js"),
-          path2.join(siteRoot, "dist/server/entry.mjs"),
-          path2.join(siteRoot, "dist/main.js"),
-          entryFallback
-        ];
-        const chosenEntry = candidateEntries.find((p) => fs2.existsSync(p)) || entryFallback;
-        resolvedExecCmd = `${nodeBin} ${chosenEntry}`;
-        provisionLogs.push(`${nowIso()} INFO  node: Provisioned ${fw} entrypoint ${chosenEntry}`);
-      } else if (fwLow.includes("python") || fwLow.includes("fastapi") || fwLow.includes("django") || fwLow.includes("flask")) {
-        const venvDir = path2.join(siteRoot, ".venv");
-        const isDjango = fwLow.includes("django");
-        const isFlask = fwLow.includes("flask");
-        if (isVpsHost()) {
-          await execShellAsync(`if [ ! -x "${venvDir}/bin/python" ]; then python3 -m venv "${venvDir}"; fi`, 6e4);
-        }
-        const pyMain = path2.join(siteRoot, isFlask ? "app.py" : "main.py");
-        if (isDjango) {
-          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "django>=5.0\ngunicorn>=22.0\n");
-          if (isVpsHost()) {
-            const djPip = await execShellAsync(`"${venvDir}/bin/pip" install -q django gunicorn >/dev/null 2>&1 && if [ ! -f "${siteRoot}/manage.py" ]; then "${venvDir}/bin/django-admin" startproject config "${siteRoot}"; fi`, 15e4);
-            if (djPip.ok && fs2.existsSync(path2.join(siteRoot, "config/settings.py"))) {
-              await execShellAsync(`sed -i "s/ALLOWED_HOSTS = \\[\\]/ALLOWED_HOSTS = ['*']/" "${siteRoot}/config/settings.py" && "${venvDir}/bin/python" "${siteRoot}/manage.py" migrate --noinput >/dev/null 2>&1 || true`, 3e4);
-              resolvedExecCmd = `${venvDir}/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${port} --workers 2`;
-              provisionLogs.push(`${nowIso()} INFO  django: Initialized Django 5 project & Gunicorn in .venv`);
-            }
-          }
-        } else if (isFlask) {
-          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "flask>=3.0\ngunicorn>=22.0\n");
-          if (!fs2.existsSync(pyMain)) {
-            fs2.writeFileSync(pyMain, `from flask import Flask, jsonify\napp = Flask(__name__)\n@app.route("/")\ndef index():\n    return "<h1>${cleanDomain} — Flask 3 + FerrousX Ready</h1>"\n@app.route("/api/health")\ndef health():\n    return jsonify(status="ok", framework="Flask 3", domain="${cleanDomain}")\n`);
-          }
-          if (isVpsHost()) {
-            const flPip = await execShellAsync(`"${venvDir}/bin/pip" install -q flask gunicorn >/dev/null 2>&1`, 12e4);
-            if (flPip.ok) {
-              resolvedExecCmd = `${venvDir}/bin/gunicorn app:app --bind 127.0.0.1:${port} --workers 2`;
-              provisionLogs.push(`${nowIso()} INFO  flask: Installed Flask + Gunicorn in .venv`);
-            }
-          }
-        } else {
-          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "fastapi>=0.115\nuvicorn>=0.30\n");
-          if (!fs2.existsSync(pyMain)) {
-            fs2.writeFileSync(pyMain, `from fastapi import FastAPI\nfrom fastapi.responses import HTMLResponse\napp = FastAPI(title="${cleanDomain}")\n@app.get("/", response_class=HTMLResponse)\ndef home():\n    return "<h1>${cleanDomain} — Python FastAPI + FerrousX Ready</h1><p><a href='/docs'>Swagger /docs</a></p>"\n@app.get("/api/health")\ndef health():\n    return {"status": "ok", "framework": "FastAPI", "domain": "${cleanDomain}"}\n`);
-          }
-          if (isVpsHost()) {
-            const faPip = await execShellAsync(`"${venvDir}/bin/pip" install -q fastapi uvicorn >/dev/null 2>&1`, 12e4);
-            if (faPip.ok) {
-              resolvedExecCmd = `${venvDir}/bin/uvicorn main:app --host 127.0.0.1 --port ${port}`;
-              provisionLogs.push(`${nowIso()} INFO  fastapi: Installed FastAPI + Uvicorn in .venv`);
-            }
-          }
-        }
-        // Offline / fallback WSGI/HTTP server in case pip had network restriction
-        if (!resolvedExecCmd.includes("uvicorn") && !resolvedExecCmd.includes("gunicorn") || (isVpsHost() && !fs2.existsSync(`${venvDir}/bin/uvicorn`) && !fs2.existsSync(`${venvDir}/bin/gunicorn`))) {
-          const fallbackPy = path2.join(siteRoot, "ferrous_fallback.py");
-          fs2.writeFileSync(fallbackPy, `import os, json\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.send_header('Content-Type', 'text/html; charset=utf-8')\n        self.end_headers()\n        self.wfile.write(b"<h1>${cleanDomain} (${fw}) - Python Ready</h1>")\nHTTPServer(('127.0.0.1', int(os.environ.get('PORT', ${port}))), H).serve_forever()\n`);
-          const pyBin = fs2.existsSync(`${venvDir}/bin/python`) ? `${venvDir}/bin/python` : "/usr/bin/python3";
-          resolvedExecCmd = `${pyBin} ${fallbackPy}`;
-        }
-      } else if (fwLow.includes("go /") || fwLow.includes("fiber") || fwLow.includes("gin")) {
-        const binDir = path2.join(siteRoot, "bin");
-        fs2.mkdirSync(binDir, { recursive: true });
-        const binOut = path2.join(binDir, "server");
-        if (!fs2.existsSync(path2.join(siteRoot, "go.mod"))) {
-          fs2.writeFileSync(path2.join(siteRoot, "go.mod"), `module ${cleanName}\n\ngo 1.21\n`);
-          fs2.writeFileSync(
-            path2.join(siteRoot, "main.go"),
-            `package main
-import (
-\t"fmt"
-\t"net/http"
-\t"os"
-)
-func main() {
-\tport := os.Getenv("PORT")
-\tif port == "" { port = "${port}" }
-\thttp.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
-\t\tw.Header().Set("Content-Type", "application/json")
-\t\tfmt.Fprintf(w, "{\\"status\\":\\"ok\\",\\"framework\\":\\"${fw}\\",\\"domain\\":\\"${cleanDomain}\\"}")
-\t})
-\thttp.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-\t\tw.Header().Set("Content-Type", "text/html; charset=utf-8")
-\t\tfmt.Fprintf(w, "<h1>${cleanDomain} — ${fw} + FerrousX Ready</h1>")
-\t})
-\thttp.ListenAndServe("127.0.0.1:"+port, nil)
-}
-`
-          );
-        }
-        if (isVpsHost()) {
-          const goRes = await execShellAsync(`cd "${siteRoot}" && go build -o "${binOut}" .`, 9e4);
-          provisionLogs.push(`${nowIso()} ${goRes.ok ? "INFO" : "WARN"}  go: Compiled ${binOut}`);
-        }
-        resolvedExecCmd = binOut;
-      } else if (fwLow.includes("rust") || fwLow.includes("actix") || fwLow.includes("axum") || fwLow.includes("rocket")) {
-        const targetDir = path2.join(siteRoot, "target/release");
-        fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
-        fs2.mkdirSync(targetDir, { recursive: true });
-        const binOut = path2.join(targetDir, cleanName);
-        if (!fs2.existsSync(path2.join(siteRoot, "Cargo.toml"))) {
-          const depLine = fwLow.includes("axum") ? 'axum = "0.7"\ntokio = { version = "1", features = ["full"] }' : fwLow.includes("rocket") ? 'rocket = "0.5"' : 'actix-web = "4.9"';
-          fs2.writeFileSync(path2.join(siteRoot, "Cargo.toml"), `[package]\nname = "${cleanName}"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n${depLine}\n`);
-          fs2.writeFileSync(
-            path2.join(siteRoot, "src/main.rs"),
-            `use std::io::{Read, Write};\nuse std::net::TcpListener;\nfn main() {\n    let port = std::env::var("PORT").unwrap_or_else(|_| "${port}".to_string());\n    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).expect("bind failed");\n    for stream in listener.incoming().flatten() {\n        let mut s = stream;\n        let mut buf = [0u8; 1024];\n        let _ = s.read(&mut buf);\n        let body = "<h1>${cleanDomain} — ${fw} Native Rust + FerrousX Ready</h1>";\n        let resp = format!("HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}", body.len(), body);\n        let _ = s.write_all(resp.as_bytes());\n    }\n}\n`
-          );
-        }
-        if (isVpsHost()) {
-          const rsRes = await execShellAsync(`rustc -O "${path2.join(siteRoot, "src/main.rs")}" -o "${binOut}"`, 9e4);
-          provisionLogs.push(`${nowIso()} ${rsRes.ok ? "INFO" : "WARN"}  rust: Compiled native release binary ${binOut}`);
-        }
-        resolvedExecCmd = binOut;
-      } else if (fwLow.includes("java") || fwLow.includes("spring")) {
-        const targetDir = path2.join(siteRoot, "target");
-        const srcDir = path2.join(siteRoot, "src/main/java");
-        fs2.mkdirSync(targetDir, { recursive: true });
-        fs2.mkdirSync(srcDir, { recursive: true });
-        const jarOut = path2.join(targetDir, "app.jar");
-        if (!fs2.existsSync(path2.join(srcDir, "Main.java"))) {
-          fs2.writeFileSync(
-            path2.join(srcDir, "Main.java"),
-            `import com.sun.net.httpserver.HttpServer;\nimport java.io.OutputStream;\nimport java.net.InetSocketAddress;\nimport java.nio.charset.StandardCharsets;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "${port}"));\n    HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);\n    srv.createContext("/", ex -> {\n      byte[] b = "<h1>${cleanDomain} — Java 21 + FerrousX Ready</h1>".getBytes(StandardCharsets.UTF_8);\n      ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");\n      ex.sendResponseHeaders(200, b.length);\n      try (OutputStream os = ex.getResponseBody()) { os.write(b); }\n    });\n    srv.start();\n  }\n}\n`
-          );
-        }
-        if (isVpsHost()) {
-          const jRes = await execShellAsync(`cd "${srcDir}" && javac Main.java && jar cfe "${jarOut}" Main Main.class`, 6e4);
-          provisionLogs.push(`${nowIso()} ${jRes.ok ? "INFO" : "WARN"}  java: Packaged ${jarOut}`);
-        }
-        const javaBin = (await execShellAsync("command -v java || echo /usr/bin/java")).stdout || "/usr/bin/java";
-        resolvedExecCmd = `${javaBin} -XX:+UseZGC -jar ${jarOut}`;
-      } else if (fwLow.includes(".net") || fwLow.includes("c#")) {
-        const pubDir = path2.join(siteRoot, "publish");
-        fs2.mkdirSync(pubDir, { recursive: true });
-        if (isVpsHost() && !fs2.existsSync(path2.join(siteRoot, "app.csproj"))) {
-          const dnRes = await execShellAsync(`cd "${siteRoot}" && dotnet new web --name app --force >/dev/null 2>&1 && dotnet publish -c Release -o "${pubDir}" >/dev/null 2>&1`, 18e4);
-          provisionLogs.push(`${nowIso()} ${dnRes.ok ? "INFO" : "WARN"}  dotnet: Published ASP.NET Core 8 app to ${pubDir}`);
-        }
-        const dotnetBin = (await execShellAsync("command -v dotnet || echo /usr/bin/dotnet")).stdout || "/usr/bin/dotnet";
-        resolvedExecCmd = `${dotnetBin} ${pubDir}/app.dll --urls http://127.0.0.1:${port}`;
-      } else if (fwLow.includes("ruby") || fwLow.includes("rails")) {
-        const rbFile = path2.join(siteRoot, "app.rb");
-        if (!fs2.existsSync(path2.join(siteRoot, "Gemfile"))) {
-          fs2.writeFileSync(path2.join(siteRoot, "Gemfile"), `source "https://rubygems.org"\n`);
-        }
-        if (!fs2.existsSync(rbFile)) {
-          fs2.writeFileSync(
-            rbFile,
-            `require 'socket'\nport = (ENV['PORT'] || '${port}').to_i\nserver = TCPServer.new('127.0.0.1', port)\nloop do\n  client = server.accept\n  _req = client.gets\n  body = "<h1>${cleanDomain} — Ruby + FerrousX Ready</h1>"\n  client.print "HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: #{body.bytesize}\\r\\nConnection: close\\r\\n\\r\\n#{body}"\n  client.close\nend\n`
-          );
-        }
-        const rubyBin = (await execShellAsync("command -v ruby || echo /usr/bin/ruby")).stdout || "/usr/bin/ruby";
-        resolvedExecCmd = `${rubyBin} ${rbFile}`;
-        provisionLogs.push(`${nowIso()} INFO  ruby: Prepared Ruby server ${rbFile}`);
-      }
-    }
+    const scaffold = await provisionFrameworkStarter(
+      {
+        framework: fw,
+        templateId: tpl.id,
+        templateName: tpl.name,
+        cleanDomain,
+        cleanName,
+        siteRoot,
+        port,
+        dbEngine: tpl.requiresDb,
+        dbName: dbCreatedName,
+        dbUser: dbCreatedUser,
+        dbPass: dbCreatedPass,
+        defaultExecCommand: tpl.execCommandTemplate.replace(/\$DOMAIN/g, cleanDomain).replace(/\$PORT/g, String(port))
+      },
+      provisionLogs
+    );
 
     const preset = getPresetForFw(fw, tpl.id);
     const newSite = {
@@ -3281,13 +3370,14 @@ func main() {
       name: cleanName,
       framework: fw,
       webServerEngine: selectedWebServer,
+      phpVersion: isPhp ? "8.3" : "None",
       runtimeVersion: tpl.version,
       domain: cleanDomain,
       aliases: [`www.${cleanDomain}`],
       internalPort: port,
       workingDir: siteRoot,
-      runSubDir: resolvedRunSubDir,
-      execCommand: resolvedExecCmd,
+      runSubDir: scaffold.resolvedRunSubDir,
+      execCommand: scaffold.resolvedExecCmd,
       workers: 4,
       memoryLimitMb: 512,
       memoryUsedMb: 28,
@@ -3304,7 +3394,7 @@ func main() {
       requestsPerSec: 45,
       p99LatencyMs: fw.includes("Rust") ? 1.4 : 4.2,
       uptimeSeconds: 5,
-      diskUsedMb: isWordPress ? 64 : 24,
+      diskUsedMb: scaffold.isWordPress ? 64 : 24,
       diskQuotaMb: 5120,
       trafficMonthGb: 0.1,
       linkedDbName: dbCreatedName,
@@ -3336,7 +3426,7 @@ func main() {
     persistManagedApps();
     await activateSystemdAndReload(newSite, selectedWebServer, newSite.logs);
 
-    if (wpConfigContent) {
+    if (scaffold.wpConfigContent) {
       webFiles.push({
         id: `f-${Date.now()}-wp`,
         appId,
@@ -3344,12 +3434,12 @@ func main() {
         path: "/wp-config.php",
         parentDir: "/",
         type: "file",
-        sizeBytes: Buffer.byteLength(wpConfigContent, "utf8"),
+        sizeBytes: Buffer.byteLength(scaffold.wpConfigContent, "utf8"),
         permissions: "0640",
         symbolicPerms: "-rw-r-----",
         owner: "www-data:www-data",
         modifiedAt: "Vừa xong",
-        content: wpConfigContent
+        content: scaffold.wpConfigContent
       });
     }
     webFiles.push({
@@ -3455,28 +3545,45 @@ DB User: ${dbCreatedUser || "None"}
     );
     res.json(appItem);
   });
-  app.post("/api/apps/:id/git-deploy", (req, res) => {
+  app.post("/api/apps/:id/git-deploy", async (req, res) => {
     const appItem = managedApps.find((a) => a.id === req.params.id);
     if (!appItem) {
       res.status(404).json({ error: "Website not found" });
       return;
     }
-    const commitShort = Math.random().toString(16).slice(2, 9);
+    let commitShort = Math.random().toString(16).slice(2, 9);
     const now = (/* @__PURE__ */ new Date()).toISOString();
-    appItem.lastDeployCommit = `${commitShort} (Webhook pull from ${appItem.gitBranch})`;
-    appItem.lastDeployTime = "V\u1EEBa xong";
+    if (isVpsHost() && fs2.existsSync(appItem.workingDir)) {
+      if (fs2.existsSync(path2.join(appItem.workingDir, ".git"))) {
+        const pullRes = await execShellAsync(
+          `cd "${appItem.workingDir}" && git pull origin "${appItem.gitBranch || "main"}" && git rev-parse --short HEAD`,
+          9e4
+        );
+        if (pullRes.ok && pullRes.stdout) {
+          commitShort = pullRes.stdout.split(/\s+/).pop() || commitShort;
+        }
+      }
+      if (appItem.buildScript) {
+        await execShellAsync(`cd "${appItem.workingDir}" && ${appItem.buildScript}`, 12e4);
+      }
+      await execShellAsync(`systemctl restart "${appItem.name}.service" 2>/dev/null || true`, 2e4);
+    }
+    appItem.lastDeployCommit = `${commitShort} (Git deploy from ${appItem.gitBranch})`;
+    appItem.lastDeployTime = "Vừa xong";
     appItem.status = "running";
     appItem.pid = Math.floor(21e3 + Math.random() * 8e3);
     appItem.logs.push(
-      `${now} INFO  git-deploy: Fetching ${appItem.gitRepoUrl} (branch: ${appItem.gitBranch}) -> HEAD is now at ${commitShort}`
+      `${now} INFO  git-deploy: Synced ${appItem.gitRepoUrl} (branch: ${appItem.gitBranch}) -> HEAD at ${commitShort}`
     );
     appItem.logs.push(
-      `${now} INFO  builder: Running [${appItem.buildScript}] in ${appItem.workingDir}...`
+      `${now} INFO  builder: Ran [${appItem.buildScript}] in ${appItem.workingDir}`
     );
     appItem.logs.push(
       `${now} INFO  systemd[1]: Zero-downtime reload completed for ${appItem.domain} (PID ${appItem.pid}).`
     );
     syncArchitectureForApp(appItem);
+    persistManagedApps();
+    await reloadWebServerAndPhp(appItem.webServerEngine || "FerrousX (Rust Web Server)", appItem.logs);
     res.json(appItem);
   });
   app.post("/api/apps/:id/action", async (req, res) => {
@@ -3605,7 +3712,7 @@ DB User: ${dbCreatedUser || "None"}
     const entryFile = appFileList.find(
       (f) => f.name === "index.php" || f.name === "index.html" || f.name === "page.tsx" || f.name === "main.rs"
     ) || appFileList[0];
-    const bodyPreview = !isRunning ? `<html><body><h1>${statusText}</h1><p>Upstream endpoint <code>${upstreamTarget}</code> for <strong>${appItem.domain}</strong> is offline. Please verify Nginx, PHP-FPM (${appItem.phpVersion || "N/A"}), or systemd unit status in FerrousPanel.</p></body></html>` : appItem.framework.includes("Rust") ? JSON.stringify(
+    const bodyPreview = !isRunning ? `<html><body><h1>${statusText}</h1><p>Upstream endpoint <code>${upstreamTarget}</code> for <strong>${appItem.domain}</strong> is offline. Please verify ${activeWebServer}, PHP-FPM (${appItem.phpVersion || "N/A"}), or systemd unit status in FerrousPanel.</p></body></html>` : appItem.framework.includes("Rust") ? JSON.stringify(
       {
         status: "healthy",
         service: appItem.name,
@@ -3631,7 +3738,7 @@ DB User: ${dbCreatedUser || "None"}
 <body>
   <main id="__app" data-ssr="true" data-framework="${appItem.framework}">
     <h1>Website ${appItem.domain} \u0111ang ho\u1EA1t \u0111\u1ED9ng \u1ED5n \u0111\u1ECBnh (HTTP 200 OK)</h1>
-    <p>Upstream Handler: Nginx 1.26.2 + FerrousWAF -> ${upstreamTarget} (PID ${appItem.pid})</p>
+    <p>Upstream Handler: ${activeWebServer} + FerrousWAF -> ${upstreamTarget} (PID ${appItem.pid})</p>
     <p>Database k\u1EBFt n\u1ED1i: ${appItem.linkedDbName || "Kh\xF4ng s\u1EED d\u1EE5ng DB"} \xB7 T\u1EC7p g\u1ED1c: ${entryFile ? entryFile.path : "/index.html"} (${entryFile ? entryFile.sizeBytes : 0} bytes)</p>
     <p>T\u1ED1c \u0111\u1ED9 ph\u1EA3n h\u1ED3i: ${latencyMs} ms \xB7 B\u1EA3o m\u1EADt: ${appItem.hotlinkProtection?.enabled ? "Ch\u1ED1ng Hotlink B\u1EACT" : "Chu\u1EA9n"} \xB7 Redirects: ${(appItem.redirects || []).length} quy t\u1EAFc</p>
   </main>
@@ -3654,7 +3761,7 @@ DB User: ${dbCreatedUser || "None"}
       verifiedAt: (/* @__PURE__ */ new Date()).toLocaleTimeString("vi-VN")
     });
   });
-  app.post("/api/apps/:id/renew-ssl", (req, res) => {
+  app.post("/api/apps/:id/renew-ssl", async (req, res) => {
     const appItem = managedApps.find((a) => a.id === req.params.id);
     if (!appItem) {
       res.status(404).json({ error: "Website not found" });
@@ -3666,9 +3773,10 @@ DB User: ${dbCreatedUser || "None"}
     appItem.forceHttps = true;
     syncArchitectureForApp(appItem);
     appItem.logs.push(
-      `${(/* @__PURE__ */ new Date()).toISOString()} INFO  ferrous_acme: Renewed TLS 1.3 ECDSA P-384 certificate for ${appItem.domain} (valid 90 days) & reloaded Nginx.`
+      `${(/* @__PURE__ */ new Date()).toISOString()} INFO  ferrous_acme: Renewed TLS 1.3 ECDSA P-384 certificate for ${appItem.domain} (valid 90 days) & reloaded ${appItem.webServerEngine || "FerrousX"}.`
     );
     persistManagedApps();
+    await reloadWebServerAndPhp(appItem.webServerEngine || "FerrousX (Rust Web Server)", appItem.logs);
     res.json(appItem);
   });
   app.delete("/api/apps/:id", async (req, res) => {

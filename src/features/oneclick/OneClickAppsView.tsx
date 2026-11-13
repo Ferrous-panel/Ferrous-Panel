@@ -57,6 +57,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
     'FerrousX (Rust Web Server)'
   );
   const [deploying, setDeploying] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
 
   // Package Config & Logs Modal State
   const [configPkg, setConfigPkg] = useState<ServerPackageItem | null>(null);
@@ -97,7 +98,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
         start: 'Đã khởi chạy dịch vụ',
         stop: 'Đã dừng dịch vụ',
         restart: 'Đã khởi động lại dịch vụ',
-        install: 'Đã cài đặt & kích hoạt package Rust',
+        install: pkg.isRustNative ? 'Đã cài đặt & kích hoạt package Rust' : 'Đã cài đặt & kích hoạt môi trường',
         uninstall: 'Đã gỡ cài đặt package'
       };
       setBannerMsg(`${labelMap[action]}: ${pkg.name}`);
@@ -126,6 +127,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
   const handleConfirmDeploy = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTpl || !domainInput.trim()) return;
+    setDeployError(null);
     setDeploying(true);
     try {
       await onDeployTemplate({
@@ -135,6 +137,8 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
         webServerEngine
       });
       setSelectedTpl(null);
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : 'Không thể triển khai template.');
     } finally {
       setDeploying(false);
     }
@@ -390,7 +394,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                             className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
                           >
                             <Download className="w-3.5 h-3.5" />
-                            Cài đặt Package Rust
+                            {pkg.isRustNative ? 'Cài đặt Package Rust' : 'Cài đặt Môi trường'}
                           </button>
                         ) : (
                           <>
@@ -504,6 +508,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
 
                   <button
                     onClick={() => {
+                      setDeployError(null);
                       setSelectedTpl(tpl);
                       setDomainInput(
                         `${tpl.id.replace('tpl-', '').split('-')[0]}.ferroushub.vn`
@@ -699,6 +704,12 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                     trường
                   </span>
                 </label>
+              )}
+
+              {deployError && (
+                <div className="p-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-xs text-rose-600 dark:text-rose-400">
+                  {deployError}
+                </div>
               )}
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-800">

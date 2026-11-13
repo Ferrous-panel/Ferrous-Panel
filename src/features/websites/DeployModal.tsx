@@ -84,6 +84,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
   const [http3Quic, setHttp3Quic] = useState(true);
   const [websocketEnabled, setWebsocketEnabled] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [deployError, setDeployError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -105,6 +106,11 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     setFramework(nextFw);
     const clean = domain.toLowerCase().trim() || 'app.ferroushub.vn';
     const prefix = clean.split('.')[0]?.replace(/[^a-z0-9-]/g, '-') || 'app';
+    const isNextStatic = nextFw === 'Vite + React 19 / Vue 3 SPA' || nextFw === 'Static HTML / SPA';
+    const isNextPhp = nextFw === 'PHP 8.3-FPM' || nextFw === 'PHP / Symfony 7';
+    const effectivePort = isNextStatic ? 80 : isNextPhp ? 9000 : internalPort === 80 || internalPort === 9000 ? 8080 : internalPort;
+    setInternalPort(effectivePort);
+
     if (nextFw.includes('Rust')) {
       setRunSubDir('/');
       setDbEngine('PostgreSQL 17');
@@ -141,28 +147,28 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     } else if (nextFw === 'Deno 2 (TypeScript / Fresh)') {
       setRunSubDir('/');
       setExecCommand(`/usr/local/bin/deno run --allow-net --allow-env --allow-read /www/wwwroot/${clean}/main.ts`);
-    } else if (nextFw === 'Vite + React 19 / Vue 3 SPA' || nextFw === 'Static HTML / SPA') {
+    } else if (isNextStatic) {
       setRunSubDir('/dist');
       setCreateDatabase(false);
       setExecCommand('ferrousx static try_files /index.html');
-    } else if (nextFw === 'PHP 8.3-FPM' || nextFw === 'PHP / Symfony 7') {
+    } else if (isNextPhp) {
       setRunSubDir('/public');
       setDbEngine('MariaDB 11.4');
       setExecCommand('php-fpm8.3 (unix:/run/php/php8.3-fpm.sock + libferrous_bridge.so)');
     } else if (nextFw === 'Python / FastAPI') {
       setRunSubDir('/');
       setExecCommand(
-        `/www/wwwroot/${clean}/.venv/bin/uvicorn main:app --host 127.0.0.1 --port ${internalPort}`
+        `/www/wwwroot/${clean}/.venv/bin/uvicorn main:app --host 127.0.0.1 --port ${effectivePort}`
       );
     } else if (nextFw === 'Python / Django 5') {
       setRunSubDir('/');
       setExecCommand(
-        `/www/wwwroot/${clean}/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${internalPort}`
+        `/www/wwwroot/${clean}/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${effectivePort}`
       );
     } else if (nextFw === 'Python / Flask 3') {
       setRunSubDir('/');
       setExecCommand(
-        `/www/wwwroot/${clean}/.venv/bin/gunicorn app:app --bind 127.0.0.1:${internalPort}`
+        `/www/wwwroot/${clean}/.venv/bin/gunicorn app:app --bind 127.0.0.1:${effectivePort}`
       );
     } else if (nextFw === 'Go / Fiber' || nextFw === 'Go / Gin') {
       setRunSubDir('/');
@@ -170,25 +176,26 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     } else if (nextFw === 'Java 21 / Spring Boot 3') {
       setRunSubDir('/target');
       setExecCommand(
-        `/usr/bin/java -XX:+UseZGC -jar /www/wwwroot/${clean}/target/${prefix}.jar --server.port=${internalPort}`
+        `/usr/bin/java -XX:+UseZGC -jar /www/wwwroot/${clean}/target/${prefix}.jar --server.port=${effectivePort}`
       );
     } else if (nextFw === 'C# / .NET 8 ASP.NET Core') {
       setRunSubDir('/publish');
-      setExecCommand(`/usr/bin/dotnet /www/wwwroot/${clean}/publish/${prefix}.dll --urls http://127.0.0.1:${internalPort}`);
+      setExecCommand(`/usr/bin/dotnet /www/wwwroot/${clean}/publish/${prefix}.dll --urls http://127.0.0.1:${effectivePort}`);
     } else if (nextFw === 'Ruby 3.3 / Rails & Elixir') {
       setRunSubDir('/public');
-      setExecCommand(`/usr/local/bin/bundle exec puma -b tcp://127.0.0.1:${internalPort}`);
+      setExecCommand(`/usr/local/bin/bundle exec puma -b tcp://127.0.0.1:${effectivePort}`);
     } else if (nextFw === 'C++20 / Zig Native Daemon') {
       setRunSubDir('/');
       setExecCommand(`/www/wwwroot/${clean}/build/${prefix}_native`);
     } else if (nextFw === 'WebAssembly (WASI Wasmtime)') {
       setRunSubDir('/');
-      setExecCommand(`/usr/local/bin/wasmtime serve --addr 127.0.0.1:${internalPort} /www/wwwroot/${clean}/${prefix}.wasm`);
+      setExecCommand(`/usr/local/bin/wasmtime serve --addr 127.0.0.1:${effectivePort} /www/wwwroot/${clean}/${prefix}.wasm`);
     }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDeployError(null);
     setSubmitting(true);
     try {
       const clean = domain.toLowerCase().trim();
@@ -225,6 +232,8 @@ export const DeployModal: React.FC<DeployModalProps> = ({
         gitBranch
       });
       onClose();
+    } catch (err) {
+      setDeployError(err instanceof Error ? err.message : 'Không thể triển khai website.');
     } finally {
       setSubmitting(false);
     }
@@ -621,6 +630,12 @@ export const DeployModal: React.FC<DeployModalProps> = ({
             </label>
           </div>
 
+          {deployError && (
+            <div className="p-3 rounded-lg border border-rose-500/40 bg-rose-500/10 text-xs text-rose-600 dark:text-rose-400">
+              {deployError}
+            </div>
+          )}
+
           <div className="pt-4 border-t border-slate-200 dark:border-slate-800 flex items-center justify-end gap-3">
             <button
               type="button"
@@ -632,10 +647,10 @@ export const DeployModal: React.FC<DeployModalProps> = ({
             <button
               type="submit"
               disabled={submitting}
-              className="px-5 py-2 text-xs font-medium text-white bg-orange-600 hover:bg-orange-500 rounded-lg transition-colors cursor-pointer"
+              className="px-5 py-2 text-xs font-medium text-white bg-orange-600 hover:bg-orange-500 rounded-lg transition-colors cursor-pointer disabled:opacity-60"
             >
               {submitting
-                ? 'Đang tạo Website, DB & Nginx...'
+                ? `Đang nạp môi trường, DB & ${webServerEngine === 'Nginx 1.26' ? 'Nginx' : 'FerrousX'}...`
                 : 'Khởi tạo Website Ngay'}
             </button>
           </div>

@@ -561,15 +561,18 @@ export function usePanelController(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        const created: ManagedApp = await res.json();
-        setApps((prev) => [created, ...prev]);
-        setSelectedAppId(created.id);
-        setActiveTab('websites');
-        fetchAllData();
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Deploy thất bại (HTTP ${res.status})`);
       }
+      const created: ManagedApp = await res.json();
+      setApps((prev) => [created, ...prev]);
+      setSelectedAppId(created.id);
+      setActiveTab('websites');
+      fetchAllData();
     } catch (err) {
       console.error('[FerrousPanel] handleDeployNewWebsite error:', err);
+      throw err;
     }
   };
 
@@ -585,15 +588,18 @@ export function usePanelController(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-      if (res.ok) {
-        const created: ManagedApp = await res.json();
-        setApps((prev) => [created, ...prev]);
-        setSelectedAppId(created.id);
-        setActiveTab('websites');
-        fetchAllData();
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `1-Click Deploy thất bại (HTTP ${res.status})`);
       }
+      const created: ManagedApp = await res.json();
+      setApps((prev) => [created, ...prev]);
+      setSelectedAppId(created.id);
+      setActiveTab('websites');
+      fetchAllData();
     } catch (err) {
       console.error('[FerrousPanel] handleDeployOneClick error:', err);
+      throw err;
     }
   };
 
