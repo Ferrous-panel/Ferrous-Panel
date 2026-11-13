@@ -177,9 +177,12 @@ function executePhpFpm(req, res, scriptFilename, documentRoot, queryString) {
 
     // FCGI_BEGIN_REQUEST (type 1), role RESPONDER (1)
     const beginBody = Buffer.from([0, 1, 0, 0, 0, 0, 0, 0]);
+    const forwardedProto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
+    const isHttps = Boolean(req.socket.encrypted || String(forwardedProto).includes('https'));
     const params = {
       GATEWAY_INTERFACE: 'CGI/1.1',
       SERVER_SOFTWARE: 'FerrousX/2.5.0-edge',
+      REDIRECT_STATUS: '200',
       REQUEST_METHOD: req.method || 'GET',
       SCRIPT_FILENAME: scriptFilename,
       SCRIPT_NAME: '/' + path.relative(documentRoot, scriptFilename).replace(/\\/g, '/'),
@@ -189,14 +192,17 @@ function executePhpFpm(req, res, scriptFilename, documentRoot, queryString) {
       CONTENT_TYPE: req.headers['content-type'] || '',
       CONTENT_LENGTH: String(reqBody.length),
       SERVER_PROTOCOL: `HTTP/${req.httpVersion || '1.1'}`,
-      HTTPS: req.socket.encrypted ? 'on' : '',
-      REMOTE_ADDR: req.headers['cf-connecting-ip'] || req.socket.remoteAddress || '127.0.0.1',
+      HTTPS: isHttps ? 'on' : '',
+      REMOTE_ADDR: req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1',
       SERVER_NAME: (req.headers.host || 'localhost').split(':')[0],
-      SERVER_PORT: req.socket.encrypted ? '443' : '80',
+      SERVER_PORT: isHttps ? '443' : '80',
       HTTP_HOST: req.headers.host || 'localhost',
       HTTP_USER_AGENT: req.headers['user-agent'] || '',
       HTTP_COOKIE: req.headers.cookie || '',
-      HTTP_ACCEPT: req.headers.accept || '*/*'
+      HTTP_ACCEPT: req.headers.accept || '*/*',
+      HTTP_REFERER: req.headers.referer || '',
+      HTTP_ORIGIN: req.headers.origin || '',
+      HTTP_X_FORWARDED_PROTO: forwardedProto
     };
 
     const encodedParams = encodeFcgiParams(params);
@@ -207,8 +213,8 @@ function executePhpFpm(req, res, scriptFilename, documentRoot, queryString) {
     client.write(encodeFcgiRecord(4, reqId, Buffer.alloc(0))); // End FCGI_PARAMS
 
     if (reqBody.length > 0) {
-      for (let off = 0; off < reqBody.length; off += 65535) {
-        client.write(encodeFcgiRecord(5, reqId, reqBody.subarray(off, off + 65535))); // FCGI_STDIN
+      for (let off = 0; off < reqBody.length; off += 32768) {
+        client.write(encodeFcgiRecord(5, reqId, reqBody.subarray(off, off + 32768))); // FCGI_STDIN
       }
     }
     client.write(encodeFcgiRecord(5, reqId, Buffer.alloc(0))); // End FCGI_STDIN
@@ -311,7 +317,11 @@ function handleRequest(req, res) {
   }
 
   // Route 2: Static site or PHP Website in /www/wwwroot/<host> (excluding Panel domain)
-  const siteRoot = path.join('/www/wwwroot', hostHeader);
+  let siteRoot = path.join('/www/wwwroot', hostHeader);
+  if (!fs.existsSync(siteRoot) && hostHeader.startsWith('www.')) {
+    const apexRoot = path.join('/www/wwwroot', hostHeader.slice(4));
+    if (fs.existsSync(apexRoot)) siteRoot = apexRoot;
+  }
   if (
     hostHeader &&
     hostHeader !== '127.0.0.1' &&
@@ -431,6 +441,13 @@ function serveWebsite(req, res, siteRoot) {
     return;
   }
 
+  // WordPress uploads PHP execution shield
+  if (/\/wp-content\/uploads\/.*\.php$/i.test(parsedUrl.pathname)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('403 Forbidden: PHP execution in wp-content/uploads is blocked by FerrousX WAF');
+    return;
+  }
+
   if (!fs.existsSync(filePath)) {
     const phpFallback = path.join(siteRoot, 'index.php');
     if (fs.existsSync(phpFallback)) {
@@ -445,6 +462,11 @@ function serveWebsite(req, res, siteRoot) {
   try {
     const stat = fs.statSync(filePath);
     if (stat.isDirectory()) {
+      if (!parsedUrl.pathname.endsWith('/')) {
+        res.writeHead(301, { Location: `${parsedUrl.pathname}/${parsedUrl.search}` });
+        res.end();
+        return;
+      }
       const idxPhp = path.join(filePath, 'index.php');
       filePath = fs.existsSync(idxPhp) ? idxPhp : path.join(filePath, 'index.html');
     }

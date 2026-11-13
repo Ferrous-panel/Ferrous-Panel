@@ -2533,56 +2533,207 @@ actix-web = "4.9"
   app.get("/api/oneclick/templates", (_req, res) => {
     res.json(oneClickTemplates);
   });
-  app.post("/api/oneclick/deploy", (req, res) => {
+  app.post("/api/oneclick/deploy", async (req, res) => {
     const { templateId, domain, createDb, webServerEngine } = req.body;
     const tpl = oneClickTemplates.find((t) => t.id === templateId) || oneClickTemplates[0];
     const selectedWebServer = webServerEngine === "Nginx 1.26" ? "Nginx 1.26" : "FerrousX (Rust Web Server)";
-    const cleanDomain = String(domain || "app.ferroushub.vn").toLowerCase().trim();
+    const cleanDomain = String(domain || "app.ferroushub.vn")
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9.-]/g, "");
     const cleanName = cleanDomain.replace(/[^a-z0-9-]/g, "-");
     const appId = `svc-${Date.now()}`;
     const siteRoot = `/www/wwwroot/${cleanDomain}`;
+    const isWordPress = tpl.id.includes("wordpress") || tpl.name.toLowerCase().includes("wordpress");
+    const isLaravel = tpl.id.includes("laravel") || tpl.name.toLowerCase().includes("laravel");
     const port = tpl.defaultPort + Math.floor(Math.random() * 10);
+    const provisionLogs = [];
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+
+    const execShellAsync = (cmd, timeoutMs = 45e3) =>
+      new Promise((resolve) => {
+        child_process.exec(cmd, { timeout: timeoutMs }, (err, stdout, stderr) => {
+          resolve({
+            ok: !err,
+            stdout: String(stdout || "").trim(),
+            stderr: String(stderr || (err ? err.message : "")).trim()
+          });
+        });
+      });
+
+    // 1. Provision real webroot directory on VPS
+    try {
+      fs2.mkdirSync(siteRoot, { recursive: true });
+      fs2.mkdirSync("/www/wwwlogs", { recursive: true });
+      provisionLogs.push(`${nowIso()} INFO  fs: Created site root ${siteRoot}`);
+    } catch (err) {
+      provisionLogs.push(`${nowIso()} WARN  fs: Could not create ${siteRoot}: ${err.message}`);
+    }
+
+    // 2. Provision real SQL database & user
     let dbCreatedName = null;
+    let dbCreatedUser = null;
+    let dbCreatedPass = `Wp#${crypto.randomBytes(6).toString("hex")}!26`;
     if (createDb && tpl.requiresDb !== "None") {
-      dbCreatedName = `${cleanDomain.split(".")[0]}_${tpl.id.split("-")[1]}_db`.replace(
-        /[^a-z0-9_]/g,
-        "_"
-      );
+      const prefix = cleanDomain.split(".")[0].replace(/[^a-z0-9]/g, "_").slice(0, 12) || "site";
+      const suffix = tpl.id.split("-")[1]?.replace(/[^a-z0-9]/g, "_").slice(0, 8) || "app";
+      dbCreatedName = `${prefix}_${suffix}_db`.replace(/[^a-z0-9_]/g, "_");
+      dbCreatedUser = `${prefix}_${suffix}_u`.slice(0, 28);
+      const isPg = tpl.requiresDb.includes("PostgreSQL");
+
+      if (!isPg && fs2.existsSync("/www")) {
+        const sqlScript = [
+          `CREATE DATABASE IF NOT EXISTS \`${dbCreatedName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+          `CREATE USER IF NOT EXISTS '${dbCreatedUser}'@'localhost' IDENTIFIED BY '${dbCreatedPass}';`,
+          `CREATE USER IF NOT EXISTS '${dbCreatedUser}'@'127.0.0.1' IDENTIFIED BY '${dbCreatedPass}';`,
+          `GRANT ALL PRIVILEGES ON \`${dbCreatedName}\`.* TO '${dbCreatedUser}'@'localhost';`,
+          `GRANT ALL PRIVILEGES ON \`${dbCreatedName}\`.* TO '${dbCreatedUser}'@'127.0.0.1';`,
+          `FLUSH PRIVILEGES;`
+        ].join(" ");
+        const rootPass = panelAdminState?.mysqlRootPassword || "";
+        let dbRes = await execShellAsync(`mysql -e "${sqlScript}" 2>/dev/null`);
+        if (!dbRes.ok && rootPass) {
+          dbRes = await execShellAsync(`MYSQL_PWD='${rootPass.replace(/'/g, "'\\''")}' mysql -u root -e "${sqlScript}" 2>/dev/null`);
+        }
+        provisionLogs.push(
+          dbRes.ok
+            ? `${nowIso()} INFO  mariadb: Provisioned database '${dbCreatedName}' & user '${dbCreatedUser}'`
+            : `${nowIso()} WARN  mariadb: Skipped/Fallback DB provisioning (${dbRes.stderr || "mysql unavailable"})`
+        );
+      } else if (isPg && fs2.existsSync("/www")) {
+        const pgRes = await execShellAsync(
+          `su - postgres -c "psql -c \\"CREATE USER ${dbCreatedUser} WITH PASSWORD '${dbCreatedPass}';\\" && psql -c \\"CREATE DATABASE ${dbCreatedName} OWNER ${dbCreatedUser};\\"" 2>/dev/null`
+        );
+        provisionLogs.push(
+          pgRes.ok
+            ? `${nowIso()} INFO  postgres: Provisioned database '${dbCreatedName}'`
+            : `${nowIso()} WARN  postgres: Skipped/Fallback DB provisioning`
+        );
+      }
+
       sqlDatabases.unshift({
         id: `db-${Date.now()}`,
         name: dbCreatedName,
         engine: tpl.requiresDb,
         host: "127.0.0.1",
-        port: tpl.requiresDb.includes("PostgreSQL") ? 5432 : 3306,
-        username: `${dbCreatedName}_user`,
-        collation: tpl.requiresDb.includes("PostgreSQL") ? "en_US.UTF-8" : "utf8mb4_unicode_ci",
+        port: isPg ? 5432 : 3306,
+        username: dbCreatedUser,
+        password: dbCreatedPass,
+        collation: isPg ? "en_US.UTF-8" : "utf8mb4_unicode_ci",
         linkedAppId: appId,
         linkedAppName: cleanDomain,
-        sizeMb: 16.5,
-        activeConnections: 3,
+        sizeMb: 1.2,
+        activeConnections: 1,
         maxConnections: 100,
         status: "online",
         createdAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
-        tables: [
-          {
-            tableName: "users",
-            rowCount: 1,
-            sizeKb: 48,
-            columns: [
-              { name: "id", dataType: "UUID", nullable: false, isPrimaryKey: true },
-              { name: "email", dataType: "VARCHAR(180)", nullable: false }
-            ],
-            rows: [
+        tables: isWordPress
+          ? [
               {
-                id: "019310f4-0001-7000-8000-000000000001",
-                email: `admin@${cleanDomain}`
+                tableName: "wp_options",
+                rowCount: 0,
+                sizeKb: 16,
+                columns: [
+                  { name: "option_id", dataType: "BIGINT UNSIGNED", nullable: false, isPrimaryKey: true },
+                  { name: "option_name", dataType: "VARCHAR(191)", nullable: false }
+                ],
+                rows: []
               }
             ]
-          }
-        ]
+          : []
       });
     }
-    const preset = tpl.framework === "PHP 8.3-FPM" ? tpl.id.includes("wordpress") ? "wordpress" : "laravel" : tpl.framework === "Next.js 15 (React SSR)" ? "nextjs_proxy" : tpl.framework === "Nuxt 3 (Vue 3 SSR)" ? "nuxt_nitro" : tpl.framework === "SvelteKit 2 (Svelte 5)" ? "sveltekit_node" : tpl.framework === "Astro 5 (Hybrid / Static)" ? "astro_hybrid" : tpl.framework === "Vite + React 19 / Vue 3 SPA" ? "spa_history" : "rust_proxy";
+
+    // 3. Real WordPress Core Download, Extraction & wp-config.php Generation
+    let wpConfigContent = "";
+    if (isWordPress && fs2.existsSync(siteRoot)) {
+      const wpCheckPath = path2.join(siteRoot, "wp-login.php");
+      if (!fs2.existsSync(wpCheckPath)) {
+        const dlCmd = [
+          `if command -v wp >/dev/null 2>&1; then wp core download --path="${siteRoot}" --allow-root --force;`,
+          `else`,
+          `  if [ ! -s /tmp/ferrous-wp-latest.tar.gz ]; then`,
+          `    curl -fsSL --connect-timeout 10 --max-time 60 https://wordpress.org/latest.tar.gz -o /tmp/ferrous-wp-latest.tar.gz || curl -fsSL --connect-timeout 10 --max-time 60 https://vi.wordpress.org/latest-vi.tar.gz -o /tmp/ferrous-wp-latest.tar.gz;`,
+          `  fi;`,
+          `  tar -xzf /tmp/ferrous-wp-latest.tar.gz --strip-components=1 -C "${siteRoot}";`,
+          `fi`
+        ].join(" ");
+        const wpDl = await execShellAsync(dlCmd, 9e4);
+        provisionLogs.push(
+          wpDl.ok
+            ? `${nowIso()} INFO  wordpress: Downloaded & extracted WordPress core into ${siteRoot}`
+            : `${nowIso()} ERROR wordpress: Download failed (${wpDl.stderr})`
+        );
+      } else {
+        provisionLogs.push(`${nowIso()} INFO  wordpress: Existing WordPress core found in ${siteRoot}`);
+      }
+
+      const genSalt = () => crypto.randomBytes(48).toString("base64").replace(/['"\\]/g, "x");
+      wpConfigContent = `<?php
+/**
+ * Auto-generated by FerrousPanel 1-Click WordPress Installer
+ * Domain: ${cleanDomain}
+ */
+define( 'DB_NAME', '${dbCreatedName || "wordpress"}' );
+define( 'DB_USER', '${dbCreatedUser || "root"}' );
+define( 'DB_PASSWORD', '${dbCreatedPass}' );
+define( 'DB_HOST', '127.0.0.1' );
+define( 'DB_CHARSET', 'utf8mb4' );
+define( 'DB_COLLATE', '' );
+
+define( 'AUTH_KEY',         '${genSalt()}' );
+define( 'SECURE_AUTH_KEY',  '${genSalt()}' );
+define( 'LOGGED_IN_KEY',    '${genSalt()}' );
+define( 'NONCE_KEY',        '${genSalt()}' );
+define( 'AUTH_SALT',        '${genSalt()}' );
+define( 'SECURE_AUTH_SALT', '${genSalt()}' );
+define( 'LOGGED_IN_SALT',   '${genSalt()}' );
+define( 'NONCE_SALT',       '${genSalt()}' );
+
+$table_prefix = 'wp_';
+define( 'WP_DEBUG', false );
+define( 'FS_METHOD', 'direct' );
+
+// Support HTTPS behind FerrousX / Cloudflare Reverse Proxy
+if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false ) {
+    $_SERVER['HTTPS'] = 'on';
+}
+
+if ( ! defined( 'ABSPATH' ) ) {
+    define( 'ABSPATH', __DIR__ . '/' );
+}
+require_once ABSPATH . 'wp-settings.php';
+`;
+      try {
+        fs2.writeFileSync(path2.join(siteRoot, "wp-config.php"), wpConfigContent, { mode: 0o640 });
+        await execShellAsync(`chown -R www-data:www-data "${siteRoot}" && find "${siteRoot}" -type d -exec chmod 755 {} + && find "${siteRoot}" -type f -exec chmod 644 {} + && chmod 640 "${siteRoot}/wp-config.php"`);
+        provisionLogs.push(`${nowIso()} INFO  wordpress: Generated wp-config.php linked to DB '${dbCreatedName || "wordpress"}' & fixed www-data permissions`);
+      } catch (err) {
+        provisionLogs.push(`${nowIso()} WARN  wordpress: Could not write wp-config.php: ${err.message}`);
+      }
+    } else if (fs2.existsSync(siteRoot)) {
+      // Write starter index for non-WP templates if directory is empty
+      try {
+        if (tpl.framework === "PHP 8.3-FPM" && isLaravel) {
+          const pubDir = path2.join(siteRoot, "public");
+          fs2.mkdirSync(pubDir, { recursive: true });
+          if (!fs2.existsSync(path2.join(pubDir, "index.php"))) {
+            fs2.writeFileSync(
+              path2.join(pubDir, "index.php"),
+              `<?php\necho "<h1>${cleanDomain} — Ready (PHP " . PHP_VERSION . " + FerrousX)</h1>";\n`
+            );
+          }
+        } else if (!fs2.existsSync(path2.join(siteRoot, "index.html")) && !fs2.existsSync(path2.join(siteRoot, "index.php"))) {
+          fs2.writeFileSync(
+            path2.join(siteRoot, "index.html"),
+            `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${cleanDomain}</title></head><body style="font-family:sans-serif;padding:40px"><h1>${cleanDomain}</h1><p>Provisioned via FerrousPanel 1-Click (${tpl.name}).</p></body></html>`
+          );
+        }
+        await execShellAsync(`chown -R www-data:www-data "${siteRoot}"`);
+      } catch {}
+    }
+
+    const preset = tpl.framework === "PHP 8.3-FPM" ? (isWordPress ? "wordpress" : "laravel") : tpl.framework === "Next.js 15 (React SSR)" ? "nextjs_proxy" : tpl.framework === "Nuxt 3 (Vue 3 SSR)" ? "nuxt_nitro" : tpl.framework === "SvelteKit 2 (Svelte 5)" ? "sveltekit_node" : tpl.framework === "Astro 5 (Hybrid / Static)" ? "astro_hybrid" : tpl.framework === "Vite + React 19 / Vue 3 SPA" ? "spa_history" : "rust_proxy";
     const newSite = {
       id: appId,
       name: cleanName,
@@ -2593,7 +2744,7 @@ actix-web = "4.9"
       aliases: [`www.${cleanDomain}`],
       internalPort: port,
       workingDir: siteRoot,
-      runSubDir: tpl.framework === "PHP 8.3-FPM" ? "/public" : "/",
+      runSubDir: isLaravel ? "/public" : "/",
       execCommand: tpl.execCommandTemplate.replace(/\$DOMAIN/g, cleanDomain),
       workers: 4,
       memoryLimitMb: 512,
@@ -2604,36 +2755,66 @@ actix-web = "4.9"
       sslEnabled: true,
       sslIssuer: "Let's Encrypt R11",
       sslExpiryDays: 90,
-      forceHttps: true,
+      forceHttps: false,
       http3Quic: true,
       websocketEnabled: true,
       rateLimitRps: 120,
       requestsPerSec: 45,
       p99LatencyMs: tpl.framework.includes("Rust") ? 1.4 : 4.2,
       uptimeSeconds: 5,
-      diskUsedMb: 85,
+      diskUsedMb: isWordPress ? 64 : 24,
       diskQuotaMb: 5120,
-      trafficMonthGb: 0.4,
+      trafficMonthGb: 0.1,
       linkedDbName: dbCreatedName,
       ftpUsername: `ftp_${cleanDomain.split(".")[0]}`,
-      backupCount: 1,
+      backupCount: 0,
       gitRepoUrl: tpl.gitRepoUrl || `https://github.com/Ferrous-panel/FerrousX.git`,
       gitBranch: "main",
       buildScript: tpl.buildCommand,
       lastDeployCommit: `1-Click Template (${tpl.name})`,
-      lastDeployTime: "V\u1EEBa xong",
+      lastDeployTime: "Vừa xong",
       urlRewritePreset: preset,
       urlRewriteRules: REWRITE_TEMPLATES[preset],
       envVars: [
         { key: "PORT", value: String(port) },
-        { key: "DATABASE_NAME", value: dbCreatedName || "none" }
+        { key: "DB_HOST", value: "127.0.0.1" },
+        { key: "DB_DATABASE", value: dbCreatedName || "none" },
+        ...dbCreatedName ? [
+          { key: "DB_USERNAME", value: dbCreatedUser || "root" },
+          { key: "DB_PASSWORD", value: dbCreatedPass }
+        ] : []
       ],
       logs: [
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  1-click-installer: Cloned template ${tpl.name} into ${siteRoot}`,
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  1-click-installer: Executed [${tpl.buildCommand}] -> exit code 0`,
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  nginx: Reverse proxy https://${cleanDomain} -> 127.0.0.1:${port} is live!`
+        ...provisionLogs,
+        `${nowIso()} INFO  webserver (${selectedWebServer}): Active vhost for https://${cleanDomain} -> ${siteRoot}`
       ]
     };
+
+    // 4. Sync VHost files & reload FerrousX / Nginx + PHP-FPM
+    syncArchitectureForApp(newSite);
+    if (selectedWebServer === "FerrousX (Rust Web Server)") {
+      await execShellAsync("ferrousx-ctl reload 2>/dev/null || systemctl kill -s HUP ferrousx.service 2>/dev/null || true");
+    } else {
+      await execShellAsync("nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true");
+    }
+    await execShellAsync("systemctl reload php8.3-fpm 2>/dev/null || true");
+
+    if (wpConfigContent) {
+      webFiles.push({
+        id: `f-${Date.now()}-wp`,
+        appId,
+        name: "wp-config.php",
+        path: "/wp-config.php",
+        parentDir: "/",
+        type: "file",
+        sizeBytes: Buffer.byteLength(wpConfigContent, "utf8"),
+        permissions: "0640",
+        symbolicPerms: "-rw-r-----",
+        owner: "www-data:www-data",
+        modifiedAt: "Vừa xong",
+        content: wpConfigContent
+      });
+    }
     webFiles.push({
       id: `f-${Date.now()}-tpl`,
       appId,
@@ -2645,12 +2826,13 @@ actix-web = "4.9"
       permissions: "0644",
       symbolicPerms: "-rw-r--r--",
       owner: "www-data:www-data",
-      modifiedAt: "V\u1EEBa xong",
+      modifiedAt: "Vừa xong",
       content: `# ${cleanDomain}
 Deployed via FerrousPanel 1-Click Installer
 Template: ${tpl.name}
 Web Root: ${siteRoot}
 Database: ${dbCreatedName || "None"}
+DB User: ${dbCreatedUser || "None"}
 `
     });
     managedApps.unshift(newSite);
