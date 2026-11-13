@@ -135,33 +135,49 @@ export const DeployModal: React.FC<DeployModalProps> = ({
     } else if (nextFw === 'NestJS 10 (TypeScript API)') {
       setRunSubDir('/dist');
       setExecCommand(`/usr/bin/node /www/wwwroot/${clean}/dist/main.js`);
+    } else if (nextFw === 'Bun / ElysiaJS (TypeScript)') {
+      setRunSubDir('/');
+      setExecCommand(`/usr/local/bin/bun run /www/wwwroot/${clean}/src/index.ts`);
+    } else if (nextFw === 'Deno 2 (TypeScript / Fresh)') {
+      setRunSubDir('/');
+      setExecCommand(`/usr/local/bin/deno run --allow-net --allow-env --allow-read /www/wwwroot/${clean}/main.ts`);
     } else if (nextFw === 'Vite + React 19 / Vue 3 SPA' || nextFw === 'Static HTML / SPA') {
       setRunSubDir('/dist');
       setCreateDatabase(false);
-      setExecCommand('nginx static try_files /index.html');
-    } else if (nextFw === 'PHP 8.3-FPM') {
+      setExecCommand('ferrousx static try_files /index.html');
+    } else if (nextFw === 'PHP 8.3-FPM' || nextFw === 'PHP / Symfony 7') {
       setRunSubDir('/public');
       setDbEngine('MariaDB 11.4');
       setExecCommand('php-fpm8.3 (unix:/run/php/php8.3-fpm.sock + libferrous_bridge.so)');
     } else if (nextFw === 'Python / FastAPI') {
       setRunSubDir('/');
       setExecCommand(
-        `/www/wwwroot/${clean}/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker main:app`
+        `/www/wwwroot/${clean}/.venv/bin/uvicorn main:app --host 127.0.0.1 --port ${internalPort}`
       );
-    } else if (nextFw === 'Go / Fiber') {
+    } else if (nextFw === 'Python / Django 5') {
       setRunSubDir('/');
-      setExecCommand(`/www/wwwroot/${clean}/bin/${prefix}_go_cgo`);
+      setExecCommand(
+        `/www/wwwroot/${clean}/.venv/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${internalPort}`
+      );
+    } else if (nextFw === 'Python / Flask 3') {
+      setRunSubDir('/');
+      setExecCommand(
+        `/www/wwwroot/${clean}/.venv/bin/gunicorn app:app --bind 127.0.0.1:${internalPort}`
+      );
+    } else if (nextFw === 'Go / Fiber' || nextFw === 'Go / Gin') {
+      setRunSubDir('/');
+      setExecCommand(`/www/wwwroot/${clean}/bin/${prefix}_go_server`);
     } else if (nextFw === 'Java 21 / Spring Boot 3') {
       setRunSubDir('/target');
       setExecCommand(
-        `/usr/bin/java -XX:+UseZGC -Djava.library.path=/opt/Ferrous-panel/lib -jar /www/wwwroot/${clean}/target/${prefix}.jar`
+        `/usr/bin/java -XX:+UseZGC -jar /www/wwwroot/${clean}/target/${prefix}.jar --server.port=${internalPort}`
       );
     } else if (nextFw === 'C# / .NET 8 ASP.NET Core') {
       setRunSubDir('/publish');
-      setExecCommand(`/usr/bin/dotnet /www/wwwroot/${clean}/publish/${prefix}.dll`);
+      setExecCommand(`/usr/bin/dotnet /www/wwwroot/${clean}/publish/${prefix}.dll --urls http://127.0.0.1:${internalPort}`);
     } else if (nextFw === 'Ruby 3.3 / Rails & Elixir') {
       setRunSubDir('/public');
-      setExecCommand(`/usr/local/bin/bundle exec puma -C /www/wwwroot/${clean}/config/puma.rb`);
+      setExecCommand(`/usr/local/bin/bundle exec puma -b tcp://127.0.0.1:${internalPort}`);
     } else if (nextFw === 'C++20 / Zig Native Daemon') {
       setRunSubDir('/');
       setExecCommand(`/www/wwwroot/${clean}/build/${prefix}_native`);
@@ -366,31 +382,49 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                   <option value="NestJS 10 (TypeScript API)">
                     NestJS 10 (Enterprise TypeScript API + Rust Addon)
                   </option>
+                  <option value="Bun / ElysiaJS (TypeScript)">
+                    Bun 1.1 + ElysiaJS / Hono High-Speed API
+                  </option>
+                  <option value="Deno 2 (TypeScript / Fresh)">
+                    Deno 2.x (TypeScript / Fresh / Oak Edge Runtime)
+                  </option>
                   <option value="Vite + React 19 / Vue 3 SPA">
                     Vite 6 + React 19 / Vue 3 SPA
                   </option>
                 </optgroup>
-                <optgroup label="3. Polyglot Server Languages (PyO3 / Zend FFI / CGO / JNI / P/Invoke)">
+                <optgroup label="3. Polyglot Server Languages (PHP / Python / Go / Java / .NET / Ruby)">
                   <option value="PHP 8.3-FPM">
-                    PHP 8.4 / 8.3 / 7.4-FPM (Laravel / WordPress + Zend Rust FFI)
+                    PHP 8.4 / 8.3 / 7.4-FPM (Laravel 11 / WordPress 6.7)
+                  </option>
+                  <option value="PHP / Symfony 7">
+                    PHP 8.3-FPM — Symfony 7 / Slim Enterprise API
                   </option>
                   <option value="Python / FastAPI">
-                    Python 3.12 / FastAPI / Django (PyO3 Rust C-Extension)
+                    Python 3.12 + FastAPI + Uvicorn (Async ASGI)
+                  </option>
+                  <option value="Python / Django 5">
+                    Python 3.12 + Django 5.1 + Gunicorn
+                  </option>
+                  <option value="Python / Flask 3">
+                    Python 3.12 + Flask 3 + Gunicorn
                   </option>
                   <option value="Go / Fiber">
-                    Go 1.23 / Fiber / Gin (CGO Static Link libferrous_bridge.a)
+                    Go 1.23 + Fiber v2 High-Throughput API
+                  </option>
+                  <option value="Go / Gin">
+                    Go 1.23 + Gin Gonic REST Microservice
                   </option>
                   <option value="Java 21 / Spring Boot 3">
-                    Java 21 / Kotlin Spring Boot 3 (Rust JNI &amp; Panama FFM)
+                    Java 21 LTS / Kotlin Spring Boot 3 (ZGC)
                   </option>
                   <option value="C# / .NET 8 ASP.NET Core">
-                    C# / .NET 8.0 ASP.NET Core Kestrel (Rust P/Invoke csbindgen)
+                    C# / .NET 8.0 ASP.NET Core Kestrel
                   </option>
                   <option value="Ruby 3.3 / Rails & Elixir">
-                    Ruby 3.3 Rails / Elixir Phoenix (Magnus &amp; Rustler NIF)
+                    Ruby 3.3 Rails / Sinatra + Puma
                   </option>
                   <option value="C++20 / Zig Native Daemon">
-                    C / C++20 / Zig Daemon (cbindgen Zero-Overhead C-ABI)
+                    C / C++20 / Zig Daemon (Native C-ABI)
                   </option>
                   <option value="WebAssembly (WASI Wasmtime)">
                     WebAssembly WASI Preview 2 (Rust Wasmtime Sandbox)

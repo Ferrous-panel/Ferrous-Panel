@@ -13,11 +13,17 @@ export type WebsiteRuntimeType =
   | 'Astro 5 (Hybrid / Static)'
   | 'Remix / React Router v7'
   | 'NestJS 10 (TypeScript API)'
+  | 'Bun / ElysiaJS (TypeScript)'
+  | 'Deno 2 (TypeScript / Fresh)'
   | 'Vite + React 19 / Vue 3 SPA'
   | 'Node.js / Next.js'
   | 'PHP 8.3-FPM'
+  | 'PHP / Symfony 7'
   | 'Python / FastAPI'
+  | 'Python / Django 5'
+  | 'Python / Flask 3'
   | 'Go / Fiber'
+  | 'Go / Gin'
   | 'Java 21 / Spring Boot 3'
   | 'C# / .NET 8 ASP.NET Core'
   | 'Ruby 3.3 / Rails & Elixir'
@@ -31,6 +37,7 @@ export type WebServerEngineType =
 
 export type RewritePresetType =
   | 'rust_proxy'
+  | 'api_proxy'
   | 'nextjs_proxy'
   | 'nuxt_nitro'
   | 'sveltekit_node'
@@ -153,7 +160,8 @@ export interface OneClickTemplate {
     | 'Rust Backend'
     | 'Modern JS Frameworks'
     | 'PHP CMS / Framework'
-    | 'Python / Go';
+    | 'Python / Go'
+    | 'Enterprise & Systems';
   framework: WebsiteRuntimeType;
   version: string;
   description: string;

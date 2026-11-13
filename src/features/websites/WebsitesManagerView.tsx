@@ -70,6 +70,10 @@ interface WebsitesManagerViewProps {
 const REWRITE_PRESET_LABELS: { id: RewritePresetType; label: string }[] = [
   { id: 'rust_proxy', label: 'Actix-Web / Axum / Rocket Upstream Proxy' },
   {
+    id: 'api_proxy',
+    label: 'Polyglot Backend Reverse Proxy (Python / Go / Java / .NET / Bun / Deno / Ruby)'
+  },
+  {
     id: 'nextjs_proxy',
     label: 'Next.js 15 App Router SSR + _next/static Cache'
   },
@@ -82,7 +86,7 @@ const REWRITE_PRESET_LABELS: { id: RewritePresetType; label: string }[] = [
     id: 'astro_hybrid',
     label: 'Astro 5 (Hybrid SSR + Static _astro Assets)'
   },
-  { id: 'laravel', label: 'Laravel 11 (try_files -> /index.php?$query_string)' },
+  { id: 'laravel', label: 'Laravel 11 / Symfony 7 (try_files -> /index.php?$query_string)' },
   { id: 'wordpress', label: 'WordPress 6.7 Permalinks Rewrite' },
   { id: 'spa_history', label: 'React / Vue / Vite SPA HTML5 History Fallback' }
 ];
@@ -98,6 +102,17 @@ const CLIENT_REWRITE_SNIPPETS: Record<RewritePresetType, string> = {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+}`,
+  api_proxy: `location / {
+    proxy_pass http://127.0.0.1:$INTERNAL_PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 120s;
 }`,
   nextjs_proxy: `location /_next/static/ {
     alias $WORKING_DIR/.next/static/;

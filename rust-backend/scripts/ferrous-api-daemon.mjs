@@ -660,25 +660,39 @@ ReadWritePaths=${spec.workingDir} /www/wwwlogs`;
       let langRuntimeEnvs = `Environment="ACTIX_WORKERS=${spec.workers}"
 Environment="RUST_BACKTRACE=1"
 Environment="LD_LIBRARY_PATH=${spec.workingDir}/lib:/opt/Ferrous-panel/lib:/usr/local/lib"`;
-      if (fwLower.includes("node") || fwLower.includes("next") || fwLower.includes("nuxt") || fwLower.includes("svelte") || fwLower.includes("astro") || fwLower.includes("remix") || fwLower.includes("nest")) {
+      if (fwLower.includes("bun")) {
         langRuntimeEnvs = `Environment="NODE_ENV=production"
-Environment="UV_THREADPOOL_SIZE=${Math.max(4, spec.workers)}"
-Environment="FERROUS_NAPI_BRIDGE=/opt/Ferrous-panel/lib/ferrous_bridge.node"`;
-      } else if (fwLower.includes("python") || fwLower.includes("fastapi")) {
+Environment="BUN_INSTALL=/usr/local"`;
+      } else if (fwLower.includes("deno")) {
+        langRuntimeEnvs = `Environment="DENO_DIR=/var/cache/deno"
+Environment="DENO_NO_UPDATE_CHECK=1"`;
+      } else if (fwLower.includes("node") || fwLower.includes("next") || fwLower.includes("nuxt") || fwLower.includes("svelte") || fwLower.includes("astro") || fwLower.includes("remix") || fwLower.includes("nest")) {
+        langRuntimeEnvs = `Environment="NODE_ENV=production"
+Environment="HOSTNAME=127.0.0.1"
+Environment="UV_THREADPOOL_SIZE=${Math.max(4, spec.workers)}"`;
+      } else if (fwLower.includes("python") || fwLower.includes("fastapi") || fwLower.includes("django") || fwLower.includes("flask")) {
         langRuntimeEnvs = `Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONDONTWRITEBYTECODE=1"
 Environment="VIRTUAL_ENV=${spec.workingDir}/.venv"
 Environment="WEB_CONCURRENCY=${spec.workers}"`;
-      } else if (fwLower.includes("go") || fwLower.includes("fiber")) {
+      } else if (fwLower.includes("go") || fwLower.includes("fiber") || fwLower.includes("gin")) {
         langRuntimeEnvs = `Environment="GOMAXPROCS=${spec.workers}"
 Environment="GOGC=100"
-Environment="CGO_ENABLED=1"
-Environment="LD_LIBRARY_PATH=/opt/Ferrous-panel/lib"`;
+Environment="CGO_ENABLED=1"`;
+      } else if (fwLower.includes("java") || fwLower.includes("spring")) {
+        langRuntimeEnvs = `Environment="JAVA_TOOL_OPTIONS=-XX:+UseZGC -Xmx${Math.max(256, Math.floor(spec.memoryLimitMb * 0.75))}m"`;
+      } else if (fwLower.includes(".net") || fwLower.includes("c#")) {
+        langRuntimeEnvs = `Environment="ASPNETCORE_ENVIRONMENT=Production"
+Environment="ASPNETCORE_URLS=http://127.0.0.1:${spec.internalPort}"
+Environment="DOTNET_CLI_TELEMETRY_OPTOUT=1"`;
+      } else if (fwLower.includes("ruby") || fwLower.includes("rails")) {
+        langRuntimeEnvs = `Environment="RACK_ENV=production"
+Environment="RAILS_ENV=production"`;
       }
-      const envBlock = spec.envVars.map((e) => `Environment="${e.key}=${e.value}"`).join("\n");
+      const envBlock = (spec.envVars || []).map((e) => `Environment="${e.key}=${e.value}"`).join("\n");
       unitContent = `[Unit]
 Description=Ferrous-panel Managed Polyglot Service: ${spec.name} (${spec.framework})
-After=network-online.target nginx.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -700,16 +714,16 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=${spec.workingDir} /www/wwwlogs /run/ferrous-polyglot.sock
+ReadWritePaths=${spec.workingDir} /www/wwwlogs /tmp
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
 
-# Polyglot Runtime Environment & Rust FFI Bridge Socket
+# Polyglot Runtime Environment
 Environment="PORT=${spec.internalPort}"
-Environment="FERROUS_POLYGLOT_IPC=/run/ferrous-polyglot.sock"
+Environment="HOST=127.0.0.1"
 ${langRuntimeEnvs}
 ${envBlock}
 
@@ -1394,7 +1408,7 @@ function mountFerrousRustCoreBackend(app) {
     );
   });
   const REWRITE_TEMPLATES = {
-    rust_proxy: `# Reverse Proxy t\u1EDBi ti\u1EBFn tr\xECnh Rust (Actix-Web / Axum) qua Loopback
+    rust_proxy: `# Reverse Proxy tới tiến trình Rust (Actix-Web / Axum / Rocket) qua Loopback
 location / {
     proxy_pass http://127.0.0.1:$INTERNAL_PORT;
     proxy_http_version 1.1;
@@ -1404,6 +1418,18 @@ location / {
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
+}`,
+    api_proxy: `# Polyglot Backend Reverse Proxy (Python / Go / Java / .NET / Bun / Deno / Ruby)
+location / {
+    proxy_pass http://127.0.0.1:$INTERNAL_PORT;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_read_timeout 120s;
 }`,
     nextjs_proxy: `# Next.js 15 App Router Standalone Proxy + Immutable Asset Cache
 location /_next/static {
@@ -2303,7 +2329,298 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     });
     res.json(enriched);
   });
-  app.post("/api/apps", (req, res) => {
+  const execShellAsync = (cmd, timeoutMs = 12e4) =>
+    new Promise((resolve) => {
+      child_process.exec(
+        cmd,
+        {
+          timeout: timeoutMs,
+          maxBuffer: 10 * 1024 * 1024,
+          env: {
+            ...process.env,
+            PATH: `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/root/.cargo/bin:/usr/local/go/bin:/root/.bun/bin:/root/.deno/bin:${process.env.PATH || ""}`
+          }
+        },
+        (err, stdout, stderr) => {
+          resolve({
+            ok: !err,
+            stdout: String(stdout || "").trim(),
+            stderr: String(stderr || (err ? err.message : "")).trim()
+          });
+        }
+      );
+    });
+
+  const isVpsHost = () => fs2.existsSync("/www");
+
+  function pickAvailablePort(preferredPort) {
+    let port = Number(preferredPort) || 8080;
+    if (port === 80 || port === 443 || port === 9000) return port;
+    const used = new Set([3000, 888, 3306, 5432, 6379, ...managedApps.map((a) => Number(a.internalPort))]);
+    while (used.has(port) && port < 65000) {
+      port += 1;
+    }
+    return port;
+  }
+
+  function getPresetForFw(fw, tplId = "") {
+    const lowId = String(tplId || "").toLowerCase();
+    const lowFw = String(fw || "").toLowerCase();
+    if (lowId.includes("wordpress")) return "wordpress";
+    if (lowFw.includes("php")) return "laravel";
+    if (lowFw.includes("next.js") || lowFw === "node.js / next.js") return "nextjs_proxy";
+    if (lowFw.includes("nuxt")) return "nuxt_nitro";
+    if (lowFw.includes("sveltekit")) return "sveltekit_node";
+    if (lowFw.includes("astro")) return "astro_hybrid";
+    if (lowFw.includes("vite") || lowFw.includes("static")) return "spa_history";
+    if (lowFw.includes("rust") || lowFw.includes("actix") || lowFw.includes("axum") || lowFw.includes("rocket")) return "rust_proxy";
+    return "api_proxy";
+  }
+
+  const runtimeLabelMap = {
+    "Actix-Web (Rust)": "rustc 1.83+ · actix-web 4.9 (Release LTO)",
+    "Axum (Rust)": "rustc 1.83+ · axum 0.8 (Tokio Epoll)",
+    "Rocket (Rust)": "rustc 1.83+ · rocket 0.5 (Async Rust)",
+    "Next.js 15 (React SSR)": "Node v22 LTS · Next.js 15 SSR",
+    "Nuxt 3 (Vue 3 SSR)": "Node v22 LTS · Nuxt 3.14 Nitro",
+    "SvelteKit 2 (Svelte 5)": "Node v22 LTS · SvelteKit 2 Adapter-Node",
+    "Astro 5 (Hybrid / Static)": "Node v22 LTS · Astro 5.0 Hybrid",
+    "Remix / React Router v7": "Node v22 LTS · React Router v7 SSR",
+    "NestJS 10 (TypeScript API)": "Node v22 LTS · NestJS 10 TypeScript",
+    "Bun / ElysiaJS (TypeScript)": "Bun 1.1+ · Elysia / Native TS",
+    "Deno 2 (TypeScript / Fresh)": "Deno 2.1 LTS · TypeScript Runtime",
+    "Vite + React 19 / Vue 3 SPA": "FerrousX Static · Vite 6 SPA",
+    "Node.js / Next.js": "Node v22 LTS · Next.js 15",
+    "PHP 8.3-FPM": "PHP 8.3-FPM · OPcache JIT",
+    "PHP / Symfony 7": "PHP 8.3-FPM · Symfony 7 / Composer 2",
+    "Python / FastAPI": "Python 3.12 · FastAPI + Uvicorn ASGI",
+    "Python / Django 5": "Python 3.12 · Django 5.1 + Gunicorn",
+    "Python / Flask 3": "Python 3.12 · Flask 3 + Gunicorn",
+    "Go / Fiber": "Go 1.23 · Fiber v2 Binary",
+    "Go / Gin": "Go 1.23 · Gin Gonic Binary",
+    "Java 21 / Spring Boot 3": "OpenJDK 21 LTS · ZGC JVM",
+    "C# / .NET 8 ASP.NET Core": ".NET 8.0 LTS Kestrel",
+    "Ruby 3.3 / Rails & Elixir": "Ruby 3.3 YJIT + Bundler",
+    "C++20 / Zig Native Daemon": "GCC 13 / Zig Native C-ABI",
+    "WebAssembly (WASI Wasmtime)": "Wasmtime WASI Preview 2",
+    "Static HTML / SPA": "FerrousX Static"
+  };
+
+  async function provisionRealSqlDatabase(engine, dbName, dbUser, dbPass, logs) {
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+    const isPg = String(engine || "").includes("PostgreSQL");
+    if (!isVpsHost()) {
+      logs.push(`${nowIso()} INFO  db: Registered ${engine} '${dbName}' (user '${dbUser}')`);
+      return;
+    }
+    if (!isPg) {
+      const sqlScript = [
+        `CREATE DATABASE IF NOT EXISTS \`${dbName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
+        `CREATE USER IF NOT EXISTS '${dbUser}'@'localhost' IDENTIFIED BY '${dbPass}';`,
+        `CREATE USER IF NOT EXISTS '${dbUser}'@'127.0.0.1' IDENTIFIED BY '${dbPass}';`,
+        `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'localhost';`,
+        `GRANT ALL PRIVILEGES ON \`${dbName}\`.* TO '${dbUser}'@'127.0.0.1';`,
+        `FLUSH PRIVILEGES;`
+      ].join(" ");
+      const rootPass = panelAdminState?.mysqlRootPassword || "";
+      let dbRes = await execShellAsync(`mysql -e "${sqlScript}" 2>/dev/null`);
+      if (!dbRes.ok && rootPass) {
+        dbRes = await execShellAsync(`MYSQL_PWD='${rootPass.replace(/'/g, "'\\''")}' mysql -u root -e "${sqlScript}" 2>/dev/null`);
+      }
+      logs.push(
+        dbRes.ok
+          ? `${nowIso()} INFO  mariadb: Provisioned database '${dbName}' & user '${dbUser}'`
+          : `${nowIso()} WARN  mariadb: Fallback DB provisioning (${dbRes.stderr || "mysql unavailable"})`
+      );
+    } else {
+      const pgRes = await execShellAsync(
+        `su - postgres -c "psql -tc \\"SELECT 1 FROM pg_roles WHERE rolname='${dbUser}'\\" | grep -q 1 || psql -c \\"CREATE USER ${dbUser} WITH PASSWORD '${dbPass}';\\"; psql -tc \\"SELECT 1 FROM pg_database WHERE datname='${dbName}'\\" | grep -q 1 || psql -c \\"CREATE DATABASE ${dbName} OWNER ${dbUser};\\"" 2>/dev/null`
+      );
+      logs.push(
+        pgRes.ok
+          ? `${nowIso()} INFO  postgres: Provisioned database '${dbName}' & owner '${dbUser}'`
+          : `${nowIso()} WARN  postgres: Fallback DB provisioning (${pgRes.stderr || "postgres unavailable"})`
+      );
+    }
+  }
+
+  function markServerPackageRunning(pkgId, memMb = 32) {
+    const pkg = serverPackages.find((p) => p.id === pkgId);
+    if (pkg) {
+      pkg.installed = true;
+      pkg.status = "running";
+      if (!pkg.memoryMb) pkg.memoryMb = memMb;
+    }
+  }
+
+  async function ensureRuntimeEnvironment(framework, logs) {
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+    const fw = String(framework || "").toLowerCase();
+    if (!isVpsHost()) {
+      logs.push(`${nowIso()} INFO  env: Verified runtime profile for ${framework}`);
+      return;
+    }
+
+    if (fw.includes("php")) {
+      const res = await execShellAsync(
+        `if ! command -v php8.3 >/dev/null 2>&1 || ! systemctl is-active --quiet php8.3-fpm; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip php8.3-gd php8.3-intl unzip curl >/dev/null 2>&1;
+          systemctl enable --now php8.3-fpm || true;
+        fi;
+        if ! command -v composer >/dev/null 2>&1; then
+          curl -fsSL https://getcomposer.org/installer -o /tmp/composer-setup.php && php /tmp/composer-setup.php --install-dir=/usr/local/bin --filename=composer >/dev/null 2>&1 || apt-get install -y -qq composer >/dev/null 2>&1 || true;
+          rm -f /tmp/composer-setup.php;
+        fi`,
+        18e4
+      );
+      markServerPackageRunning("pkg-php-composer", 48);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(php): PHP 8.3-FPM + extensions + Composer ready`);
+    } else if (fw.includes("bun")) {
+      const res = await execShellAsync(
+        `if ! command -v bun >/dev/null 2>&1 && [ ! -x /usr/local/bin/bun ]; then
+          apt-get install -y -qq unzip curl >/dev/null 2>&1 || true;
+          curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash >/dev/null 2>&1 || true;
+        fi;
+        [ -x /root/.bun/bin/bun ] && [ ! -e /usr/local/bin/bun ] && ln -sf /root/.bun/bin/bun /usr/local/bin/bun || true;
+        command -v bun >/dev/null 2>&1 || [ -x /usr/local/bin/bun ]`,
+        12e4
+      );
+      markServerPackageRunning("pkg-nodejs", 64);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(bun): Bun runtime ${res.ok ? "ready at /usr/local/bin/bun" : "install check failed"}`);
+    } else if (fw.includes("deno")) {
+      const res = await execShellAsync(
+        `if ! command -v deno >/dev/null 2>&1 && [ ! -x /usr/local/bin/deno ]; then
+          apt-get install -y -qq unzip curl >/dev/null 2>&1 || true;
+          curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y >/dev/null 2>&1 || true;
+        fi;
+        [ -x /root/.deno/bin/deno ] && [ ! -e /usr/local/bin/deno ] && ln -sf /root/.deno/bin/deno /usr/local/bin/deno || true;
+        command -v deno >/dev/null 2>&1 || [ -x /usr/local/bin/deno ]`,
+        12e4
+      );
+      markServerPackageRunning("pkg-deno", 28);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(deno): Deno 2 runtime ${res.ok ? "ready at /usr/local/bin/deno" : "install check failed"}`);
+    } else if (fw.includes("next") || fw.includes("nuxt") || fw.includes("svelte") || fw.includes("astro") || fw.includes("remix") || fw.includes("nest") || fw.includes("vite") || fw.includes("node")) {
+      const res = await execShellAsync(
+        `if ! command -v node >/dev/null 2>&1; then
+          curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs >/dev/null 2>&1 || true;
+        fi;
+        if ! command -v pnpm >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+          npm install -g pnpm >/dev/null 2>&1 || true;
+        fi;
+        command -v node`,
+        18e4
+      );
+      markServerPackageRunning("pkg-nodejs", 64);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(node): Node.js (${res.stdout || "v22"}) + npm/pnpm ready`);
+    } else if (fw.includes("python") || fw.includes("fastapi") || fw.includes("django") || fw.includes("flask")) {
+      const res = await execShellAsync(
+        `if ! python3 -m venv --help >/dev/null 2>&1 || ! command -v pip3 >/dev/null 2>&1; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-pip python3-venv python3-dev >/dev/null 2>&1;
+        fi;
+        python3 --version`,
+        18e4
+      );
+      markServerPackageRunning("pkg-python", 42);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(python): ${res.stdout || "Python 3"} + venv + pip ready`);
+    } else if (fw.includes("go /") || fw.includes("fiber") || fw.includes("gin")) {
+      const res = await execShellAsync(
+        `if ! command -v go >/dev/null 2>&1 && [ ! -x /usr/local/go/bin/go ]; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq golang-go >/dev/null 2>&1;
+        fi;
+        [ -x /usr/local/go/bin/go ] && [ ! -e /usr/local/bin/go ] && ln -sf /usr/local/go/bin/go /usr/local/bin/go || true;
+        go version`,
+        18e4
+      );
+      markServerPackageRunning("pkg-golang", 24);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(go): ${res.stdout || "Go SDK"} ready`);
+    } else if (fw.includes("rust") || fw.includes("actix") || fw.includes("axum") || fw.includes("rocket")) {
+      const res = await execShellAsync(
+        `if ! command -v cargo >/dev/null 2>&1 && [ ! -x /root/.cargo/bin/cargo ]; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libssl-dev curl >/dev/null 2>&1;
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable >/dev/null 2>&1;
+        fi;
+        [ -x /root/.cargo/bin/cargo ] && [ ! -e /usr/local/bin/cargo ] && ln -sf /root/.cargo/bin/cargo /usr/local/bin/cargo || true;
+        [ -x /root/.cargo/bin/rustc ] && [ ! -e /usr/local/bin/rustc ] && ln -sf /root/.cargo/bin/rustc /usr/local/bin/rustc || true;
+        rustc --version`,
+        24e4
+      );
+      markServerPackageRunning("pkg-rust", 18.2);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(rust): ${res.stdout || "rustc + cargo"} ready`);
+    } else if (fw.includes("java") || fw.includes("spring")) {
+      const res = await execShellAsync(
+        `if ! command -v java >/dev/null 2>&1 || ! command -v javac >/dev/null 2>&1; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openjdk-21-jdk maven >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq default-jdk maven >/dev/null 2>&1;
+        fi;
+        java -version 2>&1 | head -n 1`,
+        18e4
+      );
+      markServerPackageRunning("pkg-java", 120);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(java): ${res.stdout || "OpenJDK"} ready`);
+    } else if (fw.includes(".net") || fw.includes("c#")) {
+      const res = await execShellAsync(
+        `if ! command -v dotnet >/dev/null 2>&1; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dotnet-sdk-8.0 >/dev/null 2>&1 || {
+            curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh && chmod +x /tmp/dotnet-install.sh && /tmp/dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet >/dev/null 2>&1 && ln -sf /usr/share/dotnet/dotnet /usr/local/bin/dotnet;
+          };
+        fi;
+        dotnet --version`,
+        24e4
+      );
+      markServerPackageRunning("pkg-dotnet", 85);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(dotnet): .NET ${res.stdout || "8.0"} ready`);
+    } else if (fw.includes("ruby") || fw.includes("rails")) {
+      const res = await execShellAsync(
+        `if ! command -v ruby >/dev/null 2>&1; then
+          DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ruby-full build-essential >/dev/null 2>&1;
+        fi;
+        if ! command -v bundle >/dev/null 2>&1; then gem install bundler --no-document >/dev/null 2>&1 || true; fi;
+        ruby -v`,
+        18e4
+      );
+      markServerPackageRunning("pkg-ruby", 46);
+      logs.push(`${nowIso()} ${res.ok ? "INFO" : "WARN"}  env(ruby): ${res.stdout || "Ruby"} + Bundler ready`);
+    }
+  }
+
+  async function reloadWebServerAndPhp(selectedWebServer, logs) {
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+    if (!isVpsHost()) return;
+    if (selectedWebServer === "FerrousX (Rust Web Server)") {
+      await execShellAsync("ferrousx-ctl reload 2>/dev/null || systemctl kill -s HUP ferrousx.service 2>/dev/null || true", 1e4);
+      logs.push(`${nowIso()} INFO  ferrousx: Sent SIGHUP zero-downtime route reload`);
+    } else {
+      await execShellAsync("nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true", 1e4);
+      logs.push(`${nowIso()} INFO  nginx: Tested config & reloaded worker processes`);
+    }
+    await execShellAsync("systemctl reload php8.3-fpm 2>/dev/null || true", 1e4);
+  }
+
+  async function activateSystemdAndReload(newApp, selectedWebServer, logs) {
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+    syncArchitectureForApp(newApp);
+    const isPhp = String(newApp.framework || "").toLowerCase().includes("php");
+    const isStatic = String(newApp.framework || "").toLowerCase().includes("static") || String(newApp.framework || "").toLowerCase().includes("vite") || Number(newApp.internalPort) === 80;
+    if (isVpsHost()) {
+      await execShellAsync(`chown -R www-data:www-data "${newApp.workingDir}" 2>/dev/null || true`, 2e4);
+      if (!isPhp && !isStatic) {
+        const unitFile = `/etc/systemd/system/${newApp.name}.service`;
+        try {
+          fs2.writeFileSync(unitFile, newApp.systemdUnit, "utf8");
+          const sysRes = await execShellAsync(`systemctl daemon-reload && systemctl enable --now "${newApp.name}.service"`, 25e3);
+          logs.push(
+            sysRes.ok
+              ? `${nowIso()} INFO  systemd: Enabled & started ${newApp.name}.service on 127.0.0.1:${newApp.internalPort}`
+              : `${nowIso()} WARN  systemd: ${newApp.name}.service notice (${sysRes.stderr})`
+          );
+        } catch (err) {
+          logs.push(`${nowIso()} WARN  systemd: Could not write ${unitFile}: ${err.message}`);
+        }
+      }
+    }
+    await reloadWebServerAndPhp(selectedWebServer, logs);
+  }
+
+  app.post("/api/apps", async (req, res) => {
     const {
       name,
       framework,
@@ -2330,47 +2647,35 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       gitBranch,
       webServerEngine
     } = req.body;
-    const cleanDomain = String(domain || "newsite.ferroushub.vn").toLowerCase().trim();
-    const cleanName = String(
-      name || cleanDomain.split(".")[0] || "new-web-service"
-    ).toLowerCase().replace(/[^a-z0-9-]/g, "-");
-    const runtimeMap = {
-      "Actix-Web (Rust)": "rustc 1.83.0 \xB7 actix-web 4.9.0 (Direct ABI)",
-      "Axum (Rust)": "rustc 1.83.0 \xB7 axum 0.8 (Direct ABI)",
-      "Rocket (Rust)": "rustc 1.83.0 \xB7 rocket 0.5.1 (Direct ABI)",
-      "Next.js 15 (React SSR)": "Node v22.11.0 LTS \xB7 Next 15 + NAPI-RS Bridge",
-      "Nuxt 3 (Vue 3 SSR)": "Node v22.11.0 LTS \xB7 Nuxt 3.14 + NAPI-RS Bridge",
-      "SvelteKit 2 (Svelte 5)": "Bun 1.1 / Node 22 \xB7 Svelte 5 + Rust FFI",
-      "Astro 5 (Hybrid / Static)": "Node v22.11.0 LTS \xB7 Astro 5.0 + NAPI-RS Bridge",
-      "Remix / React Router v7": "Node v22.11.0 LTS \xB7 React Router v7 + NAPI-RS",
-      "NestJS 10 (TypeScript API)": "Node v22.11.0 LTS \xB7 NestJS 10 + Rust Addon",
-      "Vite + React 19 / Vue 3 SPA": "Nginx 1.26 Static Brotli \xB7 Vite 6.0",
-      "Node.js / Next.js": "Node v22.11.0 LTS \xB7 Next 15 + NAPI-RS",
-      "PHP 8.3-FPM": "PHP 8.3.14-FPM \xB7 OPcache JIT + Zend Rust FFI",
-      "Python / FastAPI": "Python 3.12.7 \xB7 Uvicorn + PyO3 Rust ABI3",
-      "Go / Fiber": "go1.23.3 linux/amd64 \xB7 CGO libferrous_bridge.a",
-      "Java 21 / Spring Boot 3": "OpenJDK 21.0.5 LTS \xB7 ZGC + Rust JNI Bridge",
-      "C# / .NET 8 ASP.NET Core": ".NET 8.0.403 Kestrel + Rust P/Invoke csbindgen",
-      "Ruby 3.3 / Rails & Elixir": "Ruby 3.3.5 YJIT / OTP 27 + Magnus/Rustler NIF",
-      "C++20 / Zig Native Daemon": "GCC 13.2 / Zig 0.13 + cbindgen C-ABI",
-      "WebAssembly (WASI Wasmtime)": "Wasmtime 26.0 \xB7 wasm32-wasip1 Sandbox",
-      "Static HTML / SPA": "Nginx 1.26 Static Brotli"
-    };
+    const cleanDomain = String(domain || "newsite.ferroushub.vn").toLowerCase().trim().replace(/[^a-z0-9.-]/g, "");
+    const cleanName = String(name || cleanDomain.split(".")[0] || "new-web-service").toLowerCase().replace(/[^a-z0-9-]/g, "-");
     const appId = `svc-${Date.now()}`;
     const siteRoot = workingDir || `/www/wwwroot/${cleanDomain}`;
+    const fw = framework || "Actix-Web (Rust)";
+    const allocatedPort = Number(internalPort) === 80 ? 80 : pickAvailablePort(Number(internalPort) || 8086);
+    const provisionLogs = [];
+    const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
+
+    try {
+      fs2.mkdirSync(siteRoot, { recursive: true });
+      fs2.mkdirSync("/www/wwwlogs", { recursive: true });
+      provisionLogs.push(`${nowIso()} INFO  fs: Provisioned directory ${siteRoot}`);
+    } catch {}
+
+    await ensureRuntimeEnvironment(fw, provisionLogs);
+
     let createdDbName = null;
     let createdDbPassword = null;
     let createdDbUserStr = null;
     if (createDatabase) {
-      const cleanDb = String(
-        dbName || cleanName.replace(/-/g, "_") + "_db"
-      ).toLowerCase();
-      const cleanDbUser = String(dbUser || `${cleanDb}_user`).toLowerCase();
-      const customDbPass = String(dbPassword || "").trim() || `Sql#${Math.random().toString(36).slice(2, 10)}!99`;
+      const cleanDb = String(dbName || cleanName.replace(/-/g, "_") + "_db").toLowerCase().replace(/[^a-z0-9_]/g, "_");
+      const cleanDbUser = String(dbUser || `${cleanDb}_user`).toLowerCase().replace(/[^a-z0-9_]/g, "_").slice(0, 28);
+      const customDbPass = String(dbPassword || "").trim() || `Sql#${crypto.randomBytes(6).toString("hex")}!99`;
       const selectedEngine = dbEngine || "PostgreSQL 17";
       createdDbName = cleanDb;
       createdDbPassword = customDbPass;
       createdDbUserStr = cleanDbUser;
+      await provisionRealSqlDatabase(selectedEngine, cleanDb, cleanDbUser, customDbPass, provisionLogs);
       sqlDatabases.unshift({
         id: `db-${Date.now()}`,
         name: cleanDb,
@@ -2387,25 +2692,12 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
         maxConnections: 100,
         status: "online",
         createdAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
-        tables: [
-          {
-            tableName: "schema_migrations",
-            rowCount: 1,
-            sizeKb: 32,
-            columns: [
-              { name: "version", dataType: "BIGINT", nullable: false, isPrimaryKey: true },
-              { name: "applied_at", dataType: "TIMESTAMPTZ", nullable: false }
-            ],
-            rows: [{ version: 2026110901, applied_at: (/* @__PURE__ */ new Date()).toISOString() }]
-          }
-        ]
+        tables: []
       });
     }
     let createdFtpUser = null;
     if (createFtp) {
-      const cleanFtp = String(
-        ftpUser || `ftp_${cleanName.replace(/-/g, "_")}`
-      ).toLowerCase();
+      const cleanFtp = String(ftpUser || `ftp_${cleanName.replace(/-/g, "_")}`).toLowerCase();
       createdFtpUser = cleanFtp;
       sftpAccounts.unshift({
         id: `sftp-${Date.now()}`,
@@ -2426,31 +2718,35 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       value: resolveServerPublicIp(req) || "127.0.0.1",
       ttl: 300
     });
-    const getPresetForFw = (fw) => {
-      if (fw === "PHP 8.3-FPM") return "laravel";
-      if (fw === "Next.js 15 (React SSR)" || fw === "Node.js / Next.js")
-        return "nextjs_proxy";
-      if (fw === "Nuxt 3 (Vue 3 SSR)") return "nuxt_nitro";
-      if (fw === "SvelteKit 2 (Svelte 5)") return "sveltekit_node";
-      if (fw === "Astro 5 (Hybrid / Static)") return "astro_hybrid";
-      if (fw === "Vite + React 19 / Vue 3 SPA" || fw === "Static HTML / SPA")
-        return "spa_history";
-      return "rust_proxy";
-    };
-    const preset = getPresetForFw(framework || "Actix-Web (Rust)");
+
+    const isPhpFw = fw.toLowerCase().includes("php");
+    const isStaticFw = fw.toLowerCase().includes("static") || fw.toLowerCase().includes("vite");
+    const resolvedSubDir = runSubDir || (isPhpFw ? "/public" : isStaticFw ? "/dist" : "/");
+    if (fs2.existsSync(siteRoot)) {
+      try {
+        const targetSub = resolvedSubDir !== "/" ? path2.join(siteRoot, resolvedSubDir.replace(/^\/+/, "")) : siteRoot;
+        fs2.mkdirSync(targetSub, { recursive: true });
+        if (isPhpFw && !fs2.existsSync(path2.join(targetSub, "index.php"))) {
+          fs2.writeFileSync(path2.join(targetSub, "index.php"), `<?php\nheader('Content-Type: text/html; charset=utf-8');\necho "<h1>${cleanDomain}</h1><p>PHP " . PHP_VERSION . " + FerrousX Ready</p>";\n`);
+        } else if (isStaticFw && !fs2.existsSync(path2.join(targetSub, "index.html"))) {
+          fs2.writeFileSync(path2.join(targetSub, "index.html"), `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${cleanDomain}</title></head><body style="font-family:sans-serif;padding:40px"><h1>${cleanDomain}</h1><p>Static/SPA WebRoot Ready on FerrousX</p></body></html>`);
+        }
+      } catch {}
+    }
+
+    const preset = getPresetForFw(fw);
     const selectedWebServer = webServerEngine === "Nginx 1.26" ? "Nginx 1.26" : "FerrousX (Rust Web Server)";
-    const vhostLogPath = selectedWebServer === "FerrousX (Rust Web Server)" ? `/www/server/panel/vhost/ferrousx/${cleanDomain}.conf` : `/www/server/panel/vhost/nginx/${cleanDomain}.conf`;
     const newApp = {
       id: appId,
       name: cleanName,
-      framework: framework || "Actix-Web (Rust)",
+      framework: fw,
       webServerEngine: selectedWebServer,
-      runtimeVersion: runtimeMap[framework] || "rustc 1.83.0 \xB7 actix-web 4.9.0",
+      runtimeVersion: runtimeLabelMap[fw] || fw,
       domain: cleanDomain,
       aliases: Array.isArray(aliases) ? aliases : [],
-      internalPort: Number(internalPort) || 8086,
+      internalPort: allocatedPort,
       workingDir: siteRoot,
-      runSubDir: runSubDir || (framework === "PHP 8.3-FPM" ? "/public" : "/"),
+      runSubDir: resolvedSubDir,
       execCommand: execCommand || `${siteRoot}/target/release/${cleanName}`,
       workers: Number(workers) || 4,
       memoryLimitMb: Number(memoryLimitMb) || 512,
@@ -2466,7 +2762,7 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       websocketEnabled: Boolean(websocketEnabled),
       rateLimitRps: Number(rateLimitRps) || 100,
       requestsPerSec: 65,
-      p99LatencyMs: framework?.includes("Rust") ? 1.5 : 6.4,
+      p99LatencyMs: fw.includes("Rust") ? 1.5 : 4.4,
       uptimeSeconds: 10,
       diskUsedMb: 42,
       diskQuotaMb: 5120,
@@ -2474,65 +2770,50 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
       linkedDbName: createdDbName,
       ftpUsername: createdFtpUser,
       backupCount: 0,
-      gitRepoUrl: gitRepoUrl || `https://github.com/ferroushub/${cleanName}.git`,
+      gitRepoUrl: gitRepoUrl || `https://github.com/Ferrous-panel/FerrousX.git`,
       gitBranch: gitBranch || "main",
-      buildScript: framework?.includes("Rust") ? `cargo build --release && systemctl restart ${cleanName}` : "pnpm build && systemctl restart " + cleanName,
+      buildScript: fw.includes("Rust") ? `cargo build --release && systemctl restart ${cleanName}` : "npm run build && systemctl restart " + cleanName,
       lastDeployCommit: "initial-provision (FerrousPanel Add Site)",
-      lastDeployTime: "V\u1EEBa xong",
+      lastDeployTime: "Vừa xong",
       urlRewritePreset: preset,
       urlRewriteRules: REWRITE_TEMPLATES[preset],
       envVars: [
-        { key: "PORT", value: String(internalPort || 8086) },
+        { key: "PORT", value: String(allocatedPort) },
         { key: "NODE_ENV", value: "production" },
         ...createdDbName ? [
+          { key: "DB_HOST", value: "127.0.0.1" },
           { key: "DB_DATABASE", value: createdDbName },
           { key: "DB_USERNAME", value: createdDbUserStr || "db_user" },
           { key: "DB_PASSWORD", value: createdDbPassword || "" }
         ] : []
       ],
-      logs: [
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  panel: Provisioned Web Root ${siteRoot} (chown www-data:www-data)`,
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  webserver (${selectedWebServer}): Generated ${vhostLogPath}`,
-        `${(/* @__PURE__ */ new Date()).toISOString()} INFO  certbot: Issued Let's Encrypt TLS 1.3 certificate for ${cleanDomain}`
-      ]
+      logs: provisionLogs
     };
     webFiles.push({
       id: `f-${Date.now()}-1`,
       appId,
-      name: framework?.includes("Rust") ? "Cargo.toml" : "package.json",
-      path: framework?.includes("Rust") ? "/Cargo.toml" : "/package.json",
+      name: fw.includes("Rust") ? "Cargo.toml" : isPhpFw ? "index.php" : "package.json",
+      path: fw.includes("Rust") ? "/Cargo.toml" : isPhpFw ? "/public/index.php" : "/package.json",
       parentDir: "/",
       type: "file",
       sizeBytes: 420,
       permissions: "0644",
       symbolicPerms: "-rw-r--r--",
       owner: "www-data:www-data",
-      modifiedAt: "V\u1EEBa xong",
-      content: framework?.includes("Rust") ? `[package]
-name = "${cleanName}"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-actix-web = "4.9"
-` : `{
-  "name": "${cleanName}",
-  "version": "1.0.0",
-  "private": true
-}
-`
+      modifiedAt: "Vừa xong",
+      content: `# ${cleanDomain} (${fw})\n`
     });
-    syncArchitectureForApp(newApp);
     managedApps.unshift(newApp);
     persistManagedApps();
-    if (createdDbName) {
-      persistSqlDatabases();
-    }
+    await activateSystemdAndReload(newApp, selectedWebServer, newApp.logs);
+    if (createdDbName) persistSqlDatabases();
     res.status(201).json(newApp);
   });
+
   app.get("/api/oneclick/templates", (_req, res) => {
     res.json(oneClickTemplates);
   });
+
   app.post("/api/oneclick/deploy", async (req, res) => {
     const { templateId, domain, createDb, webServerEngine } = req.body;
     const tpl = oneClickTemplates.find((t) => t.id === templateId) || oneClickTemplates[0];
@@ -2544,24 +2825,18 @@ actix-web = "4.9"
     const cleanName = cleanDomain.replace(/[^a-z0-9-]/g, "-");
     const appId = `svc-${Date.now()}`;
     const siteRoot = `/www/wwwroot/${cleanDomain}`;
+    const fw = tpl.framework;
+    const fwLow = fw.toLowerCase();
     const isWordPress = tpl.id.includes("wordpress") || tpl.name.toLowerCase().includes("wordpress");
     const isLaravel = tpl.id.includes("laravel") || tpl.name.toLowerCase().includes("laravel");
-    const port = tpl.defaultPort + Math.floor(Math.random() * 10);
+    const isSymfony = tpl.id.includes("symfony") || fwLow.includes("symfony");
+    const isPhp = fwLow.includes("php");
+    const isStaticSpa = fwLow.includes("vite") || fwLow.includes("static") || Number(tpl.defaultPort) === 80;
+    const port = isPhp ? 9000 : isStaticSpa ? 80 : pickAvailablePort(tpl.defaultPort || 8080);
     const provisionLogs = [];
     const nowIso = () => (/* @__PURE__ */ new Date()).toISOString();
 
-    const execShellAsync = (cmd, timeoutMs = 45e3) =>
-      new Promise((resolve) => {
-        child_process.exec(cmd, { timeout: timeoutMs }, (err, stdout, stderr) => {
-          resolve({
-            ok: !err,
-            stdout: String(stdout || "").trim(),
-            stderr: String(stderr || (err ? err.message : "")).trim()
-          });
-        });
-      });
-
-    // 1. Provision real webroot directory on VPS
+    // 1. Create real WebRoot
     try {
       fs2.mkdirSync(siteRoot, { recursive: true });
       fs2.mkdirSync("/www/wwwlogs", { recursive: true });
@@ -2570,46 +2845,20 @@ actix-web = "4.9"
       provisionLogs.push(`${nowIso()} WARN  fs: Could not create ${siteRoot}: ${err.message}`);
     }
 
-    // 2. Provision real SQL database & user
+    // 2. Ensure language runtime / toolchain is automatically installed & ready
+    await ensureRuntimeEnvironment(fw, provisionLogs);
+
+    // 3. Provision real SQL database & user
     let dbCreatedName = null;
     let dbCreatedUser = null;
-    let dbCreatedPass = `Wp#${crypto.randomBytes(6).toString("hex")}!26`;
+    let dbCreatedPass = `Fp#${crypto.randomBytes(6).toString("hex")}!26`;
     if (createDb && tpl.requiresDb !== "None") {
       const prefix = cleanDomain.split(".")[0].replace(/[^a-z0-9]/g, "_").slice(0, 12) || "site";
       const suffix = tpl.id.split("-")[1]?.replace(/[^a-z0-9]/g, "_").slice(0, 8) || "app";
       dbCreatedName = `${prefix}_${suffix}_db`.replace(/[^a-z0-9_]/g, "_");
       dbCreatedUser = `${prefix}_${suffix}_u`.slice(0, 28);
       const isPg = tpl.requiresDb.includes("PostgreSQL");
-
-      if (!isPg && fs2.existsSync("/www")) {
-        const sqlScript = [
-          `CREATE DATABASE IF NOT EXISTS \`${dbCreatedName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;`,
-          `CREATE USER IF NOT EXISTS '${dbCreatedUser}'@'localhost' IDENTIFIED BY '${dbCreatedPass}';`,
-          `CREATE USER IF NOT EXISTS '${dbCreatedUser}'@'127.0.0.1' IDENTIFIED BY '${dbCreatedPass}';`,
-          `GRANT ALL PRIVILEGES ON \`${dbCreatedName}\`.* TO '${dbCreatedUser}'@'localhost';`,
-          `GRANT ALL PRIVILEGES ON \`${dbCreatedName}\`.* TO '${dbCreatedUser}'@'127.0.0.1';`,
-          `FLUSH PRIVILEGES;`
-        ].join(" ");
-        const rootPass = panelAdminState?.mysqlRootPassword || "";
-        let dbRes = await execShellAsync(`mysql -e "${sqlScript}" 2>/dev/null`);
-        if (!dbRes.ok && rootPass) {
-          dbRes = await execShellAsync(`MYSQL_PWD='${rootPass.replace(/'/g, "'\\''")}' mysql -u root -e "${sqlScript}" 2>/dev/null`);
-        }
-        provisionLogs.push(
-          dbRes.ok
-            ? `${nowIso()} INFO  mariadb: Provisioned database '${dbCreatedName}' & user '${dbCreatedUser}'`
-            : `${nowIso()} WARN  mariadb: Skipped/Fallback DB provisioning (${dbRes.stderr || "mysql unavailable"})`
-        );
-      } else if (isPg && fs2.existsSync("/www")) {
-        const pgRes = await execShellAsync(
-          `su - postgres -c "psql -c \\"CREATE USER ${dbCreatedUser} WITH PASSWORD '${dbCreatedPass}';\\" && psql -c \\"CREATE DATABASE ${dbCreatedName} OWNER ${dbCreatedUser};\\"" 2>/dev/null`
-        );
-        provisionLogs.push(
-          pgRes.ok
-            ? `${nowIso()} INFO  postgres: Provisioned database '${dbCreatedName}'`
-            : `${nowIso()} WARN  postgres: Skipped/Fallback DB provisioning`
-        );
-      }
+      await provisionRealSqlDatabase(tpl.requiresDb, dbCreatedName, dbCreatedUser, dbCreatedPass, provisionLogs);
 
       sqlDatabases.unshift({
         id: `db-${Date.now()}`,
@@ -2644,32 +2893,53 @@ actix-web = "4.9"
       });
     }
 
-    // 3. Real WordPress Core Download, Extraction & wp-config.php Generation
+    // 4. Scaffold, Install Dependencies & Build per Framework (100% Real Auto-Setup)
+    let resolvedExecCmd = tpl.execCommandTemplate.replace(/\$DOMAIN/g, cleanDomain).replace(/\$PORT/g, String(port));
+    let resolvedRunSubDir = isLaravel || isSymfony ? "/public" : isStaticSpa ? "/dist" : "/";
     let wpConfigContent = "";
-    if (isWordPress && fs2.existsSync(siteRoot)) {
-      const wpCheckPath = path2.join(siteRoot, "wp-login.php");
-      if (!fs2.existsSync(wpCheckPath)) {
-        const dlCmd = [
-          `if command -v wp >/dev/null 2>&1; then wp core download --path="${siteRoot}" --allow-root --force;`,
-          `else`,
-          `  if [ ! -s /tmp/ferrous-wp-latest.tar.gz ]; then`,
-          `    curl -fsSL --connect-timeout 10 --max-time 60 https://wordpress.org/latest.tar.gz -o /tmp/ferrous-wp-latest.tar.gz || curl -fsSL --connect-timeout 10 --max-time 60 https://vi.wordpress.org/latest-vi.tar.gz -o /tmp/ferrous-wp-latest.tar.gz;`,
-          `  fi;`,
-          `  tar -xzf /tmp/ferrous-wp-latest.tar.gz --strip-components=1 -C "${siteRoot}";`,
-          `fi`
-        ].join(" ");
-        const wpDl = await execShellAsync(dlCmd, 9e4);
-        provisionLogs.push(
-          wpDl.ok
-            ? `${nowIso()} INFO  wordpress: Downloaded & extracted WordPress core into ${siteRoot}`
-            : `${nowIso()} ERROR wordpress: Download failed (${wpDl.stderr})`
-        );
-      } else {
-        provisionLogs.push(`${nowIso()} INFO  wordpress: Existing WordPress core found in ${siteRoot}`);
-      }
+    const envFileLines = [
+      `PORT=${port}`,
+      `HOST=127.0.0.1`,
+      `APP_ENV=production`,
+      `APP_URL=https://${cleanDomain}`,
+      ...(dbCreatedName ? [
+        `DB_CONNECTION=${tpl.requiresDb.includes("PostgreSQL") ? "pgsql" : "mysql"}`,
+        `DB_HOST=127.0.0.1`,
+        `DB_PORT=${tpl.requiresDb.includes("PostgreSQL") ? 5432 : 3306}`,
+        `DB_DATABASE=${dbCreatedName}`,
+        `DB_USERNAME=${dbCreatedUser}`,
+        `DB_PASSWORD=${dbCreatedPass}`
+      ] : [])
+    ];
+    if (fs2.existsSync(siteRoot)) {
+      try {
+        fs2.writeFileSync(path2.join(siteRoot, ".env"), envFileLines.join("\n") + "\n", { mode: 0o600 });
+      } catch {}
+    }
 
-      const genSalt = () => crypto.randomBytes(48).toString("base64").replace(/['"\\]/g, "x");
-      wpConfigContent = `<?php
+    if (fs2.existsSync(siteRoot)) {
+      if (isWordPress) {
+        resolvedRunSubDir = "/";
+        const wpCheckPath = path2.join(siteRoot, "wp-login.php");
+        if (!fs2.existsSync(wpCheckPath)) {
+          const dlCmd = [
+            `if command -v wp >/dev/null 2>&1; then wp core download --path="${siteRoot}" --allow-root --force;`,
+            `else`,
+            `  if [ ! -s /tmp/ferrous-wp-latest.tar.gz ]; then`,
+            `    curl -fsSL --connect-timeout 10 --max-time 60 https://wordpress.org/latest.tar.gz -o /tmp/ferrous-wp-latest.tar.gz || curl -fsSL --connect-timeout 10 --max-time 60 https://vi.wordpress.org/latest-vi.tar.gz -o /tmp/ferrous-wp-latest.tar.gz;`,
+            `  fi;`,
+            `  tar -xzf /tmp/ferrous-wp-latest.tar.gz --strip-components=1 -C "${siteRoot}";`,
+            `fi`
+          ].join(" ");
+          const wpDl = await execShellAsync(dlCmd, 9e4);
+          provisionLogs.push(
+            wpDl.ok
+              ? `${nowIso()} INFO  wordpress: Downloaded & extracted WordPress core into ${siteRoot}`
+              : `${nowIso()} ERROR wordpress: Download failed (${wpDl.stderr})`
+          );
+        }
+        const genSalt = () => crypto.randomBytes(48).toString("base64").replace(/['"\\]/g, "x");
+        wpConfigContent = `<?php
 /**
  * Auto-generated by FerrousPanel 1-Click WordPress Installer
  * Domain: ${cleanDomain}
@@ -2694,7 +2964,6 @@ $table_prefix = 'wp_';
 define( 'WP_DEBUG', false );
 define( 'FS_METHOD', 'direct' );
 
-// Support HTTPS behind FerrousX / Cloudflare Reverse Proxy
 if ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false ) {
     $_SERVER['HTTPS'] = 'on';
 }
@@ -2704,48 +2973,321 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 require_once ABSPATH . 'wp-settings.php';
 `;
-      try {
-        fs2.writeFileSync(path2.join(siteRoot, "wp-config.php"), wpConfigContent, { mode: 0o640 });
-        await execShellAsync(`chown -R www-data:www-data "${siteRoot}" && find "${siteRoot}" -type d -exec chmod 755 {} + && find "${siteRoot}" -type f -exec chmod 644 {} + && chmod 640 "${siteRoot}/wp-config.php"`);
-        provisionLogs.push(`${nowIso()} INFO  wordpress: Generated wp-config.php linked to DB '${dbCreatedName || "wordpress"}' & fixed www-data permissions`);
-      } catch (err) {
-        provisionLogs.push(`${nowIso()} WARN  wordpress: Could not write wp-config.php: ${err.message}`);
-      }
-    } else if (fs2.existsSync(siteRoot)) {
-      // Write starter index for non-WP templates if directory is empty
-      try {
-        if (tpl.framework === "PHP 8.3-FPM" && isLaravel) {
-          const pubDir = path2.join(siteRoot, "public");
-          fs2.mkdirSync(pubDir, { recursive: true });
-          if (!fs2.existsSync(path2.join(pubDir, "index.php"))) {
-            fs2.writeFileSync(
-              path2.join(pubDir, "index.php"),
-              `<?php\necho "<h1>${cleanDomain} — Ready (PHP " . PHP_VERSION . " + FerrousX)</h1>";\n`
-            );
+        try {
+          fs2.writeFileSync(path2.join(siteRoot, "wp-config.php"), wpConfigContent, { mode: 0o640 });
+          await execShellAsync(`chown -R www-data:www-data "${siteRoot}" && find "${siteRoot}" -type d -exec chmod 755 {} + && find "${siteRoot}" -type f -exec chmod 644 {} + && chmod 640 "${siteRoot}/wp-config.php"`);
+          provisionLogs.push(`${nowIso()} INFO  wordpress: Generated wp-config.php & set www-data permissions`);
+        } catch {}
+      } else if (isLaravel || isSymfony) {
+        resolvedRunSubDir = "/public";
+        const pubDir = path2.join(siteRoot, "public");
+        fs2.mkdirSync(pubDir, { recursive: true });
+        if (isLaravel && !fs2.existsSync(path2.join(siteRoot, "artisan"))) {
+          const larRes = await execShellAsync(
+            `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction --prefer-dist laravel/laravel "${siteRoot}/_tmp_lar" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_lar/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_lar"; fi`,
+            18e4
+          );
+          if (fs2.existsSync(path2.join(siteRoot, "artisan"))) {
+            const envPath = path2.join(siteRoot, ".env");
+            let larEnv = fs2.existsSync(envPath) ? fs2.readFileSync(envPath, "utf8") : "";
+            larEnv = larEnv
+              .replace(/^APP_URL=.*/m, `APP_URL=https://${cleanDomain}`)
+              .replace(/^#?\s*DB_CONNECTION=.*/m, "DB_CONNECTION=mysql")
+              .replace(/^#?\s*DB_HOST=.*/m, "DB_HOST=127.0.0.1")
+              .replace(/^#?\s*DB_PORT=.*/m, "DB_PORT=3306")
+              .replace(/^#?\s*DB_DATABASE=.*/m, `DB_DATABASE=${dbCreatedName || "laravel"}`)
+              .replace(/^#?\s*DB_USERNAME=.*/m, `DB_USERNAME=${dbCreatedUser || "root"}`)
+              .replace(/^#?\s*DB_PASSWORD=.*/m, `DB_PASSWORD=${dbCreatedPass}`);
+            fs2.writeFileSync(envPath, larEnv);
+            await execShellAsync(`cd "${siteRoot}" && php artisan key:generate --force && chmod -R 775 storage bootstrap/cache`, 3e4);
+            provisionLogs.push(`${nowIso()} INFO  laravel: Installed Laravel 11 + generated APP_KEY & DB .env`);
+          } else {
+            provisionLogs.push(`${nowIso()} WARN  laravel: Composer create-project unavailable (${larRes.stderr || "offline"}), wrote PHP /public starter`);
           }
-        } else if (!fs2.existsSync(path2.join(siteRoot, "index.html")) && !fs2.existsSync(path2.join(siteRoot, "index.php"))) {
+        } else if (isSymfony && !fs2.existsSync(path2.join(siteRoot, "composer.json"))) {
+          await execShellAsync(
+            `if command -v composer >/dev/null 2>&1; then COMPOSER_ALLOW_SUPERUSER=1 composer create-project --no-interaction symfony/skeleton "${siteRoot}/_tmp_sym" >/dev/null 2>&1 && cp -rn "${siteRoot}/_tmp_sym/." "${siteRoot}/" && rm -rf "${siteRoot}/_tmp_sym"; fi`,
+            15e4
+          );
+        }
+        if (!fs2.existsSync(path2.join(pubDir, "index.php"))) {
           fs2.writeFileSync(
-            path2.join(siteRoot, "index.html"),
-            `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${cleanDomain}</title></head><body style="font-family:sans-serif;padding:40px"><h1>${cleanDomain}</h1><p>Provisioned via FerrousPanel 1-Click (${tpl.name}).</p></body></html>`
+            path2.join(pubDir, "index.php"),
+            `<?php\nheader('Content-Type: text/html; charset=utf-8');\necho "<!DOCTYPE html><html><body style='font-family:sans-serif;padding:40px'><h1>${cleanDomain} (${tpl.name})</h1><p>PHP " . PHP_VERSION . " + FerrousX Ready at /public</p></body></html>";\n`
           );
         }
         await execShellAsync(`chown -R www-data:www-data "${siteRoot}"`);
-      } catch {}
+      } else if (isStaticSpa) {
+        resolvedRunSubDir = "/dist";
+        const distDir = path2.join(siteRoot, "dist");
+        fs2.mkdirSync(distDir, { recursive: true });
+        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+          fs2.writeFileSync(
+            path2.join(siteRoot, "package.json"),
+            JSON.stringify({ name: cleanName, private: true, version: "1.0.0", scripts: { build: "mkdir -p dist" } }, null, 2)
+          );
+        }
+        if (!fs2.existsSync(path2.join(distDir, "index.html"))) {
+          fs2.writeFileSync(
+            path2.join(distDir, "index.html"),
+            `<!DOCTYPE html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${cleanDomain}</title></head><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="margin:0 0 12px;color:#fb923c">${cleanDomain}</h1><p>Triển khai thành công <strong>${tpl.name}</strong> qua FerrousX Static/SPA Engine.</p><p style="color:#94a3b8;font-size:14px">Document Root: <code>${distDir}</code></p></div></body></html>`
+          );
+        }
+        provisionLogs.push(`${nowIso()} INFO  static-spa: Built /dist/index.html with HTML5 History fallback`);
+      } else if (fwLow.includes("bun")) {
+        fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
+        const bunEntry = path2.join(siteRoot, "src", "index.ts");
+        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+          fs2.writeFileSync(
+            path2.join(siteRoot, "package.json"),
+            JSON.stringify({ name: cleanName, module: "src/index.ts", scripts: { start: "bun run src/index.ts" } }, null, 2)
+          );
+        }
+        if (!fs2.existsSync(bunEntry)) {
+          fs2.writeFileSync(
+            bunEntry,
+            `const port = Number(process.env.PORT || ${port});
+Bun.serve({
+  port,
+  hostname: "127.0.0.1",
+  fetch(req) {
+    const url = new URL(req.url);
+    if (url.pathname === "/api/health") {
+      return Response.json({ status: "ok", runtime: "Bun " + Bun.version, domain: "${cleanDomain}" });
+    }
+    return new Response("<h1>${cleanDomain} — Bun " + Bun.version + " + FerrousX Ready</h1>", {
+      headers: { "content-type": "text/html; charset=utf-8" }
+    });
+  }
+});
+console.log("Bun server listening on 127.0.0.1:" + port);
+`
+          );
+        }
+        const bunBin = (await execShellAsync("command -v bun || echo /usr/local/bin/bun")).stdout || "/usr/local/bin/bun";
+        resolvedExecCmd = `${bunBin} run ${bunEntry}`;
+        provisionLogs.push(`${nowIso()} INFO  bun: Prepared TypeScript server ${bunEntry}`);
+      } else if (fwLow.includes("deno")) {
+        const denoEntry = path2.join(siteRoot, "main.ts");
+        if (!fs2.existsSync(path2.join(siteRoot, "deno.json"))) {
+          fs2.writeFileSync(path2.join(siteRoot, "deno.json"), JSON.stringify({ tasks: { start: "deno run --allow-net --allow-env --allow-read main.ts" } }, null, 2));
+        }
+        if (!fs2.existsSync(denoEntry)) {
+          fs2.writeFileSync(
+            denoEntry,
+            `const port = Number(Deno.env.get("PORT") || ${port});
+Deno.serve({ port, hostname: "127.0.0.1" }, (req) => {
+  const url = new URL(req.url);
+  if (url.pathname === "/api/health") {
+    return Response.json({ status: "ok", runtime: "Deno " + Deno.version.deno, domain: "${cleanDomain}" });
+  }
+  return new Response("<h1>${cleanDomain} — Deno " + Deno.version.deno + " + FerrousX Ready</h1>", {
+    headers: { "content-type": "text/html; charset=utf-8" }
+  });
+});
+`
+          );
+        }
+        const denoBin = (await execShellAsync("command -v deno || echo /usr/local/bin/deno")).stdout || "/usr/local/bin/deno";
+        resolvedExecCmd = `${denoBin} run --allow-net --allow-env --allow-read ${denoEntry}`;
+        provisionLogs.push(`${nowIso()} INFO  deno: Prepared TypeScript server ${denoEntry}`);
+      } else if (fwLow.includes("next") || fwLow.includes("nuxt") || fwLow.includes("svelte") || fwLow.includes("astro") || fwLow.includes("remix") || fwLow.includes("nest")) {
+        const entryFallback = path2.join(siteRoot, "server.mjs");
+        if (!fs2.existsSync(path2.join(siteRoot, "package.json"))) {
+          fs2.writeFileSync(
+            path2.join(siteRoot, "package.json"),
+            JSON.stringify({ name: cleanName, version: "1.0.0", type: "module", scripts: { start: "node server.mjs" } }, null, 2)
+          );
+        }
+        if (!fs2.existsSync(entryFallback)) {
+          fs2.writeFileSync(
+            entryFallback,
+            `import http from 'http';
+const port = Number(process.env.PORT || ${port});
+http.createServer((req, res) => {
+  if (req.url === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', framework: '${fw}', domain: '${cleanDomain}', node: process.version }));
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(\`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;background:#090d16;color:#f8fafc;padding:48px"><div style="max-width:680px;margin:auto;background:#111827;border:1px solid #1f2937;border-radius:14px;padding:32px"><h1 style="color:#fb923c">${cleanDomain}</h1><p><strong>${tpl.name}</strong> đang chạy với Node \${process.version} sau FerrousX Reverse Proxy.</p><p style="color:#94a3b8;font-size:14px">Upstream Port: 127.0.0.1:\${port} · Database: ${dbCreatedName || "None"}</p></div></body></html>\`);
+}).listen(port, '127.0.0.1', () => console.log('Listening on 127.0.0.1:' + port));
+`
+          );
+        }
+        const nodeBin = (await execShellAsync("command -v node || echo /usr/bin/node")).stdout || "/usr/bin/node";
+        const candidateEntries = [
+          path2.join(siteRoot, ".next/standalone/server.js"),
+          path2.join(siteRoot, ".output/server/index.mjs"),
+          path2.join(siteRoot, "build/index.js"),
+          path2.join(siteRoot, "dist/server/entry.mjs"),
+          path2.join(siteRoot, "dist/main.js"),
+          entryFallback
+        ];
+        const chosenEntry = candidateEntries.find((p) => fs2.existsSync(p)) || entryFallback;
+        resolvedExecCmd = `${nodeBin} ${chosenEntry}`;
+        provisionLogs.push(`${nowIso()} INFO  node: Provisioned ${fw} entrypoint ${chosenEntry}`);
+      } else if (fwLow.includes("python") || fwLow.includes("fastapi") || fwLow.includes("django") || fwLow.includes("flask")) {
+        const venvDir = path2.join(siteRoot, ".venv");
+        const isDjango = fwLow.includes("django");
+        const isFlask = fwLow.includes("flask");
+        if (isVpsHost()) {
+          await execShellAsync(`if [ ! -x "${venvDir}/bin/python" ]; then python3 -m venv "${venvDir}"; fi`, 6e4);
+        }
+        const pyMain = path2.join(siteRoot, isFlask ? "app.py" : "main.py");
+        if (isDjango) {
+          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "django>=5.0\ngunicorn>=22.0\n");
+          if (isVpsHost()) {
+            const djPip = await execShellAsync(`"${venvDir}/bin/pip" install -q django gunicorn >/dev/null 2>&1 && if [ ! -f "${siteRoot}/manage.py" ]; then "${venvDir}/bin/django-admin" startproject config "${siteRoot}"; fi`, 15e4);
+            if (djPip.ok && fs2.existsSync(path2.join(siteRoot, "config/settings.py"))) {
+              await execShellAsync(`sed -i "s/ALLOWED_HOSTS = \\[\\]/ALLOWED_HOSTS = ['*']/" "${siteRoot}/config/settings.py" && "${venvDir}/bin/python" "${siteRoot}/manage.py" migrate --noinput >/dev/null 2>&1 || true`, 3e4);
+              resolvedExecCmd = `${venvDir}/bin/gunicorn config.wsgi:application --bind 127.0.0.1:${port} --workers 2`;
+              provisionLogs.push(`${nowIso()} INFO  django: Initialized Django 5 project & Gunicorn in .venv`);
+            }
+          }
+        } else if (isFlask) {
+          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "flask>=3.0\ngunicorn>=22.0\n");
+          if (!fs2.existsSync(pyMain)) {
+            fs2.writeFileSync(pyMain, `from flask import Flask, jsonify\napp = Flask(__name__)\n@app.route("/")\ndef index():\n    return "<h1>${cleanDomain} — Flask 3 + FerrousX Ready</h1>"\n@app.route("/api/health")\ndef health():\n    return jsonify(status="ok", framework="Flask 3", domain="${cleanDomain}")\n`);
+          }
+          if (isVpsHost()) {
+            const flPip = await execShellAsync(`"${venvDir}/bin/pip" install -q flask gunicorn >/dev/null 2>&1`, 12e4);
+            if (flPip.ok) {
+              resolvedExecCmd = `${venvDir}/bin/gunicorn app:app --bind 127.0.0.1:${port} --workers 2`;
+              provisionLogs.push(`${nowIso()} INFO  flask: Installed Flask + Gunicorn in .venv`);
+            }
+          }
+        } else {
+          fs2.writeFileSync(path2.join(siteRoot, "requirements.txt"), "fastapi>=0.115\nuvicorn>=0.30\n");
+          if (!fs2.existsSync(pyMain)) {
+            fs2.writeFileSync(pyMain, `from fastapi import FastAPI\nfrom fastapi.responses import HTMLResponse\napp = FastAPI(title="${cleanDomain}")\n@app.get("/", response_class=HTMLResponse)\ndef home():\n    return "<h1>${cleanDomain} — Python FastAPI + FerrousX Ready</h1><p><a href='/docs'>Swagger /docs</a></p>"\n@app.get("/api/health")\ndef health():\n    return {"status": "ok", "framework": "FastAPI", "domain": "${cleanDomain}"}\n`);
+          }
+          if (isVpsHost()) {
+            const faPip = await execShellAsync(`"${venvDir}/bin/pip" install -q fastapi uvicorn >/dev/null 2>&1`, 12e4);
+            if (faPip.ok) {
+              resolvedExecCmd = `${venvDir}/bin/uvicorn main:app --host 127.0.0.1 --port ${port}`;
+              provisionLogs.push(`${nowIso()} INFO  fastapi: Installed FastAPI + Uvicorn in .venv`);
+            }
+          }
+        }
+        // Offline / fallback WSGI/HTTP server in case pip had network restriction
+        if (!resolvedExecCmd.includes("uvicorn") && !resolvedExecCmd.includes("gunicorn") || (isVpsHost() && !fs2.existsSync(`${venvDir}/bin/uvicorn`) && !fs2.existsSync(`${venvDir}/bin/gunicorn`))) {
+          const fallbackPy = path2.join(siteRoot, "ferrous_fallback.py");
+          fs2.writeFileSync(fallbackPy, `import os, json\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nclass H(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.send_header('Content-Type', 'text/html; charset=utf-8')\n        self.end_headers()\n        self.wfile.write(b"<h1>${cleanDomain} (${fw}) - Python Ready</h1>")\nHTTPServer(('127.0.0.1', int(os.environ.get('PORT', ${port}))), H).serve_forever()\n`);
+          const pyBin = fs2.existsSync(`${venvDir}/bin/python`) ? `${venvDir}/bin/python` : "/usr/bin/python3";
+          resolvedExecCmd = `${pyBin} ${fallbackPy}`;
+        }
+      } else if (fwLow.includes("go /") || fwLow.includes("fiber") || fwLow.includes("gin")) {
+        const binDir = path2.join(siteRoot, "bin");
+        fs2.mkdirSync(binDir, { recursive: true });
+        const binOut = path2.join(binDir, "server");
+        if (!fs2.existsSync(path2.join(siteRoot, "go.mod"))) {
+          fs2.writeFileSync(path2.join(siteRoot, "go.mod"), `module ${cleanName}\n\ngo 1.21\n`);
+          fs2.writeFileSync(
+            path2.join(siteRoot, "main.go"),
+            `package main
+import (
+\t"fmt"
+\t"net/http"
+\t"os"
+)
+func main() {
+\tport := os.Getenv("PORT")
+\tif port == "" { port = "${port}" }
+\thttp.HandleFunc("/api/health", func(w http.ResponseWriter, r *http.Request) {
+\t\tw.Header().Set("Content-Type", "application/json")
+\t\tfmt.Fprintf(w, "{\\"status\\":\\"ok\\",\\"framework\\":\\"${fw}\\",\\"domain\\":\\"${cleanDomain}\\"}")
+\t})
+\thttp.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+\t\tw.Header().Set("Content-Type", "text/html; charset=utf-8")
+\t\tfmt.Fprintf(w, "<h1>${cleanDomain} — ${fw} + FerrousX Ready</h1>")
+\t})
+\thttp.ListenAndServe("127.0.0.1:"+port, nil)
+}
+`
+          );
+        }
+        if (isVpsHost()) {
+          const goRes = await execShellAsync(`cd "${siteRoot}" && go build -o "${binOut}" .`, 9e4);
+          provisionLogs.push(`${nowIso()} ${goRes.ok ? "INFO" : "WARN"}  go: Compiled ${binOut}`);
+        }
+        resolvedExecCmd = binOut;
+      } else if (fwLow.includes("rust") || fwLow.includes("actix") || fwLow.includes("axum") || fwLow.includes("rocket")) {
+        const targetDir = path2.join(siteRoot, "target/release");
+        fs2.mkdirSync(path2.join(siteRoot, "src"), { recursive: true });
+        fs2.mkdirSync(targetDir, { recursive: true });
+        const binOut = path2.join(targetDir, cleanName);
+        if (!fs2.existsSync(path2.join(siteRoot, "Cargo.toml"))) {
+          const depLine = fwLow.includes("axum") ? 'axum = "0.7"\ntokio = { version = "1", features = ["full"] }' : fwLow.includes("rocket") ? 'rocket = "0.5"' : 'actix-web = "4.9"';
+          fs2.writeFileSync(path2.join(siteRoot, "Cargo.toml"), `[package]\nname = "${cleanName}"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n${depLine}\n`);
+          fs2.writeFileSync(
+            path2.join(siteRoot, "src/main.rs"),
+            `use std::io::{Read, Write};\nuse std::net::TcpListener;\nfn main() {\n    let port = std::env::var("PORT").unwrap_or_else(|_| "${port}".to_string());\n    let listener = TcpListener::bind(format!("127.0.0.1:{}", port)).expect("bind failed");\n    for stream in listener.incoming().flatten() {\n        let mut s = stream;\n        let mut buf = [0u8; 1024];\n        let _ = s.read(&mut buf);\n        let body = "<h1>${cleanDomain} — ${fw} Native Rust + FerrousX Ready</h1>";\n        let resp = format!("HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n{}", body.len(), body);\n        let _ = s.write_all(resp.as_bytes());\n    }\n}\n`
+          );
+        }
+        if (isVpsHost()) {
+          const rsRes = await execShellAsync(`rustc -O "${path2.join(siteRoot, "src/main.rs")}" -o "${binOut}"`, 9e4);
+          provisionLogs.push(`${nowIso()} ${rsRes.ok ? "INFO" : "WARN"}  rust: Compiled native release binary ${binOut}`);
+        }
+        resolvedExecCmd = binOut;
+      } else if (fwLow.includes("java") || fwLow.includes("spring")) {
+        const targetDir = path2.join(siteRoot, "target");
+        const srcDir = path2.join(siteRoot, "src/main/java");
+        fs2.mkdirSync(targetDir, { recursive: true });
+        fs2.mkdirSync(srcDir, { recursive: true });
+        const jarOut = path2.join(targetDir, "app.jar");
+        if (!fs2.existsSync(path2.join(srcDir, "Main.java"))) {
+          fs2.writeFileSync(
+            path2.join(srcDir, "Main.java"),
+            `import com.sun.net.httpserver.HttpServer;\nimport java.io.OutputStream;\nimport java.net.InetSocketAddress;\nimport java.nio.charset.StandardCharsets;\npublic class Main {\n  public static void main(String[] args) throws Exception {\n    int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "${port}"));\n    HttpServer srv = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);\n    srv.createContext("/", ex -> {\n      byte[] b = "<h1>${cleanDomain} — Java 21 + FerrousX Ready</h1>".getBytes(StandardCharsets.UTF_8);\n      ex.getResponseHeaders().add("Content-Type", "text/html; charset=utf-8");\n      ex.sendResponseHeaders(200, b.length);\n      try (OutputStream os = ex.getResponseBody()) { os.write(b); }\n    });\n    srv.start();\n  }\n}\n`
+          );
+        }
+        if (isVpsHost()) {
+          const jRes = await execShellAsync(`cd "${srcDir}" && javac Main.java && jar cfe "${jarOut}" Main Main.class`, 6e4);
+          provisionLogs.push(`${nowIso()} ${jRes.ok ? "INFO" : "WARN"}  java: Packaged ${jarOut}`);
+        }
+        const javaBin = (await execShellAsync("command -v java || echo /usr/bin/java")).stdout || "/usr/bin/java";
+        resolvedExecCmd = `${javaBin} -XX:+UseZGC -jar ${jarOut}`;
+      } else if (fwLow.includes(".net") || fwLow.includes("c#")) {
+        const pubDir = path2.join(siteRoot, "publish");
+        fs2.mkdirSync(pubDir, { recursive: true });
+        if (isVpsHost() && !fs2.existsSync(path2.join(siteRoot, "app.csproj"))) {
+          const dnRes = await execShellAsync(`cd "${siteRoot}" && dotnet new web --name app --force >/dev/null 2>&1 && dotnet publish -c Release -o "${pubDir}" >/dev/null 2>&1`, 18e4);
+          provisionLogs.push(`${nowIso()} ${dnRes.ok ? "INFO" : "WARN"}  dotnet: Published ASP.NET Core 8 app to ${pubDir}`);
+        }
+        const dotnetBin = (await execShellAsync("command -v dotnet || echo /usr/bin/dotnet")).stdout || "/usr/bin/dotnet";
+        resolvedExecCmd = `${dotnetBin} ${pubDir}/app.dll --urls http://127.0.0.1:${port}`;
+      } else if (fwLow.includes("ruby") || fwLow.includes("rails")) {
+        const rbFile = path2.join(siteRoot, "app.rb");
+        if (!fs2.existsSync(path2.join(siteRoot, "Gemfile"))) {
+          fs2.writeFileSync(path2.join(siteRoot, "Gemfile"), `source "https://rubygems.org"\n`);
+        }
+        if (!fs2.existsSync(rbFile)) {
+          fs2.writeFileSync(
+            rbFile,
+            `require 'socket'\nport = (ENV['PORT'] || '${port}').to_i\nserver = TCPServer.new('127.0.0.1', port)\nloop do\n  client = server.accept\n  _req = client.gets\n  body = "<h1>${cleanDomain} — Ruby + FerrousX Ready</h1>"\n  client.print "HTTP/1.1 200 OK\\r\\nContent-Type: text/html; charset=utf-8\\r\\nContent-Length: #{body.bytesize}\\r\\nConnection: close\\r\\n\\r\\n#{body}"\n  client.close\nend\n`
+          );
+        }
+        const rubyBin = (await execShellAsync("command -v ruby || echo /usr/bin/ruby")).stdout || "/usr/bin/ruby";
+        resolvedExecCmd = `${rubyBin} ${rbFile}`;
+        provisionLogs.push(`${nowIso()} INFO  ruby: Prepared Ruby server ${rbFile}`);
+      }
     }
 
-    const preset = tpl.framework === "PHP 8.3-FPM" ? (isWordPress ? "wordpress" : "laravel") : tpl.framework === "Next.js 15 (React SSR)" ? "nextjs_proxy" : tpl.framework === "Nuxt 3 (Vue 3 SSR)" ? "nuxt_nitro" : tpl.framework === "SvelteKit 2 (Svelte 5)" ? "sveltekit_node" : tpl.framework === "Astro 5 (Hybrid / Static)" ? "astro_hybrid" : tpl.framework === "Vite + React 19 / Vue 3 SPA" ? "spa_history" : "rust_proxy";
+    const preset = getPresetForFw(fw, tpl.id);
     const newSite = {
       id: appId,
       name: cleanName,
-      framework: tpl.framework,
+      framework: fw,
       webServerEngine: selectedWebServer,
       runtimeVersion: tpl.version,
       domain: cleanDomain,
       aliases: [`www.${cleanDomain}`],
       internalPort: port,
       workingDir: siteRoot,
-      runSubDir: isLaravel ? "/public" : "/",
-      execCommand: tpl.execCommandTemplate.replace(/\$DOMAIN/g, cleanDomain),
+      runSubDir: resolvedRunSubDir,
+      execCommand: resolvedExecCmd,
       workers: 4,
       memoryLimitMb: 512,
       memoryUsedMb: 28,
@@ -2760,7 +3302,7 @@ require_once ABSPATH . 'wp-settings.php';
       websocketEnabled: true,
       rateLimitRps: 120,
       requestsPerSec: 45,
-      p99LatencyMs: tpl.framework.includes("Rust") ? 1.4 : 4.2,
+      p99LatencyMs: fw.includes("Rust") ? 1.4 : 4.2,
       uptimeSeconds: 5,
       diskUsedMb: isWordPress ? 64 : 24,
       diskQuotaMb: 5120,
@@ -2774,7 +3316,7 @@ require_once ABSPATH . 'wp-settings.php';
       lastDeployCommit: `1-Click Template (${tpl.name})`,
       lastDeployTime: "Vừa xong",
       urlRewritePreset: preset,
-      urlRewriteRules: REWRITE_TEMPLATES[preset],
+      urlRewriteRules: REWRITE_TEMPLATES[preset] || REWRITE_TEMPLATES.api_proxy,
       envVars: [
         { key: "PORT", value: String(port) },
         { key: "DB_HOST", value: "127.0.0.1" },
@@ -2790,14 +3332,9 @@ require_once ABSPATH . 'wp-settings.php';
       ]
     };
 
-    // 4. Sync VHost files & reload FerrousX / Nginx + PHP-FPM
-    syncArchitectureForApp(newSite);
-    if (selectedWebServer === "FerrousX (Rust Web Server)") {
-      await execShellAsync("ferrousx-ctl reload 2>/dev/null || systemctl kill -s HUP ferrousx.service 2>/dev/null || true");
-    } else {
-      await execShellAsync("nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true");
-    }
-    await execShellAsync("systemctl reload php8.3-fpm 2>/dev/null || true");
+    managedApps.unshift(newSite);
+    persistManagedApps();
+    await activateSystemdAndReload(newSite, selectedWebServer, newSite.logs);
 
     if (wpConfigContent) {
       webFiles.push({
@@ -2831,11 +3368,11 @@ require_once ABSPATH . 'wp-settings.php';
 Deployed via FerrousPanel 1-Click Installer
 Template: ${tpl.name}
 Web Root: ${siteRoot}
+Upstream Port: ${port}
 Database: ${dbCreatedName || "None"}
 DB User: ${dbCreatedUser || "None"}
 `
     });
-    managedApps.unshift(newSite);
     persistManagedApps();
     if (dbCreatedName) {
       persistSqlDatabases();
@@ -2942,12 +3479,12 @@ DB User: ${dbCreatedUser || "None"}
     syncArchitectureForApp(appItem);
     res.json(appItem);
   });
-  app.post("/api/apps/:id/action", (req, res) => {
+  app.post("/api/apps/:id/action", async (req, res) => {
     const { id } = req.params;
     const { action } = req.body;
     const appItem = managedApps.find((a) => a.id === id);
     if (!appItem) {
-      res.status(404).json({ error: "Kh\xF4ng t\xECm th\u1EA5y d\u1ECBch v\u1EE5" });
+      res.status(404).json({ error: "Không tìm thấy dịch vụ" });
       return;
     }
     const validAction = action === "stop" || action === "start" || action === "rebuild" ? action : "restart";
@@ -2958,6 +3495,13 @@ DB User: ${dbCreatedUser || "None"}
       appItem.workingDir
     );
     const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (isVpsHost() && fs2.existsSync(`/etc/systemd/system/${appItem.name}.service`)) {
+      if (validAction === "rebuild" && appItem.buildScript && fs2.existsSync(appItem.workingDir)) {
+        await execShellAsync(`cd "${appItem.workingDir}" && ${appItem.buildScript}`, 12e4);
+      }
+      const verb = validAction === "rebuild" ? "restart" : validAction;
+      await execShellAsync(`systemctl ${verb} "${appItem.name}.service"`, 2e4);
+    }
     if (validAction === "stop") {
       appItem.status = "stopped";
       appItem.pid = null;
@@ -2975,11 +3519,12 @@ DB User: ${dbCreatedUser || "None"}
       appItem.requestsPerSec = appItem.framework.includes("Rust") ? 890 : 310;
       appItem.uptimeSeconds = 1;
       appItem.logs.push(
-        `${now} INFO  [RustCoreManager::SYSTEMD]: ${execEnvelope.kernelSyscallTrace.join(" | ")} (${execEnvelope.executionTimeUs}\xB5s)`
+        `${now} INFO  [RustCoreManager::SYSTEMD]: ${execEnvelope.kernelSyscallTrace.join(" | ")} (${execEnvelope.executionTimeUs}µs)`
       );
     }
     syncArchitectureForApp(appItem);
     persistManagedApps();
+    await reloadWebServerAndPhp(appItem.webServerEngine || "FerrousX (Rust Web Server)", appItem.logs);
     res.json(appItem);
   });
   app.put("/api/apps/:id/config", (req, res) => {
@@ -3126,14 +3671,22 @@ DB User: ${dbCreatedUser || "None"}
     persistManagedApps();
     res.json(appItem);
   });
-  app.delete("/api/apps/:id", (req, res) => {
+  app.delete("/api/apps/:id", async (req, res) => {
     const idx = managedApps.findIndex((a) => a.id === req.params.id);
     if (idx === -1) {
       res.status(404).json({ error: "Website not found" });
       return;
     }
-    managedApps.splice(idx, 1);
+    const [removed] = managedApps.splice(idx, 1);
+    if (isVpsHost() && removed) {
+      await execShellAsync(`systemctl disable --now "${removed.name}.service" 2>/dev/null || true`, 1e4);
+      try { fs2.unlinkSync(`/etc/systemd/system/${removed.name}.service`); } catch {}
+      try { fs2.unlinkSync(`/www/server/panel/vhost/ferrousx/${removed.domain}.conf`); } catch {}
+      try { fs2.unlinkSync(`/www/server/panel/vhost/nginx/${removed.domain}.conf`); } catch {}
+      await execShellAsync("systemctl daemon-reload 2>/dev/null || true", 1e4);
+    }
     persistManagedApps();
+    await reloadWebServerAndPhp(removed?.webServerEngine || "FerrousX (Rust Web Server)", []);
     const enriched = managedApps.map((a) => ({
       ...a,
       systemdUnit: generateSystemdUnit(a),
@@ -3144,36 +3697,64 @@ DB User: ${dbCreatedUser || "None"}
   app.get("/api/software", (_req, res) => {
     res.json(serverPackages);
   });
-  app.post("/api/software/:id/action", (req, res) => {
+  app.post("/api/software/:id/action", async (req, res) => {
     const pkg = serverPackages.find((p) => p.id === req.params.id);
     const { action } = req.body;
     const now = (/* @__PURE__ */ new Date()).toISOString();
     if (pkg) {
+      const runtimeMapByPkg = {
+        "pkg-python": "Python / FastAPI",
+        "pkg-golang": "Go / Fiber",
+        "pkg-java": "Java 21 / Spring Boot 3",
+        "pkg-dotnet": "C# / .NET 8 ASP.NET Core",
+        "pkg-ruby": "Ruby 3.3 / Rails & Elixir",
+        "pkg-deno": "Deno 2 (TypeScript / Fresh)",
+        "pkg-rust": "Actix-Web (Rust)",
+        "pkg-nodejs": "Next.js 15 (React SSR)",
+        "pkg-php-composer": "PHP 8.3-FPM"
+      };
       if (action === "stop") {
+        if (isVpsHost()) {
+          if (pkg.id === "pkg-ferrousx") await execShellAsync("systemctl stop ferrousx.service 2>/dev/null || true");
+          else if (pkg.id === "pkg-nginx") await execShellAsync("systemctl stop nginx 2>/dev/null || true");
+          else if (pkg.id === "pkg-php-composer") await execShellAsync("systemctl stop php8.3-fpm 2>/dev/null || true");
+          else if (pkg.id === "pkg-mariadb") await execShellAsync("systemctl stop mariadb 2>/dev/null || true");
+          else if (pkg.id === "pkg-postgres") await execShellAsync("systemctl stop postgresql 2>/dev/null || true");
+        }
         pkg.status = "stopped";
         pkg.memoryMb = 0;
         pkg.logs.push(`${now} WARN  systemd: Stopped package ${pkg.name}`);
       } else if (action === "start" || action === "restart") {
+        if (isVpsHost()) {
+          if (pkg.id === "pkg-ferrousx") await execShellAsync(`systemctl ${action} ferrousx.service 2>/dev/null || true`);
+          else if (pkg.id === "pkg-nginx") await execShellAsync(`systemctl ${action} nginx 2>/dev/null || true`);
+          else if (pkg.id === "pkg-php-composer") await execShellAsync(`systemctl ${action} php8.3-fpm 2>/dev/null || true`);
+          else if (pkg.id === "pkg-mariadb") await execShellAsync(`systemctl ${action} mariadb 2>/dev/null || true`);
+          else if (pkg.id === "pkg-postgres") await execShellAsync(`systemctl ${action} postgresql 2>/dev/null || true`);
+        }
         pkg.installed = true;
         pkg.status = "running";
         if (pkg.memoryMb === 0) {
-          pkg.memoryMb = pkg.isRustNative ? 22.4 : 85;
+          pkg.memoryMb = pkg.isRustNative ? 22.4 : 64;
         }
         pkg.logs.push(
           `${now} INFO  systemd: ${action === "restart" ? "Restarted" : "Started"} ${pkg.name} (Port ${pkg.port || "internal"})`
         );
       } else if (action === "install") {
+        if (runtimeMapByPkg[pkg.id]) {
+          await ensureRuntimeEnvironment(runtimeMapByPkg[pkg.id], pkg.logs);
+        }
         pkg.installed = true;
         pkg.status = "running";
-        pkg.memoryMb = pkg.isRustNative ? 20.5 : 92;
+        pkg.memoryMb = pkg.isRustNative ? 20.5 : 48;
         pkg.logs.push(
-          `${now} INFO  cargo-pkg: Installed & enabled ${pkg.name} (${pkg.version})`
+          `${now} INFO  env-manager: Installed & enabled ${pkg.name} (${pkg.version})`
         );
       } else if (action === "uninstall") {
         pkg.installed = false;
         pkg.status = "not_installed";
         pkg.memoryMb = 0;
-        pkg.logs.push(`${now} WARN  cargo-pkg: Uninstalled package ${pkg.name}`);
+        pkg.logs.push(`${now} WARN  env-manager: Uninstalled package ${pkg.name}`);
       }
     }
     res.json(serverPackages);

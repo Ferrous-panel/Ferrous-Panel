@@ -452,7 +452,8 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
               'Modern JS Frameworks',
               'Rust Backend',
               'PHP CMS / Framework',
-              'Python / Go'
+              'Python / Go',
+              'Enterprise & Systems'
             ].map((cat) => (
               <button
                 key={cat}
@@ -463,7 +464,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                     : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-800'
                 }`}
               >
-                {cat === 'ALL' ? 'Tất cả Framework & CMS' : cat}
+                {cat === 'ALL' ? 'Tất cả Framework & Ngôn ngữ' : cat}
               </button>
             ))}
           </div>
@@ -668,6 +669,12 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                   <span className="text-slate-500">Lệnh Build tự động:</span>
                   <span className="text-emerald-600 dark:text-emerald-400">
                     {selectedTpl.buildCommand}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Nạp môi trường tự động:</span>
+                  <span className="text-sky-600 dark:text-sky-400 text-right">
+                    Tự cài Runtime + Build + Systemd + FerrousX VHost
                   </span>
                 </div>
                 <div className="flex justify-between">

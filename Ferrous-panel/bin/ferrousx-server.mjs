@@ -24,6 +24,7 @@ import crypto from 'crypto';
 import { execSync } from 'child_process';
 
 const ADMIN_CONFIG_PATH = '/etc/ferrous-panel/admin.json';
+const MANAGED_APPS_PATH = '/etc/ferrous-panel/managed_apps.json';
 const SSL_CERT_PATH = '/etc/ferrousx/ssl/fullchain.pem';
 const SSL_KEY_PATH = '/etc/ferrousx/ssl/privkey.pem';
 const DEFAULT_PANEL_PORT = 3000;
@@ -62,7 +63,21 @@ function readPanelAdminConfig() {
   };
 }
 
+function readManagedApps() {
+  try {
+    if (fs.existsSync(MANAGED_APPS_PATH)) {
+      const raw = fs.readFileSync(MANAGED_APPS_PATH, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // ignore parse error
+  }
+  return [];
+}
+
 let panelConfig = readPanelAdminConfig();
+let managedAppsCache = readManagedApps();
 
 if (fs.existsSync(ADMIN_CONFIG_PATH)) {
   try {
@@ -75,6 +90,15 @@ if (fs.existsSync(ADMIN_CONFIG_PATH)) {
   } catch {
     // ignore watcher error
   }
+}
+
+try {
+  fs.watchFile(MANAGED_APPS_PATH, { interval: 1500 }, () => {
+    managedAppsCache = readManagedApps();
+    console.log(`[FerrousX] Reloaded ${managedAppsCache.length} managed site routes`);
+  });
+} catch {
+  // ignore watcher error
 }
 
 function ensureSslCertificates() {
@@ -117,13 +141,62 @@ function ensureSslCertificates() {
 ensureSslCertificates();
 
 /**
- * Resolve active PHP-FPM Unix socket
+ * Resolve active PHP-FPM Unix socket (preferring specific version if requested)
  */
-function findPhpFpmSocket() {
+function findPhpFpmSocket(preferredVer) {
+  if (preferredVer && preferredVer !== 'None') {
+    const specific = `/run/php/php${preferredVer}-fpm.sock`;
+    if (fs.existsSync(specific)) return specific;
+  }
   for (const sock of PHP_FPM_SOCK_CANDIDATES) {
     if (fs.existsSync(sock)) return sock;
   }
   return null;
+}
+
+function findManagedAppByHost(hostHeader) {
+  if (!hostHeader) return null;
+  const matchFn = (apps) =>
+    apps.find((a) => {
+      const dom = String(a.domain || '').toLowerCase();
+      if (dom === hostHeader || `www.${dom}` === hostHeader) return true;
+      if (Array.isArray(a.aliases)) {
+        return a.aliases.some((al) => String(al || '').toLowerCase() === hostHeader);
+      }
+      return false;
+    }) || null;
+
+  let matched = matchFn(managedAppsCache);
+  if (!matched) {
+    managedAppsCache = readManagedApps();
+    matched = matchFn(managedAppsCache);
+  }
+  return matched;
+}
+
+function isPhpManagedApp(appSpec) {
+  if (!appSpec) return false;
+  if (appSpec.phpVersion && appSpec.phpVersion !== 'None') return true;
+  const fw = String(appSpec.framework || '').toLowerCase();
+  return fw.includes('php') || appSpec.urlRewritePreset === 'wordpress' || appSpec.urlRewritePreset === 'laravel';
+}
+
+function isStaticSpaManagedApp(appSpec) {
+  if (!appSpec) return false;
+  const fw = String(appSpec.framework || '').toLowerCase();
+  return (
+    fw.includes('static') ||
+    fw.includes('vite') ||
+    appSpec.urlRewritePreset === 'spa_history' ||
+    Number(appSpec.internalPort) === 80
+  );
+}
+
+function resolveAppDocRoot(appSpec) {
+  const base = appSpec.workingDir || `/www/wwwroot/${appSpec.domain}`;
+  const sub = appSpec.runSubDir && appSpec.runSubDir !== '/' ? appSpec.runSubDir.replace(/^\/+/, '') : '';
+  const joined = sub ? path.join(base, sub) : base;
+  return fs.existsSync(joined) ? joined : base;
 }
 
 /**
@@ -160,8 +233,8 @@ function encodeFcgiParams(params) {
   return Buffer.concat(chunks);
 }
 
-function executePhpFpm(req, res, scriptFilename, documentRoot, queryString) {
-  const sockPath = findPhpFpmSocket();
+function executePhpFpm(req, res, scriptFilename, documentRoot, queryString, preferredPhpVer) {
+  const sockPath = findPhpFpmSocket(preferredPhpVer);
   if (!sockPath) {
     res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('503 Service Unavailable: PHP-FPM Unix socket not found.');
@@ -316,21 +389,48 @@ function handleRequest(req, res) {
     return;
   }
 
-  // Route 2: Static site or PHP Website in /www/wwwroot/<host> (excluding Panel domain)
-  let siteRoot = path.join('/www/wwwroot', hostHeader);
-  if (!fs.existsSync(siteRoot) && hostHeader.startsWith('www.')) {
-    const apexRoot = path.join('/www/wwwroot', hostHeader.slice(4));
-    if (fs.existsSync(apexRoot)) siteRoot = apexRoot;
-  }
-  if (
-    hostHeader &&
-    hostHeader !== '127.0.0.1' &&
-    hostHeader !== 'localhost' &&
-    hostHeader !== configuredDomain &&
-    fs.existsSync(siteRoot)
-  ) {
-    serveWebsite(req, res, siteRoot);
-    return;
+  // Route 2: Managed Websites (Reverse Proxy SSR/API, PHP-FPM, or Static/SPA)
+  if (hostHeader && hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== configuredDomain) {
+    const matchedApp = findManagedAppByHost(hostHeader);
+    if (matchedApp) {
+      if (matchedApp.status === 'stopped') {
+        res.writeHead(503, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<h1>503 Service Paused — ${matchedApp.domain}</h1><p>Website is currently stopped in FerrousPanel.</p>`);
+        return;
+      }
+
+      if (isPhpManagedApp(matchedApp)) {
+        const docRoot = resolveAppDocRoot(matchedApp);
+        if (fs.existsSync(docRoot)) {
+          serveWebsite(req, res, docRoot, { isSpa: false, phpVersion: matchedApp.phpVersion });
+          return;
+        }
+      } else if (isStaticSpaManagedApp(matchedApp)) {
+        const docRoot = resolveAppDocRoot(matchedApp);
+        if (fs.existsSync(docRoot)) {
+          serveWebsite(req, res, docRoot, { isSpa: true });
+          return;
+        }
+      } else if (Number(matchedApp.internalPort) > 0 && Number(matchedApp.internalPort) !== 80 && Number(matchedApp.internalPort) !== 443) {
+        // Reverse Proxy to Polyglot Upstream (Rust, Next.js, Nuxt, SvelteKit, Astro, Remix, NestJS, Bun, Deno, Python, Go, Java, .NET, Ruby)
+        proxyHttp(req, res, '127.0.0.1', Number(matchedApp.internalPort));
+        return;
+      }
+    }
+
+    // Fallback: direct folder lookup in /www/wwwroot/<host> (for manually dropped static/PHP sites)
+    let siteRoot = path.join('/www/wwwroot', hostHeader);
+    if (!fs.existsSync(siteRoot) && hostHeader.startsWith('www.')) {
+      const apexRoot = path.join('/www/wwwroot', hostHeader.slice(4));
+      if (fs.existsSync(apexRoot)) siteRoot = apexRoot;
+    }
+    if (fs.existsSync(siteRoot)) {
+      const publicSub = path.join(siteRoot, 'public', 'index.php');
+      const rootPhp = path.join(siteRoot, 'index.php');
+      const resolvedRoot = !fs.existsSync(rootPhp) && fs.existsSync(publicSub) ? path.join(siteRoot, 'public') : siteRoot;
+      serveWebsite(req, res, resolvedRoot, { isSpa: false });
+      return;
+    }
   }
 
   // Route 3: Panel UI & API (Default or configured customDomain)
@@ -354,7 +454,7 @@ function proxyHttp(req, res, targetHost, targetPort) {
     'x-forwarded-for': req.headers['x-forwarded-for']
       ? `${req.headers['x-forwarded-for']}, ${clientIp}`
       : clientIp,
-    'x-forwarded-proto': req.socket.encrypted ? 'https' : 'http',
+    'x-forwarded-proto': req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http'),
     'x-forwarded-host': req.headers.host || '',
     connection: 'keep-alive'
   };
@@ -366,7 +466,7 @@ function proxyHttp(req, res, targetHost, targetPort) {
       path: req.url,
       method: req.method,
       headers: proxyHeaders,
-      timeout: 60000
+      timeout: 120000
     },
     (targetRes) => {
       res.writeHead(targetRes.statusCode || 200, targetRes.headers);
@@ -387,7 +487,7 @@ function proxyHttp(req, res, targetHost, targetPort) {
             <p>Dịch vụ đích tại cổng <code>${targetPort}</code> chưa sẵn sàng phản hồi.</p>
             <p style="color:#94a3b8;font-size:13px">Target: ${targetHost}:${targetPort} | Lỗi: ${err.message}</p>
             <hr style="border:none;border-top:1px solid #334155;margin:20px 0">
-            <p style="font-size:13px;color:#38bdf8">Khắc phục: Chạy lệnh <code>fp 21</code> trên SSH Terminal để sửa chữa FerrousX + Panel + phpMyAdmin.</p>
+            <p style="font-size:13px;color:#38bdf8">Khắc phục: Kiểm tra dịch vụ systemd của website hoặc chạy <code>fp 21</code> trên SSH Terminal nếu là lỗi Panel.</p>
           </div>
         </body>
         </html>
@@ -399,11 +499,21 @@ function proxyHttp(req, res, targetHost, targetPort) {
 }
 
 /**
- * Handle WebSocket / Raw TCP Upgrade tunneling
+ * Handle WebSocket / Raw TCP Upgrade tunneling (Panel + Proxied Apps)
  */
 function handleUpgrade(req, clientSocket, head) {
-  const panelPort = Number(panelConfig.panelPort) || DEFAULT_PANEL_PORT;
-  const targetSocket = net.connect(panelPort, '127.0.0.1', () => {
+  const hostHeader = (req.headers.host || '').split(':')[0].toLowerCase();
+  const configuredDomain = (panelConfig.customDomain || '').toLowerCase();
+  let targetPort = Number(panelConfig.panelPort) || DEFAULT_PANEL_PORT;
+
+  if (hostHeader && hostHeader !== '127.0.0.1' && hostHeader !== 'localhost' && hostHeader !== configuredDomain) {
+    const matchedApp = findManagedAppByHost(hostHeader);
+    if (matchedApp && Number(matchedApp.internalPort) > 0 && !isPhpManagedApp(matchedApp) && !isStaticSpaManagedApp(matchedApp)) {
+      targetPort = Number(matchedApp.internalPort);
+    }
+  }
+
+  const targetSocket = net.connect(targetPort, '127.0.0.1', () => {
     targetSocket.write(
       `${req.method} ${req.url} HTTP/${req.httpVersion}\r\n` +
         Object.entries(req.headers)
@@ -423,11 +533,19 @@ function handleUpgrade(req, clientSocket, head) {
 }
 
 /**
- * Static file & PHP-FPM Website handler for /www/wwwroot/<domain>
+ * Static file, SPA HTML5 History & PHP-FPM Website handler
  */
-function serveWebsite(req, res, siteRoot) {
+function serveWebsite(req, res, siteRoot, opts = {}) {
   const parsedUrl = new URL(req.url || '/', 'http://localhost');
   let relPath = decodeURIComponent(parsedUrl.pathname);
+
+  // Protect sensitive dotfiles (.env, .git, .htaccess)
+  if (/\/\.(env|git|svn|htaccess|htpasswd)/i.test(relPath)) {
+    res.writeHead(403, { 'Content-Type': 'text/plain' });
+    res.end('403 Forbidden');
+    return;
+  }
+
   if (relPath.endsWith('/')) {
     const idxPhp = path.join(siteRoot, relPath, 'index.php');
     const idxHtml = path.join(siteRoot, relPath, 'index.html');
@@ -451,7 +569,13 @@ function serveWebsite(req, res, siteRoot) {
   if (!fs.existsSync(filePath)) {
     const phpFallback = path.join(siteRoot, 'index.php');
     if (fs.existsSync(phpFallback)) {
-      executePhpFpm(req, res, phpFallback, siteRoot, parsedUrl.search.slice(1));
+      executePhpFpm(req, res, phpFallback, siteRoot, parsedUrl.search.slice(1), opts.phpVersion);
+      return;
+    }
+    const htmlFallback = path.join(siteRoot, 'index.html');
+    if (opts.isSpa && !path.extname(parsedUrl.pathname) && fs.existsSync(htmlFallback)) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      fs.createReadStream(htmlFallback).pipe(res);
       return;
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -472,7 +596,7 @@ function serveWebsite(req, res, siteRoot) {
     }
 
     if (filePath.endsWith('.php')) {
-      executePhpFpm(req, res, filePath, siteRoot, parsedUrl.search.slice(1));
+      executePhpFpm(req, res, filePath, siteRoot, parsedUrl.search.slice(1), opts.phpVersion);
       return;
     }
 
@@ -481,7 +605,9 @@ function serveWebsite(req, res, siteRoot) {
       '.htm': 'text/html; charset=utf-8',
       '.css': 'text/css; charset=utf-8',
       '.js': 'application/javascript; charset=utf-8',
+      '.mjs': 'application/javascript; charset=utf-8',
       '.json': 'application/json; charset=utf-8',
+      '.wasm': 'application/wasm',
       '.png': 'image/png',
       '.jpg': 'image/jpeg',
       '.jpeg': 'image/jpeg',
@@ -489,6 +615,7 @@ function serveWebsite(req, res, siteRoot) {
       '.webp': 'image/webp',
       '.svg': 'image/svg+xml',
       '.ico': 'image/x-icon',
+      '.woff': 'font/woff',
       '.woff2': 'font/woff2'
     };
     const ext = path.extname(filePath).toLowerCase();
@@ -497,7 +624,7 @@ function serveWebsite(req, res, siteRoot) {
     res.writeHead(200, {
       'Content-Type': contentType,
       'Content-Length': fs.statSync(filePath).size,
-      'Cache-Control': 'public, max-age=3600'
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=3600'
     });
     fs.createReadStream(filePath).pipe(res);
   } catch (err) {
@@ -568,6 +695,7 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 process.on('SIGHUP', () => {
-  console.log('[FerrousX] Received SIGHUP. Reloading configuration & certificates...');
+  console.log('[FerrousX] Received SIGHUP. Reloading configuration, routes & certificates...');
   panelConfig = readPanelAdminConfig();
+  managedAppsCache = readManagedApps();
 });
