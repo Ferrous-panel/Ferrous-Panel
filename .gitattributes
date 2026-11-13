@@ -1,0 +1,19 @@
+# ==============================================================================
+# Ferrous Panel — GitHub Linguist & Polyglot Language Attribution
+# Prioritizes Rust (.rs), C11 ABI (.c/.h), Python 3 (.py), SQL (.sql), & Shell
+# ==============================================================================
+
+# Core Systems Languages (Explicitly Detectable)
+*.rs linguist-detectable=true linguist-language=Rust
+*.c linguist-detectable=true linguist-language=C
+*.h linguist-detectable=true linguist-language=C
+*.py linguist-detectable=true linguist-language=Python
+*.sql linguist-detectable=true linguist-language=SQL
+*.sh linguist-detectable=true linguist-language=Shell
+*.toml linguist-detectable=true linguist-language=TOML
+
+# Mark WebView UI Templates & Seed Assets as Generated/Vendored for GitHub Stats
+src/components/*.tsx linguist-generated=true
+Ferrous-panel/config/*.json linguist-generated=true
+*.lock linguist-generated=true
+dist/** linguist-generated=true
