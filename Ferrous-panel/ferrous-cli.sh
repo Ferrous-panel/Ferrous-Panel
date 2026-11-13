@@ -123,8 +123,71 @@ EOF_PMA_CFG
   sudo chmod -R 755 /www/server/phpmyadmin 2>/dev/null || true
   sudo chmod 777 /var/lib/phpmyadmin/tmp 2>/dev/null || true
 
-  echo "[3/5] Khởi tạo Systemd Service cho phpMyAdmin trên cổng 888 (ferrous-pma.service)..."
-  sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<'EOF_PMA_SVC'
+  echo "[3/5] Khởi tạo Router /phpadmin & Systemd Service cho phpMyAdmin trên cổng 888 (ferrous-pma.service)..."
+  sudo tee /www/server/phpmyadmin/ferrous_router.php > /dev/null <<'EOF_PMA_ROUTER'
+<?php
+$uriPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+if (preg_match('#^/(phpadmin|phpmyadmin)$#i', $uriPath)) {
+    header('Location: ' . $uriPath . '/', true, 302);
+    exit;
+}
+if (preg_match('#^/(phpadmin|phpmyadmin)(/.*)$#i', $uriPath, $matches)) {
+    $prefix = '/' . $matches[1];
+    $rel = $matches[2];
+    if ($rel === '' || $rel === '/') {
+        $rel = '/index.php';
+    }
+    $target = realpath(__DIR__ . $rel);
+    $root = realpath(__DIR__);
+    if ($target === false || strpos($target, $root) !== 0) {
+        http_response_code(404);
+        echo '404 Not Found';
+        return true;
+    }
+    if (is_dir($target)) {
+        $target .= DIRECTORY_SEPARATOR . 'index.php';
+        $rel = rtrim($rel, '/') . '/index.php';
+    }
+    if (!is_file($target)) {
+        http_response_code(404);
+        echo '404 Not Found';
+        return true;
+    }
+    $ext = strtolower(pathinfo($target, PATHINFO_EXTENSION));
+    if ($ext === 'php') {
+        $_SERVER['SCRIPT_NAME'] = $prefix . $rel;
+        $_SERVER['PHP_SELF'] = $prefix . $rel;
+        chdir(dirname($target));
+        require $target;
+        return true;
+    }
+    $mimeMap = [
+        'css' => 'text/css; charset=utf-8',
+        'js' => 'application/javascript; charset=utf-8',
+        'json' => 'application/json; charset=utf-8',
+        'png' => 'image/png',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'svg' => 'image/svg+xml',
+        'ico' => 'image/x-icon',
+        'woff' => 'font/woff',
+        'woff2' => 'font/woff2',
+        'ttf' => 'font/ttf',
+        'map' => 'application/json'
+    ];
+    header('Content-Type: ' . ($mimeMap[$ext] ?? 'application/octet-stream'));
+    header('Cache-Control: public, max-age=3600');
+    readfile($target);
+    return true;
+}
+return false;
+EOF_PMA_ROUTER
+
+  local php_bin
+  php_bin="$(command -v php || command -v php8.3 || command -v php8.2 || echo /usr/bin/php)"
+
+  sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<EOF_PMA_SVC
 [Unit]
 Description=FerrousPanel phpMyAdmin Standalone Service (Port 888)
 After=network.target mariadb.service php8.3-fpm.service
@@ -135,7 +198,8 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/www/server/phpmyadmin
-ExecStart=/usr/bin/php -S 0.0.0.0:888 -t /www/server/phpmyadmin
+Environment="PHP_CLI_SERVER_WORKERS=4"
+ExecStart=${php_bin} -S 0.0.0.0:888 -t /www/server/phpmyadmin /www/server/phpmyadmin/ferrous_router.php
 Restart=always
 RestartSec=3
 
@@ -222,34 +286,37 @@ repair_ferrousx_environment() {
     fi
   done
 
-  echo "[5/8] Cài đặt tệp thực thi FerrousX Native Web Server (/usr/local/bin/ferrousx-bin)..."
-  if [ -f /opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs ]; then
-    sudo cp /opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs /usr/local/bin/ferrousx-bin
-  elif [ -f "${SCRIPT_DIR}/bin/ferrousx-server.mjs" ]; then
-    sudo cp "${SCRIPT_DIR}/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-bin
-  elif [ -f "${APP_ROOT}/Ferrous-panel/bin/ferrousx-server.mjs" ]; then
-    sudo cp "${APP_ROOT}/Ferrous-panel/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-bin
-  elif [ ! -f /usr/local/bin/ferrousx-bin ]; then
-    # Tạo trực tiếp ferrousx-bin nếu chưa có tệp nguồn
-    sudo tee /usr/local/bin/ferrousx-bin > /dev/null <<'EOF_BIN'
+  echo "[5/8] Cài đặt tệp thực thi FerrousX Native Web Server (/usr/local/bin/ferrousx-server.mjs & /usr/local/bin/ferrousx-bin)..."
+  local local_script_dir
+  local_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -f "/opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs" ]; then
+    sudo cp "/opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-server.mjs
+  elif [ -f "${local_script_dir}/bin/ferrousx-server.mjs" ]; then
+    sudo cp "${local_script_dir}/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-server.mjs
+  else
+    # Tạo trực tiếp ferrousx-server.mjs nếu chưa có tệp nguồn
+    sudo tee /usr/local/bin/ferrousx-server.mjs > /dev/null <<'EOF_BIN'
 #!/usr/bin/env node
 import http from 'http';
 import https from 'https';
 import net from 'net';
 import fs from 'fs';
-import path from 'path';
 
 const ADMIN_CFG = '/etc/ferrous-panel/admin.json';
 const SSL_CERT = '/etc/ferrousx/ssl/fullchain.pem';
 const SSL_KEY = '/etc/ferrousx/ssl/privkey.pem';
 
-let pPort = 3000;
-try {
-  if (fs.existsSync(ADMIN_CFG)) {
-    const d = JSON.parse(fs.readFileSync(ADMIN_CFG, 'utf8'));
-    if (d.panelPort) pPort = Number(d.panelPort);
-  }
-} catch {}
+function getPanelPort() {
+  try {
+    if (fs.existsSync(ADMIN_CFG)) {
+      const d = JSON.parse(fs.readFileSync(ADMIN_CFG, 'utf8'));
+      if (d.panelPort) return Number(d.panelPort);
+    }
+  } catch {}
+  return 3000;
+}
+
+let pPort = getPanelPort();
 
 function proxy(req, res, tHost, tPort) {
   const clientIp = req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '127.0.0.1';
@@ -284,7 +351,12 @@ function handler(req, res) {
   res.setHeader('Server', 'FerrousX/2.5.0-edge (Rust Native Architecture)');
   res.setHeader('Alt-Svc', 'h3=":443"; ma=86400');
   const u = req.url || '/';
-  if (u === '/phpadmin' || u.startsWith('/phpadmin/') || u === '/phpmyadmin' || u.startsWith('/phpmyadmin/')) {
+  if (u === '/phpadmin' || u === '/phpmyadmin') {
+    res.writeHead(302, { Location: `${u}/` });
+    res.end();
+    return;
+  }
+  if (u.startsWith('/phpadmin/') || u.startsWith('/phpadmin?') || u.startsWith('/phpmyadmin/') || u.startsWith('/phpmyadmin?')) {
     proxy(req, res, '127.0.0.1', 888);
     return;
   }
@@ -319,11 +391,18 @@ if (fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
     console.error('[FerrousX] HTTPS init error:', e.message);
   }
 }
+
+process.on('SIGHUP', () => { pPort = getPanelPort(); });
 EOF_BIN
   fi
 
-  sudo chmod +x /usr/local/bin/ferrousx-bin
-  
+  sudo tee /usr/local/bin/ferrousx-bin > /dev/null <<'EOF_WRAPPER'
+#!/usr/bin/env bash
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+exec "$NODE_BIN" /usr/local/bin/ferrousx-server.mjs "$@"
+EOF_WRAPPER
+  sudo chmod +x /usr/local/bin/ferrousx-server.mjs /usr/local/bin/ferrousx-bin
+
   # Cài đặt ferrousx-ctl
   sudo tee /usr/local/bin/ferrousx-ctl > /dev/null <<'EOF_CTL'
 #!/usr/bin/env bash
@@ -349,18 +428,46 @@ esac
 EOF_CTL
   sudo chmod +x /usr/local/bin/ferrousx-ctl
 
-  echo "[6/8] Thiết lập Systemd Service (/etc/systemd/system/ferrousx.service)..."
+  echo "[6/8] Thiết lập Systemd Service (ferrousx.service & ferrous-panel-web.service)..."
+  local p_port
+  p_port="$(read_json_field panelPort 3000)"
+  [ -z "$p_port" ] && p_port=3000
+
+  # Sửa lại ferrous-panel-web.service để đảm bảo Panel Web luôn lắng nghe trên cổng 3000
+  if [ -d /opt/Ferrous-panel ]; then
+    sudo tee /etc/systemd/system/ferrous-panel-web.service > /dev/null <<EOF_WEB_SVC
+[Unit]
+Description=Ferrous-panel Control Plane & Rust Core API Gateway
+After=network-online.target mariadb.service postgresql.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/Ferrous-panel
+Environment="NODE_ENV=production"
+Environment="PORT=${p_port}"
+Environment="PANEL_BIND_ADDR=0.0.0.0:${p_port}"
+ExecStart=/bin/sh -c 'if [ -x ./node_modules/.bin/tsx ]; then exec ./node_modules/.bin/tsx server.ts; else exec npm start; fi'
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF_WEB_SVC
+  fi
+
   sudo tee /etc/systemd/system/ferrousx.service > /dev/null <<'EOF_SVC'
 [Unit]
 Description=FerrousX Native Rust Web Server & Reverse Proxy
-After=network-online.target php8.3-fpm.service
+After=network-online.target php8.3-fpm.service ferrous-panel-web.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/Ferrous-panel
-ExecStart=/usr/bin/env node /usr/local/bin/ferrousx-bin
+ExecStart=/usr/local/bin/ferrousx-bin
 ExecReload=/usr/local/bin/ferrousx-ctl reload
 Restart=always
 RestartSec=3
@@ -372,9 +479,10 @@ WantedBy=multi-user.target
 EOF_SVC
 
   sudo systemctl daemon-reload
+  sudo systemctl enable --now ferrous-panel-web.service 2>/dev/null || true
+  sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
   sudo systemctl enable --now ferrousx.service 2>/dev/null || true
   sudo systemctl restart ferrousx.service 2>/dev/null || true
-  sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
 
   echo "[7/8] Mở cổng 80, 443 (TCP & UDP QUIC), 888 và 3000 trên Firewall..."
   sudo ufw allow 80/tcp comment 'FerrousX HTTP' 2>/dev/null || true
@@ -393,8 +501,9 @@ EOF_SVC
   # Tự động kích hoạt phpMyAdmin song song trên cổng 888
   setup_and_repair_phpmyadmin
 
+  sleep 2
   echo "[8/8] Kiểm tra trạng thái cổng mạng lắng nghe (Listening Ports):"
-  ss -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || netstat -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || echo "  ⚠️ Đang khởi động cổng..."
+  ss -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || netstat -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || echo "  ⚠️ Chưa thấy tiến trình lắng nghe cổng! Xem log: journalctl -u ferrousx -u ferrous-panel-web -n 30 --no-pager"
 
   echo "======================================================================"
   echo "✅ ĐÃ KÍCH HOẠT FERROUSX, PHP-FPM & PHPMYADMIN THÀNH CÔNG!"
@@ -691,9 +800,17 @@ EOF
           sudo cp -a "$BACKUP_DIR/$f" "/etc/ferrous-panel/$f"
         fi
       done
-      echo "  [5/5] Khởi động lại dịch vụ Zero-Downtime (ferrous-panel-web.service)..."
-      sudo systemctl daemon-reload 2>/dev/null || true
-      sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
+      echo "  [5/5] Đồng bộ & khởi động lại dịch vụ (ferrous-panel-web, ferrousx, ferrous-pma)..."
+      if [ -f /opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs ]; then
+        sudo cp /opt/Ferrous-panel/Ferrous-panel/bin/ferrousx-server.mjs /usr/local/bin/ferrousx-server.mjs
+        sudo tee /usr/local/bin/ferrousx-bin > /dev/null <<'EOF_WRAP'
+#!/usr/bin/env bash
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+exec "$NODE_BIN" /usr/local/bin/ferrousx-server.mjs "$@"
+EOF_WRAP
+        sudo chmod +x /usr/local/bin/ferrousx-server.mjs /usr/local/bin/ferrousx-bin
+      fi
+      repair_ferrousx_environment
       echo "✅ ĐÃ CẬP NHẬT LÊN PHIÊN BẢN MỚI NHẤT THÀNH CÔNG (0 MẤT DỮ LIỆU)!"
       echo "======================================================================"
       ;;

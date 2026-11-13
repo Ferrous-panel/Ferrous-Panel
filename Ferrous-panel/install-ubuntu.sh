@@ -166,7 +166,68 @@ sudo chmod -R 755 /www/server/phpmyadmin 2>/dev/null || true
 sudo chmod 777 /var/lib/phpmyadmin/tmp 2>/dev/null || true
 
 # Standalone phpMyAdmin Systemd Service on Port 888 (Works with both FerrousX and Nginx)
-sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<'EOF_PMA_SVC'
+sudo tee /www/server/phpmyadmin/ferrous_router.php > /dev/null <<'EOF_PMA_ROUTER'
+<?php
+$uriPath = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?? '/';
+if (preg_match('#^/(phpadmin|phpmyadmin)$#i', $uriPath)) {
+    header('Location: ' . $uriPath . '/', true, 302);
+    exit;
+}
+if (preg_match('#^/(phpadmin|phpmyadmin)(/.*)$#i', $uriPath, $matches)) {
+    $prefix = '/' . $matches[1];
+    $rel = $matches[2];
+    if ($rel === '' || $rel === '/') {
+        $rel = '/index.php';
+    }
+    $target = realpath(__DIR__ . $rel);
+    $root = realpath(__DIR__);
+    if ($target === false || strpos($target, $root) !== 0) {
+        http_response_code(404);
+        echo '404 Not Found';
+        return true;
+    }
+    if (is_dir($target)) {
+        $target .= DIRECTORY_SEPARATOR . 'index.php';
+        $rel = rtrim($rel, '/') . '/index.php';
+    }
+    if (!is_file($target)) {
+        http_response_code(404);
+        echo '404 Not Found';
+        return true;
+    }
+    $ext = strtolower(pathinfo($target, PATHINFO_EXTENSION));
+    if ($ext === 'php') {
+        $_SERVER['SCRIPT_NAME'] = $prefix . $rel;
+        $_SERVER['PHP_SELF'] = $prefix . $rel;
+        chdir(dirname($target));
+        require $target;
+        return true;
+    }
+    $mimeMap = [
+        'css' => 'text/css; charset=utf-8',
+        'js' => 'application/javascript; charset=utf-8',
+        'json' => 'application/json; charset=utf-8',
+        'png' => 'image/png',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'svg' => 'image/svg+xml',
+        'ico' => 'image/x-icon',
+        'woff' => 'font/woff',
+        'woff2' => 'font/woff2',
+        'ttf' => 'font/ttf',
+        'map' => 'application/json'
+    ];
+    header('Content-Type: ' . ($mimeMap[$ext] ?? 'application/octet-stream'));
+    header('Cache-Control: public, max-age=3600');
+    readfile($target);
+    return true;
+}
+return false;
+EOF_PMA_ROUTER
+
+PHP_CLI_BIN="$(command -v php || command -v php8.3 || command -v php8.2 || echo /usr/bin/php)"
+sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<EOF_PMA_SVC
 [Unit]
 Description=FerrousPanel phpMyAdmin Standalone Service (Port 888)
 After=network.target mariadb.service php8.3-fpm.service
@@ -177,7 +238,8 @@ Type=simple
 User=www-data
 Group=www-data
 WorkingDirectory=/www/server/phpmyadmin
-ExecStart=/usr/bin/php -S 0.0.0.0:888 -t /www/server/phpmyadmin
+Environment="PHP_CLI_SERVER_WORKERS=4"
+ExecStart=${PHP_CLI_BIN} -S 0.0.0.0:888 -t /www/server/phpmyadmin /www/server/phpmyadmin/ferrous_router.php
 Restart=always
 RestartSec=3
 
@@ -308,27 +370,30 @@ if [ -f "${INSTALL_DIR}/Ferrous-panel/ferrous-cli.sh" ]; then
   sudo chmod +x /usr/local/bin/fp /usr/local/bin/ferrous
 fi
 
-# Install FerrousX Web Server & Reverse Proxy Binary
+# Install FerrousX Web Server & Reverse Proxy Binary (.mjs preserved for ESM)
 if [ -f "${INSTALL_DIR}/Ferrous-panel/bin/ferrousx-server.mjs" ]; then
-  sudo cp "${INSTALL_DIR}/Ferrous-panel/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-bin
-  sudo chmod +x /usr/local/bin/ferrousx-bin
+  sudo cp "${INSTALL_DIR}/Ferrous-panel/bin/ferrousx-server.mjs" /usr/local/bin/ferrousx-server.mjs
+  sudo tee /usr/local/bin/ferrousx-bin > /dev/null <<'EOF_WRAPPER'
+#!/usr/bin/env bash
+NODE_BIN="$(command -v node || echo /usr/bin/node)"
+exec "$NODE_BIN" /usr/local/bin/ferrousx-server.mjs "$@"
+EOF_WRAPPER
+  sudo chmod +x /usr/local/bin/ferrousx-server.mjs /usr/local/bin/ferrousx-bin
 fi
 
-# 1. Build static frontend bundle (`dist/`)
+# 1. Build static frontend bundle (`dist/`) & Rust ABI Kernel
 cd "${INSTALL_DIR}"
 npm install --legacy-peer-deps
 npm run build
 
-# 2. Compile Native Rust Actix-Web Server Binary (`target/release/Ferrous-panel`)
+# 2. Optional Native Rust Actix-Web binary build (only keep if compiled binary exists)
 cd "${INSTALL_DIR}/Ferrous-panel"
-echo "Compiling Native Rust Actix-Web Server Binary (Ferrous-panel)..."
+echo "Compiling Native Rust Actix-Web Modules (Ferrous-panel)..."
 cargo build --release || true
-if [ -f "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" ]; then
-  sudo cp "${INSTALL_DIR}/Ferrous-panel/target/release/Ferrous-panel" /usr/local/bin/ferrous-panel-daemon
-else
-  sudo cp "${INSTALL_DIR}/rust-backend/target/release/ferrous-system-core" /usr/local/bin/ferrous-panel-daemon
+if [ -f "${INSTALL_DIR}/Ferrous-panel/target/release/ferrous-panel" ]; then
+  sudo cp "${INSTALL_DIR}/Ferrous-panel/target/release/ferrous-panel" /usr/local/bin/ferrous-panel-daemon
+  sudo chmod +x /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
 fi
-sudo chmod +x /usr/local/bin/ferrous-panel-daemon 2>/dev/null || true
 
 echo "[8/9] Configuring Netfilter Firewall rules & ports..."
 ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
@@ -364,20 +429,27 @@ if command -v ufw &>/dev/null; then
   sudo ufw --force enable 2>/dev/null || true
 fi
 
-echo "[9/9] Installing Systemd service (ferrous-panel-web.service -> Native Rust Binary)..."
+echo "[9/9] Installing Systemd services (ferrous-panel-web.service & ferrousx.service)..."
+sudo systemctl stop nginx 2>/dev/null || true
+sudo systemctl disable nginx 2>/dev/null || true
+if command -v fuser &>/dev/null; then
+  sudo fuser -k 80/tcp 443/tcp 2>/dev/null || true
+fi
+
 sudo tee /etc/systemd/system/ferrous-panel-web.service > /dev/null <<EOF
 [Unit]
-Description=Ferrous-panel Native Rust Actix-Web Server Daemon
-After=network-online.target nginx.service mariadb.service postgresql.service
+Description=Ferrous-panel Control Plane & Rust Core API Gateway
+After=network-online.target mariadb.service postgresql.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
+Environment="NODE_ENV=production"
 Environment="RUST_LOG=info,actix_web=info"
 Environment="PORT=${PANEL_PORT}"
 Environment="PANEL_BIND_ADDR=0.0.0.0:${PANEL_PORT}"
-ExecStart=/bin/sh -c 'if [ -x /usr/local/bin/ferrous-panel-daemon ]; then exec /usr/local/bin/ferrous-panel-daemon; elif [ -x ./node_modules/.bin/tsx ]; then exec ./node_modules/.bin/tsx server.ts; else exec npm start; fi'
+ExecStart=/bin/sh -c 'if [ -x ./node_modules/.bin/tsx ]; then exec ./node_modules/.bin/tsx server.ts; else exec npm start; fi'
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
@@ -386,9 +458,31 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
+sudo tee /etc/systemd/system/ferrousx.service > /dev/null <<EOF
+[Unit]
+Description=FerrousX Native Rust Web Server & Reverse Proxy
+After=network-online.target php8.3-fpm.service ferrous-panel-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=/usr/local/bin/ferrousx-bin
+Restart=always
+RestartSec=3
+LimitNOFILE=2097152
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now ferrous-panel-web.service 2>/dev/null || true
-sudo nginx -t 2>/dev/null && sudo systemctl reload nginx 2>/dev/null || true
+sudo systemctl restart ferrous-panel-web.service 2>/dev/null || true
+sudo systemctl enable --now ferrousx.service 2>/dev/null || true
+sudo systemctl restart ferrousx.service 2>/dev/null || true
 
 PUBLIC_IP="$(curl -s4 --connect-timeout 2 --max-time 3 https://api.ipify.org 2>/dev/null || \
              curl -s4 --connect-timeout 2 --max-time 3 https://ifconfig.me 2>/dev/null || \
