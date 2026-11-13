@@ -69,7 +69,13 @@ show_default_info() {
   echo "  URL Truy cập Ngoại mạng : http://${ip}:${port}${entrance}"
   echo "  URL Truy cập Nội bộ     : http://127.0.0.1:${port}${entrance}"
   echo "  URL phpMyAdmin (Port 888: http://${ip}:888/ (hoặc :888/phpadmin)"
-  echo "  URL phpMyAdmin (Domain) : http://ferrous.exmusi.com/phpadmin"
+  local dom
+  dom="$(read_json_field customDomain '')"
+  if [ -n "$dom" ]; then
+    echo "  URL phpMyAdmin (Domain) : http://${dom}/phpadmin"
+  else
+    echo "  URL phpMyAdmin (Domain) : http://<your-domain>/phpadmin"
+  fi
   echo "  Tài khoản Admin (User)  : ${user}"
   echo "  Mật khẩu Admin (Pass)   : ${pass}"
   echo "  Tài khoản SQL Root      : root"
@@ -192,6 +198,7 @@ EOF_PMA_ROUTER
 Description=FerrousPanel phpMyAdmin Standalone Service (Port 888)
 After=network.target mariadb.service php8.3-fpm.service
 Wants=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -199,6 +206,8 @@ User=www-data
 Group=www-data
 WorkingDirectory=/www/server/phpmyadmin
 Environment="PHP_CLI_SERVER_WORKERS=4"
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=${php_bin} -S 0.0.0.0:888 -t /www/server/phpmyadmin /www/server/phpmyadmin/ferrous_router.php
 Restart=always
 RestartSec=3
@@ -208,8 +217,19 @@ WantedBy=multi-user.target
 EOF_PMA_SVC
 
   sudo systemctl daemon-reload
+  sudo systemctl reset-failed ferrous-pma.service 2>/dev/null || true
   sudo systemctl enable --now ferrous-pma.service 2>/dev/null || true
   sudo systemctl restart ferrous-pma.service 2>/dev/null || true
+  sleep 1
+
+  if ! ss -tulpn 2>/dev/null | grep -q ':888\b'; then
+    echo "  -> Kernel chặn CAP_NET_BIND_SERVICE cho user www-data, chuyển sang quyền root để bind cổng 888..."
+    sudo sed -i 's/^User=www-data/User=root/; s/^Group=www-data/Group=root/' /etc/systemd/system/ferrous-pma.service
+    sudo systemctl daemon-reload
+    sudo systemctl reset-failed ferrous-pma.service 2>/dev/null || true
+    sudo systemctl restart ferrous-pma.service 2>/dev/null || true
+    sleep 1
+  fi
 
   echo "[4/5] Mở cổng 888 trên Firewall UFW & iptables..."
   sudo ufw allow 888/tcp comment 'phpMyAdmin Web GUI' 2>/dev/null || true
@@ -220,11 +240,13 @@ EOF_PMA_SVC
   echo "[5/5] Kiểm tra cổng 888 lắng nghe:"
   ss -tulpn 2>/dev/null | grep ':888\b' || echo "  ⚠️ Chưa thấy tiến trình lắng nghe cổng 888"
 
+  local dom
+  dom="$(read_json_field customDomain '')"
   echo "======================================================================"
   echo "✅ PHPMYADMIN 5.2.1 ĐÃ ĐƯỢC KÍCH HOẠT VÀ SẴN SÀNG!"
   echo "🌐 URL Trực tiếp qua IP : http://${ip}:888/"
   echo "🌐 URL qua Đường dẫn    : http://${ip}:888/phpadmin"
-  echo "🌐 URL qua Tên miền     : http://ferrous.exmusi.com/phpadmin"
+  echo "🌐 URL qua Tên miền     : http://${dom:-<your-domain>}/phpadmin"
   echo "👤 Tài khoản đăng nhập  : root"
   echo "🔑 Mật khẩu SQL Root    : $(read_json_field mysqlRootPassword 'Xem trong admin.json')"
   echo "💡 Lưu ý Cloudflare: Nếu truy cập qua tên miền Cloudflare, hãy dùng http://${ip}:888/ hoặc /phpadmin"
@@ -255,8 +277,8 @@ repair_ferrousx_environment() {
   echo "[3/8] Đảm bảo chứng chỉ SSL TLS 1.3 FerrousX (/etc/ferrousx/ssl/fullchain.pem)..."
   sudo mkdir -p /etc/ferrousx/ssl
   local panel_dom
-  panel_dom="$(read_json_field customDomain "ferrous.exmusi.com")"
-  [ -z "$panel_dom" ] && panel_dom="ferrous.exmusi.com"
+  panel_dom="$(read_json_field customDomain "")"
+  [ -z "$panel_dom" ] && panel_dom="localhost"
 
   if [ ! -f /etc/ferrousx/ssl/fullchain.pem ] || [ ! -f /etc/ferrousx/ssl/privkey.pem ]; then
     if [ -f /etc/nginx/ssl/ferrous-fallback.crt ] && [ -f /etc/nginx/ssl/ferrous-fallback.key ]; then
@@ -505,18 +527,21 @@ EOF_SVC
   echo "[8/8] Kiểm tra trạng thái cổng mạng lắng nghe (Listening Ports):"
   ss -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || netstat -tulpn 2>/dev/null | grep -E ':(80|443|888|3000)\b' || echo "  ⚠️ Chưa thấy tiến trình lắng nghe cổng! Xem log: journalctl -u ferrousx -u ferrous-panel-web -n 30 --no-pager"
 
+  local display_host="$panel_dom"
+  [ "$display_host" = "localhost" ] && display_host="$srv_ip"
+
   echo "======================================================================"
   echo "✅ ĐÃ KÍCH HOẠT FERROUSX, PHP-FPM & PHPMYADMIN THÀNH CÔNG!"
   echo "🦀 Web Server         : FerrousX (Rust Architecture - Nginx đã tắt)"
-  echo "🌐 Tên miền Panel     : http://${panel_dom}/ hoặc https://${panel_dom}/"
+  echo "🌐 Truy cập Panel     : http://${display_host}/ hoặc https://${display_host}/"
   echo "🐘 FastCGI Handler     : unix:/run/php/php8.3-fpm.sock"
-  echo "🗄️ phpMyAdmin 5.2     : http://${srv_ip}:888/ hoặc http://${panel_dom}/phpadmin"
+  echo "🗄️ phpMyAdmin 5.2     : http://${srv_ip}:888/ hoặc http://${display_host}/phpadmin"
   echo "⚙️ Quản lý Dịch vụ    : systemctl status ferrousx | ferrousx-ctl reload"
   echo "----------------------------------------------------------------------"
   echo "🔒 HƯỚNG DẪN XỬ LÝ LỖI 521 CLOUDFLARE:"
   echo "   1. FerrousX hiện đã lắng nghe đồng thời cổng 80 (HTTP) và 443 (HTTPS)."
   echo "   2. Vào Cloudflare Dashboard -> SSL/TLS -> Chọn chế độ 'Full' hoặc 'Flexible'."
-  echo "   3. Tải lại trang web http://${panel_dom} hoặc https://${panel_dom}."
+  echo "   3. Tải lại trang web http://${display_host} hoặc https://${display_host}."
   echo "======================================================================"
 }
 

@@ -37,7 +37,8 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
-# AI Studio local metadata & runtime state
+# AI Studio local metadata, attachments & runtime state
 .aistudio/
+public/assets/aistudio/
 data/
 

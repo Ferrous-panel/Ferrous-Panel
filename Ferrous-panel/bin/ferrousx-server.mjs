@@ -9,7 +9,7 @@
  * - Native TLS 1.3/1.2 & HTTP/2 ALPN engine (Auto Fallback Self-Signed SAN Certs)
  * - Zero-Downtime Hot-Reload via SIGHUP
  * - WebSocket upgrade tunneling (Pty Terminal, Real-Time Telemetry)
- * - Domain routing for Web Panel (ferrous.exmusi.com -> 127.0.0.1:3000)
+ * - Domain routing for Web Panel (customDomain -> 127.0.0.1:3000)
  * - phpMyAdmin routing (/phpadmin, /phpmyadmin -> 127.0.0.1:888)
  * - Multi-tenant vhost serving (/www/wwwroot/<domain>) with native FastCGI PHP-FPM bridge
  * ==============================================================================
@@ -56,7 +56,7 @@ function readPanelAdminConfig() {
     // ignore parse error
   }
   return {
-    customDomain: 'ferrous.exmusi.com',
+    customDomain: '',
     panelPort: DEFAULT_PANEL_PORT,
     securityEntrance: '/panel'
   };
@@ -92,7 +92,7 @@ function ensureSslCertificates() {
         fs.copyFileSync('/etc/nginx/ssl/ferrous-fallback.crt', SSL_CERT_PATH);
         fs.copyFileSync('/etc/nginx/ssl/ferrous-fallback.key', SSL_KEY_PATH);
       } else {
-        const domain = (panelConfig.customDomain || 'ferrous.exmusi.com').trim() || 'ferrous.exmusi.com';
+        const domain = (panelConfig.customDomain || 'localhost').trim() || 'localhost';
         try {
           execSync(
             `openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout "${SSL_KEY_PATH}" -out "${SSL_CERT_PATH}" -subj "/C=VN/ST=Hanoi/L=Hanoi/O=FerrousX/CN=${domain}" 2>/dev/null`,
@@ -323,7 +323,7 @@ function handleRequest(req, res) {
     return;
   }
 
-  // Route 3: Panel UI & API (Default or configured domain ferrous.exmusi.com)
+  // Route 3: Panel UI & API (Default or configured customDomain)
   proxyHttp(req, res, '127.0.0.1', panelPort);
 }
 

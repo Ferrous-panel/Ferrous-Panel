@@ -521,7 +521,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
   );
 
   const effectiveHost =
-    (sshData.serverHost && sshData.serverHost !== '103.145.88.210')
+    sshData.serverHost && sshData.serverHost !== '127.0.0.1' && sshData.serverHost !== '0.0.0.0'
       ? sshData.serverHost
       : typeof window !== 'undefined' && window.location.hostname
         ? window.location.hostname

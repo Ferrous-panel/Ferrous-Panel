@@ -2051,7 +2051,7 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
 
   let detectedServerIp = null;
   function resolveServerPublicIp(req) {
-    if (detectedServerIp && detectedServerIp !== "103.145.88.210" && detectedServerIp !== "127.0.0.1") {
+    if (detectedServerIp && detectedServerIp !== "127.0.0.1" && detectedServerIp !== "0.0.0.0") {
       return detectedServerIp;
     }
     // 1. Try reading from /etc/ferrous-panel/server_ip
@@ -2420,10 +2420,10 @@ pub fn inspect_ja4(tls_hello: &Ja4ClientHello) ->Verdict {
     }
     dnsRecords.unshift({
       id: `dns-${Date.now()}`,
-      domain: "ferroushub.vn",
+      domain: cleanDomain,
       type: "A",
       host: cleanDomain,
-      value: "103.145.88.210",
+      value: resolveServerPublicIp(req) || "127.0.0.1",
       ttl: 300
     });
     const getPresetForFw = (fw) => {
@@ -4422,7 +4422,7 @@ location ~ \\.php$ {
       domain: String(domain || "ferroushub.vn"),
       type: type || "A",
       host: String(host || "sub.ferroushub.vn"),
-      value: String(value || "103.145.88.210"),
+      value: String(value || resolveServerPublicIp(req) || "127.0.0.1"),
       ttl: Number(ttl) || 300
     });
     res.status(201).json(dnsRecords);
@@ -5150,6 +5150,7 @@ location ~ \\.php$ {
         syncArchitectureForApp(a);
       });
       persistManagedApps();
+      const activeDom = panelAdminState.customDomain || resolveServerPublicIp(null);
       return [
         `======================================================================`,
         `🦀 SỬA CHỮA TOÀN DIỆN FERROUSX & PHP-FPM (FIX CLOUDFLARE ERROR 521)`,
@@ -5164,12 +5165,13 @@ location ~ \\.php$ {
         `💡 LƯU Ý QUAN TRỌNG VỚI CLOUDFLARE (Để hết Lỗi 521):`,
         `   • Vào Cloudflare Dashboard -> SSL/TLS -> Overview`,
         `   • Đổi chế độ sang 'Full' (hoặc 'Flexible') thay vì 'Full (Strict)'`,
-        `   • Tải lại https://ferrous.exmusi.com`,
+        `   • Tải lại https://${activeDom}`,
         `======================================================================`
       ].join("\n");
     }
     if (opt === "22" || opt === "phpmyadmin" || opt === "pma" || opt === "fix-pma") {
       const liveIp = resolveServerPublicIp();
+      const activeDom = panelAdminState.customDomain || "<your-domain.com>";
       try {
         child_process.execSync(
           "systemctl restart ferrous-pma.service 2>/dev/null || true"
@@ -5187,7 +5189,7 @@ location ~ \\.php$ {
         `✅ PHPMYADMIN 5.2.1 ĐÃ SẴN SÀNG HOẠT ĐỘNG!`,
         `🌐 URL Trực tiếp qua IP : http://${liveIp}:888/`,
         `🌐 URL qua Đường dẫn    : http://${liveIp}:888/phpadmin`,
-        `🌐 URL qua Tên miền     : http://ferrous.exmusi.com/phpadmin`,
+        `🌐 URL qua Tên miền     : http://${activeDom}/phpadmin`,
         `👤 Tài khoản Đăng nhập  : root`,
         `🔑 Mật khẩu Root SQL    : ${panelAdminState.mysqlRootPassword || "Sql#2026!MariaDbRoot"}`,
         `💡 Lưu ý Cloudflare: Nếu dùng tên miền qua Cloudflare, hãy truy cập qua http://${liveIp}:888/ hoặc đường dẫn /phpadmin`,

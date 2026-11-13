@@ -97,8 +97,9 @@ export default function App() {
         onLoginSuccess={handleLoginSuccess}
         panelAdminConfig={controller.sshData?.panelAdmin}
         serverHost={
-          (controller.sshData?.serverHost &&
-            controller.sshData.serverHost !== '103.145.88.210')
+          controller.sshData?.serverHost &&
+          controller.sshData.serverHost !== '127.0.0.1' &&
+          controller.sshData.serverHost !== '0.0.0.0'
             ? controller.sshData.serverHost
             : typeof window !== 'undefined' && window.location.hostname
               ? window.location.hostname

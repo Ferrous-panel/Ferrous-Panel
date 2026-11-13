@@ -232,6 +232,7 @@ sudo tee /etc/systemd/system/ferrous-pma.service > /dev/null <<EOF_PMA_SVC
 Description=FerrousPanel phpMyAdmin Standalone Service (Port 888)
 After=network.target mariadb.service php8.3-fpm.service
 Wants=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -239,6 +240,8 @@ User=www-data
 Group=www-data
 WorkingDirectory=/www/server/phpmyadmin
 Environment="PHP_CLI_SERVER_WORKERS=4"
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ExecStart=${PHP_CLI_BIN} -S 0.0.0.0:888 -t /www/server/phpmyadmin /www/server/phpmyadmin/ferrous_router.php
 Restart=always
 RestartSec=3
@@ -248,8 +251,16 @@ WantedBy=multi-user.target
 EOF_PMA_SVC
 
 sudo systemctl daemon-reload
+sudo systemctl reset-failed ferrous-pma.service 2>/dev/null || true
 sudo systemctl enable --now ferrous-pma.service 2>/dev/null || true
 sudo systemctl restart ferrous-pma.service 2>/dev/null || true
+sleep 1
+if ! ss -tulpn 2>/dev/null | grep -q ':888\b'; then
+  sudo sed -i 's/^User=www-data/User=root/; s/^Group=www-data/Group=root/' /etc/systemd/system/ferrous-pma.service
+  sudo systemctl daemon-reload
+  sudo systemctl reset-failed ferrous-pma.service 2>/dev/null || true
+  sudo systemctl restart ferrous-pma.service 2>/dev/null || true
+fi
 
 # Also configure Nginx bridge if Nginx is active
 sudo mkdir -p /etc/nginx/conf.d

@@ -236,8 +236,9 @@ export function usePanelController(
           if (
             clientHost &&
             (!data.publicIp ||
-              data.publicIp === '103.145.88.210' ||
-              data.publicIp === '127.0.0.1')
+              data.publicIp === '127.0.0.1' ||
+              data.publicIp === '0.0.0.0' ||
+              data.publicIp === 'YOUR_SERVER_IP')
           ) {
             data.publicIp = clientHost;
           }
@@ -274,8 +275,9 @@ export function usePanelController(
           if (
             clientHost &&
             (!data.serverHost ||
-              data.serverHost === '103.145.88.210' ||
-              data.serverHost === '127.0.0.1')
+              data.serverHost === '127.0.0.1' ||
+              data.serverHost === '0.0.0.0' ||
+              data.serverHost === 'YOUR_SERVER_IP')
           ) {
             data.serverHost = clientHost;
           }
