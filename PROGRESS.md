@@ -1,7 +1,7 @@
-# FerrousPanel — Trạng thái tiến độ (P1–P7)
+# FerrousPanel — Trạng thái tiến độ (P1–P7 & Open-Source 1-Command Setup)
 
 ## Phase hiện tại
-- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG** (đồng thời giữ sửa lỗi Preview dev server ở `package.json` & `vite.config.ts`).
+- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL**
 
 ---
 
@@ -18,14 +18,15 @@
   - Trait `WebServerEngine` cho `NginxEngine` (`/etc/nginx/sites-available` + symlink `sites-enabled`, `nginx -t`, `systemctl reload nginx`) và `FerrousxEngine` (`/etc/ferrousx/ferrousx.toml` + `sites/<domain>.toml`, `ferrousx-bin --check-config`, `SIGHUP`).
   - Chuyển đổi `POST /api/webserver/switch` tuần tự không trùng cổng `80/443`, kèm kiểm tra HTTP từng site và tự động rollback khi lỗi.
   - SSL Certbot webroot `/www/acme`, đọc hạn chứng chỉ X.509 thật từ `/etc/letsencrypt/live/<domain>/fullchain.pem`.
-- [x] **P4 – FERROUSX MVP** (`crates/ferrousx/src/{main,lib,config,tls,server,proxy,fastcgi}.rs`, `crates/ferrousx/tests/integration.rs`)
+- [x] **P4 – FERROUSX MVP** (`crates/ferrousx/src/{main,lib,config,tls,server,router,handlers,error}.rs`, `crates/ferrousx/tests/server.rs`)
   - Binary độc lập `ferrousx-bin` (`tokio`, `hyper 1`, `rustls` SNI + ALPN `h2`/`http1.1`, `fastcgi-client`), hỗ trợ `static_spa`, `reverse_proxy` (kể cả WebSocket upgrade), `php_fpm` qua Unix socket, `redirect_https`, `--check-config`, và reload nóng qua `SIGHUP`.
 - [x] **P5 – MODULE HỆ THỐNG THẬT** (`crates/ferrous-panel/src/modules/{apps,databases,files,cpanel,security}.rs`, `tests/modules.rs`)
   - `systemd` unit thật + đọc `MainPID`/`MemoryCurrent`; `ufw` + `fail2ban-client` + `sysctl`; `mysql`/`psql` CLI thật (không lưu plaintext password, trả `409` nếu thiếu binary); `tar --zstd` + SHA-256 thật cho backups; `SafePath` chống zip-slip cho file manager; `crontab` thật.
   - Các mục Mail, DNS, SFTP, Edge Cloud, eBPF/WAF/FIM, Polyglot giữ nguyên `501` và hiển thị nhãn `"Chưa hỗ trợ"` trên UI.
-- [x] **P6 – GỠ JS SERVER PRODUCTION & CLI `fp`** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`)
-  - Đã xóa `server.ts`, `rust-backend/scripts/*.mjs`, `Ferrous-panel/bin/*.mjs`; chuyển `rust-backend/` và `Ferrous-panel/` cũ vào `_archive/` (`exclude = ["_archive"]` trong `Cargo.toml`).
-  - Chuyển `ferrous-cli.sh` (`fp`) thành subcommand `clap` trong `ferrous-panel`.
+- [x] **P6 – GỠ JS SERVER PRODUCTION, CLI `fp` & OPEN-SOURCE 1-COMMAND INSTALL** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`)
+  - Đã xóa `server.ts`, `rust-backend/scripts/*.mjs`, `Ferrous-panel/bin/*.mjs`, `bun.lock`, và crate thừa `crates/ferrous-core/`; chuyển `rust-backend/` và `Ferrous-panel/` cũ vào `_archive/` (`exclude = ["_archive"]` trong `Cargo.toml`).
+  - `install.sh`, `update.sh`, `uninstall.sh` hỗ trợ cài đặt/cập nhật/gỡ bỏ bằng 1 lệnh (`curl -fsSL ... | sudo bash`) không cần tương tác bàn phím, hỗ trợ chọn `--engine nginx|ferrousx`, xác thực `SHA256SUMS.txt` và kiểm tra `/api/health`.
+  - `.github/workflows/ci-release.yml` tự động build đa kiến trúc (`x86_64` + `aarch64`) và phát hành GitHub Release (`latest`) ngay khi push lên `main` hoặc tag `v*` với `permissions: contents: write`.
 - [x] **P7 – KIỂM CHỨNG** (`scripts/smoke-test.sh`)
   - Script kiểm chứng đầu-cuối cho Ubuntu 24.04 sạch với 7 hạng mục bắt buộc, in `PASS`/`FAIL` từng mục và `exit 1` nếu có bất kỳ mục nào `FAIL`.
 
@@ -42,8 +43,14 @@
 
 ## Lịch sử lỗi từng gặp & cách đã sửa
 1. **Lỗi Preview AI Studio `"The dev server didn't start"` sau P6**:
-   - *Nguyên nhân gốc*: P6 xóa script `"dev"` khỏi `package.json` và `vite.config.ts` chưa gắn cứng `host: "0.0.0.0", port: 3000`, khiến môi trường Preview không khởi chạy được Vite dev server trên cổng 3000.
-   - *Cách đã sửa*: Thêm lại `"dev": "vite --host 0.0.0.0 --port 3000"` vào `package.json` (chỉ chạy Vite tĩnh, không dùng Express/Node server) và cấu hình `server: { host: '0.0.0.0', port: 3000, hmr: false, ws: false, watch: null }` trong `vite.config.ts`.
+   - *Nguyên nhân gốc*: P6 xóa script `"dev"` khỏi `package.json` và `vite.config.ts` dùng `path`/`url` của Node và chưa gắn cứng `host: "0.0.0.0", port: 3000`.
+   - *Cách đã sửa*: Thêm lại `"dev": "vite --host 0.0.0.0 --port 3000"` vào `package.json` và cấu hình `server: { host: '0.0.0.0', port: 3000 }` + `new URL('.', import.meta.url).pathname` trong `vite.config.ts`.
 2. **Lỗi chữ ký hàm trong `crates/ferrous-panel/src/cli.rs` (phát hiện khi tự rà soát P6/P7)**:
    - *Nguyên nhân gốc*: `cli.rs` gọi `manager.switch_engine(target)` với 1 tham số, đọc `res.checked_sites`, và gọi `manager.set_configured_engine(...)` / `manager.validate_configured_engine()`, không khớp chữ ký thật trong `WebServerManager` (`webserver/mod.rs`).
    - *Cách đã sửa*: Bổ sung `pub async fn validate_configured_engine(&self)` vào `WebServerManager`, cập nhật `cli.rs` truyền `(&auth_store, &config.admin_username, "127.0.0.1")` vào `switch_engine`, đọc `res.health_checks.len()`, và gọi `manager.store.save_frontend_engine(parsed_engine)`.
+3. **Dọn dẹp crate/file thừa & đồng bộ (`crates/ferrous-core`, `bun.lock`, `main.rs`)**:
+   - *Nguyên nhân gốc*: `crates/ferrous-core` là crate nháp từ trước P1 không được `ferrous-panel` hay `ferrousx` sử dụng; `main.rs` lặp lại cấu hình route thay vì gọi `configure_app` của `lib.rs`; `.env.example` và `CONTRIBUTING.md` còn chứa nội dung mẫu cũ.
+   - *Cách đã sửa*: Xóa `crates/ferrous-core/` và `bun.lock`, cập nhật `Cargo.toml`, đồng bộ `main.rs` gọi trực tiếp `configure_app(cfg, app_state)`, đồng bộ `.env.example`, `CONTRIBUTING.md`, và `README.md`.
+4. **Cấu hình Open-Source & Cài đặt 1 lệnh (`install.sh`, `.github/workflows/ci-release.yml`)**:
+   - *Nguyên nhân gốc*: Trước đây `install.sh` khi chạy trực tiếp trên terminal (`[ -t 0 ]`) vẫn dừng chờ người dùng nhập phím chọn engine, và `.github/workflows/ci-release.yml` thiếu `permissions: contents: write` cũng như chỉ phát hành bản `x86_64` khi có tag `v*`.
+   - *Cách đã sửa*: Thiết lập mặc định không chặn (`WEB_ENGINE="nginx"`, truyền `--engine ferrousx` qua `bash -s -- --engine ferrousx` hoặc `--interactive` nếu muốn menu), thêm `permissions: contents: write` + cross-compile `aarch64` vào `ci-release.yml`, tự động phát hành `latest` release khi push lên `main`, và bổ sung bộ khung Open Source (`CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`).

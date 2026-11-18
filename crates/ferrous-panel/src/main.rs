@@ -7,9 +7,9 @@ use ferrous_panel::cli::{
     apply_env_file, run_fp_command, run_interactive_menu, FpCli, PanelCommand,
 };
 use ferrous_panel::config::Config;
+use ferrous_panel::configure_app;
 use ferrous_panel::state::AppState;
 use ferrous_panel::webserver::WebServerManager;
-use ferrous_panel::{api, configure_app, web as spa_web, MAX_JSON_PAYLOAD_BYTES};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
@@ -63,14 +63,9 @@ async fn run_server(config: Config) -> anyhow::Result<()> {
         }
     });
 
-    // Note: App factory borrows shared_state cleanly across workers.
-    let _ = configure_app;
     HttpServer::new(move || {
-        App::new()
-            .app_data(shared_state.clone())
-            .app_data(web::JsonConfig::default().limit(MAX_JSON_PAYLOAD_BYTES))
-            .configure(api::configure_api)
-            .configure(spa_web::configure_web)
+        let app_state = shared_state.clone();
+        App::new().configure(move |cfg| configure_app(cfg, app_state))
     })
     .bind((bind_addr.as_str(), bind_port))
     .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"))?
