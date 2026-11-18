@@ -174,38 +174,15 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
     if (telemetry.history24h && telemetry.history24h.length > 0) {
       return telemetry.history24h;
     }
-    const now = new Date();
-    return Array.from({ length: 24 }, (_, idx) => {
-      const hoursAgo = 23 - idx;
-      const ptDate = new Date(now.getTime() - hoursAgo * 3600 * 1000);
-      const hh = String(ptDate.getHours()).padStart(2, '0');
-      if (hoursAgo === 0) {
-        return {
-          time: 'Hiện tại',
-          cpuPercent: telemetry.cpuUsagePercent,
-          memoryPercent: telemetry.memoryPercent,
-          memoryUsedMb: telemetry.memoryUsedMb
-        };
+    return [
+      {
+        time: 'Hiện tại',
+        cpuPercent: telemetry.cpuUsagePercent,
+        memoryPercent: telemetry.memoryPercent,
+        memoryUsedMb: telemetry.memoryUsedMb,
+        requestsPerSec: telemetry.totalRequestsPerSec
       }
-      const waveCpu =
-        Math.sin((idx / 24) * Math.PI * 2) * 7 + Math.cos(idx * 1.2) * 3.5;
-      const waveMem =
-        Math.sin((idx / 24) * Math.PI * 1.5) * 3 + Math.cos(idx * 0.7) * 1.5;
-      const cpuVal = Math.max(
-        2,
-        Math.min(98, Number((telemetry.cpuUsagePercent + waveCpu).toFixed(1)))
-      );
-      const memVal = Math.max(
-        5,
-        Math.min(96, Number((telemetry.memoryPercent + waveMem).toFixed(1)))
-      );
-      return {
-        time: `${hh}:00`,
-        cpuPercent: cpuVal,
-        memoryPercent: memVal,
-        memoryUsedMb: Math.round((memVal / 100) * telemetry.memoryTotalMb)
-      };
-    });
+    ];
   }, [telemetry]);
 
   const displayedHistory = useMemo(() => {

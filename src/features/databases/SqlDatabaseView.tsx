@@ -208,7 +208,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
 
   const getConnectionUri = (db: SqlDatabase, revealPassword = false) => {
     const pw = revealPassword
-      ? db.password || 'Sql#2026!Default'
+      ? db.password || ''
       : '••••••••••••';
     if (db.engine.includes('PostgreSQL')) {
       return `postgres://${db.username}:${pw}@${db.host}:${db.port}/${db.name}`;

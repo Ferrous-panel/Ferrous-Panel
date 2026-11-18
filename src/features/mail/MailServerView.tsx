@@ -16,7 +16,7 @@ import {
 import { MailServerData, MailMessageItem } from '../types';
 
 interface MailServerViewProps {
-  mailData: MailServerData;
+  mailData: MailServerData | null;
   onAddDomain: (domain: string) => Promise<void>;
   onCreateMailbox: (payload: { email: string; domain: string; displayName: string; quotaMb: number }) => Promise<void>;
   onDeleteMailbox: (id: string) => Promise<void>;
@@ -39,7 +39,7 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
   // Mailbox creation state
   const [localPart, setLocalPart] = useState('');
   const [selectedDomain, setSelectedDomain] = useState(
-    mailData.domains[0]?.domain || ''
+    mailData?.domains[0]?.domain || ''
   );
   const [displayName, setDisplayName] = useState('');
   const [quotaMb, setQuotaMb] = useState(2048);
@@ -49,7 +49,7 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
   const [newDomain, setNewDomain] = useState('');
   const [addingDomain, setAddingDomain] = useState(false);
   const [activeDnsDomainId, setActiveDnsDomainId] = useState<string>(
-    mailData.domains[0]?.id || ''
+    mailData?.domains[0]?.id || ''
   );
   const [copiedRecord, setCopiedRecord] = useState<string | null>(null);
 
@@ -57,16 +57,16 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
   const [fwdSource, setFwdSource] = useState('');
   const [fwdDest, setFwdDest] = useState('');
   const [fwdDomain, setFwdDomain] = useState(
-    mailData.domains[0]?.domain || ''
+    mailData?.domains[0]?.domain || ''
   );
   const [creatingFwd, setCreatingFwd] = useState(false);
 
   // Webmail & SMTP Test state
   const [mailFolder, setMailFolder] = useState<'inbox' | 'sent'>('inbox');
   const [selectedMessage, setSelectedMessage] =
-    useState<MailMessageItem | null>(mailData.messages[0] || null);
+    useState<MailMessageItem | null>(mailData?.messages[0] || null);
   const [composeFrom, setComposeFrom] = useState(
-    mailData.mailboxes[0]?.email || ''
+    mailData?.mailboxes[0]?.email || ''
   );
   const [composeTo, setComposeTo] = useState('');
   const [composeSubject, setComposeSubject] = useState('');
@@ -75,6 +75,23 @@ export const MailServerView: React.FC<MailServerViewProps> = ({
   const [sendSuccessBanner, setSendSuccessBanner] = useState<string | null>(
     null
   );
+
+  if (!mailData) {
+    return (
+      <div className="p-6 rounded-xl border border-amber-500/30 bg-white dark:bg-slate-900 space-y-2">
+        <div className="inline-flex items-center gap-2 text-xs font-mono font-bold text-amber-600 dark:text-amber-400">
+          <Mail className="w-4 h-4 shrink-0" />
+          <span>Chưa hỗ trợ (HTTP 501)</span>
+        </div>
+        <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          Mail Server (Postfix / Dovecot / Rspamd) — Chưa hỗ trợ
+        </h2>
+        <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+          Phân hệ quản trị Mail Server thật chưa được tích hợp trong giai đoạn này; API <code className="font-mono">/api/mail</code> trả về <code className="font-mono">501 Not Implemented</code> để không tạo dữ liệu giả.
+        </p>
+      </div>
+    );
+  }
 
   const serverIp =
     typeof window !== 'undefined' &&

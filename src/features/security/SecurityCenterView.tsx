@@ -121,7 +121,22 @@ export const SecurityCenterView: React.FC<SecurityCenterViewProps> = ({
   return (
     <div className="space-y-8">
       {/* Section 0: Multi-Layer Anti-Hacking Shield (eBPF/XDP DDoS + Rust Pingora L7 WAF + FIM SHA-256) */}
-      {shield && (
+      {!shield ? (
+        <section className="rounded-xl border border-amber-500/30 bg-white dark:bg-slate-900 p-5 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <Shield className="w-4 h-4 text-amber-500 shrink-0" />
+              <span>Lá Chắn eBPF / XDP Anti-DDoS, Pingora WAF &amp; FIM</span>
+            </h2>
+            <span className="px-2 py-0.5 text-[11px] font-mono font-semibold rounded bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              Chưa hỗ trợ (HTTP 501)
+            </span>
+          </div>
+          <p className="text-xs text-slate-600 dark:text-slate-400">
+            eBPF/XDP, Layer-7 WAF và FIM chưa hỗ trợ ở phiên bản này. Các mục <code className="font-mono">UFW</code>, <code className="font-mono">Fail2ban</code> và <code className="font-mono">sysctl</code> bên dưới đang thao tác thật trên hệ thống.
+          </p>
+        </section>
+      ) : (
         <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 overflow-hidden min-w-0">
           <div className="p-4 sm:p-6 border-b border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-4 min-w-0">
             <div className="space-y-1 min-w-0">

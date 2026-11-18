@@ -1,0 +1,182 @@
+use crate::auth::middleware::AuthenticatedUser;
+use crate::error::PanelError;
+use crate::modules::security as sec_mod;
+use crate::state::AppState;
+use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddUfwRuleRequest {
+    pub port: String,
+    pub protocol: String,
+    pub action: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub comment: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BanIpRequest {
+    pub jail_name: String,
+    pub ip: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnbanIpRequest {
+    pub jail_name: String,
+    pub ip: String,
+}
+
+fn actor_and_ip(req: &HttpRequest) -> (String, String) {
+    let actor = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|u| u.username.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let ip = req
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    (actor, ip)
+}
+
+/// `GET /api/security` — loads real `ufw status numbered`, `fail2ban-client status`, and `sysctl` directives.
+pub async fn get_security(state: web::Data<AppState>) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let data = sec_mod::load_security_overview(state.webserver.executor().as_ref()).await?;
+    Ok(HttpResponse::Ok().json(data))
+}
+
+/// `POST /api/security/ufw` — adds a UFW rule using validated `PortOrRange` and argv `ufw` execution.
+pub async fn add_ufw_rule(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<AddUfwRuleRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let body = payload.into_inner();
+    let rules = sec_mod::add_ufw_rule(
+        state.webserver.executor().as_ref(),
+        &body.port,
+        &body.protocol,
+        &body.action,
+        &body.source,
+        &body.comment,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.ufw.add",
+        &format!("port={} proto={} action={}", body.port, body.protocol, body.action),
+    )?;
+    Ok(HttpResponse::Ok().json(rules))
+}
+
+/// `DELETE /api/security/ufw/{id}` — removes UFW numbered rule (`ufw --force delete <num>`).
+pub async fn delete_ufw_rule(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let rules = sec_mod::delete_ufw_rule(state.webserver.executor().as_ref(), &id).await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state
+        .auth_store
+        .append_audit_log(Some(&actor), &ip, "security.ufw.delete", &format!("id={id}"))?;
+    Ok(HttpResponse::Ok().json(rules))
+}
+
+/// `POST /api/security/fail2ban/ban` — bans an IP in the specified Fail2ban jail.
+pub async fn ban_ip(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<BanIpRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let body = payload.into_inner();
+    let jails = sec_mod::fail2ban_ban_unban(
+        state.webserver.executor().as_ref(),
+        &body.jail_name,
+        &body.ip,
+        true,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.fail2ban.ban",
+        &format!("jail={} targetIp={}", body.jail_name, body.ip),
+    )?;
+    Ok(HttpResponse::Ok().json(jails))
+}
+
+/// `POST /api/security/fail2ban/unban` — unbans an IP in the specified Fail2ban jail.
+pub async fn unban_ip(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<UnbanIpRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let body = payload.into_inner();
+    let jails = sec_mod::fail2ban_ban_unban(
+        state.webserver.executor().as_ref(),
+        &body.jail_name,
+        &body.ip,
+        false,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.fail2ban.unban",
+        &format!("jail={} targetIp={}", body.jail_name, body.ip),
+    )?;
+    Ok(HttpResponse::Ok().json(jails))
+}
+
+/// `PUT /api/security/hardening/{id}` — toggles a sysctl kernel hardening parameter via `sysctl -w`.
+pub async fn toggle_hardening(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let directives =
+        sec_mod::toggle_hardening(state.webserver.executor().as_ref(), &id).await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.hardening.toggle",
+        &format!("id={id}"),
+    )?;
+    Ok(HttpResponse::Ok().json(directives))
+}

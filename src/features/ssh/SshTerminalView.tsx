@@ -220,19 +220,19 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
   // Panel Admin Account & fp CLI state
   const panelAdmin: PanelAdminAccount = sshData.panelAdmin || {
     adminUsername: 'admin_ferrous',
-    adminPassword: 'Fp#Admin9824!xK',
+    adminPassword: '',
     passwordHashAlgo: 'Argon2id (Rust native)',
     panelPort: 8443,
     securityEntrance: '/panel',
     customDomain: '',
     sslEnabled: false,
-    mysqlRootPassword: 'Fp#SqlRoot9941!zM',
-    postgresRootPassword: 'Fp#PgRoot9941!zM',
+    mysqlRootPassword: '',
+    postgresRootPassword: '',
     twoFactorEnabled: false,
     allowedAdminIps: '0.0.0.0/0',
     configFile: '/etc/ferrous-panel/admin.json',
-    installedAt: '2025-05-15 08:00:00',
-    lastModifiedAt: '2025-05-15 11:30:00'
+    installedAt: '',
+    lastModifiedAt: ''
   };
   const [adminUserInput, setAdminUserInput] = useState<string>(
     panelAdmin.adminUsername
@@ -483,7 +483,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
         `Đã cập nhật cấu hình Admin VPS (${adminUserInput}) và Tên miền Panel (${customDomainInput || 'Mặc định IP'}) vào /etc/ferrous-panel/admin.json.`
       );
       setFpCliOutput(
-        `[OK] Đã ghi cấu hình Admin VPS vào ${panelAdmin.configFile}\n  Admin Username  : ${adminUserInput}\n  Admin Password  : ${adminPassInput}\n  Panel Domain    : ${customDomainInput || '(Chưa gán tên miền riêng)'}\n  Panel Port      : ${panelPortInput}/TCP (UFW Allowed)\n  Entrance Path   : ${entranceInput}`
+        `[OK] Đã ghi cấu hình Admin VPS vào ${panelAdmin.configFile}\n  Admin Username  : ${adminUserInput}\n  Admin Password  : ${adminPassInput ? '[UPDATED - REDACTED]' : '[UNCHANGED]'}\n  Panel Domain    : ${customDomainInput || '(Chưa gán tên miền riêng)'}\n  Panel Port      : ${panelPortInput}/TCP (UFW Allowed)\n  Entrance Path   : ${entranceInput}`
       );
     } finally {
       setSavingAdminAccount(false);
