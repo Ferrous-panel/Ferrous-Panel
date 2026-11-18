@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "FerrousX MVP — pure Rust HTTP/1.1 + HTTP/2 + TLS (SNI/ALPN) web server and reverse proxy."
 
 [[bin]]
@@ -14,17 +16,17 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-clap = { version = "4.5", features = ["derive", "env"] }
-fastcgi-client = "0.9"
-http-body-util = "0.1"
-hyper = { version = "1.6", features = ["server", "client", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "client", "client-legacy", "http1", "http2"] }
-mime_guess = "2.0"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile = "2.2"
-serde = { version = "1.0", features = ["derive"] }
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "fs", "io-util"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-toml = "0.8"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap.workspace = true
+fastcgi-client.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+mime_guess.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

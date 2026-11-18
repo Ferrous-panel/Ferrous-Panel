@@ -148,6 +148,38 @@ sudo bash scripts/smoke-test.sh
 
 ---
 
+## Required Libraries & Dependencies
+
+### 1. Rust Workspace Crates (`Cargo.toml` — `[workspace.dependencies]`)
+All Rust dependencies are centrally version-pinned in the root `Cargo.toml` and inherited via `.workspace = true` by `crates/ferrous-panel` and `crates/ferrousx`:
+
+| Library (`Crate`) | Version | Target Crate | Purpose |
+| :--- | :--- | :--- | :--- |
+| `actix-web` | `4.9` | `ferrous-panel` | Control-plane HTTP/REST server, middleware & routing |
+| `tokio` | `1.43` | `ferrous-panel`, `ferrousx` | Multi-threaded async I/O, process, signal & timer runtime |
+| `rusqlite` (`bundled`) | `0.32` | `ferrous-panel` | Embedded SQLite 3 with WAL mode & parameterized `params![]` queries |
+| `argon2` / `sha2` / `subtle` / `rand` | `0.5` / `0.10` / `2.6` / `0.8` | `ferrous-panel` | Argon2id password hashing, SHA-256 tokens/FIM & constant-time checks |
+| `sysinfo` | `0.33` | `ferrous-panel` | Real Linux `/proc` CPU, RAM, swap, disk & network telemetry |
+| `rust-embed` / `mime_guess` | `8.5` / `2.0` | `ferrous-panel`, `ferrousx` | Embeds prebuilt `dist/` SPA into the Rust binary |
+| `hyper` / `hyper-util` / `http-body-util` | `1.6` / `0.1` / `0.1` | `ferrousx` | Standalone HTTP/1.1 + HTTP/2 server & reverse proxy (`ferrousx-bin`) |
+| `rustls` / `tokio-rustls` / `rustls-pemfile` | `0.23` / `0.26` / `2.2` | `ferrousx` | Memory-safe TLS 1.2/1.3 (`ring`) with SNI & ALPN `h2`/`http1.1` |
+| `fastcgi-client` | `0.9` | `ferrousx` | Native PHP-FPM FastCGI gateway over Unix domain sockets |
+| `serde` / `serde_json` / `toml` | `1.0` / `1.0` / `0.8` | `ferrous-panel`, `ferrousx` | Strict `camelCase` JSON API contract & TOML vhost parser |
+| `clap` / `chrono` | `4.5` / `0.4` | `ferrous-panel`, `ferrousx` | Built-in `fp` & `ferrousx-bin` CLI parser + UTC timestamps |
+| `thiserror` / `anyhow` / `tracing` / `tracing-subscriber` | `2.0` / `1.0` / `0.1` / `0.3` | `ferrous-panel`, `ferrousx` | Typed error mapping (`PanelError`) & structured logging |
+
+### 2. Frontend UI Libraries (`package.json` — Build-Time Only, Zero Node.js on VPS)
+- **Runtime UI (`dependencies`)**: `react` (`^19.0.1`), `react-dom` (`^19.0.1`), `react-is` (`^19.3.1`), `lucide-react` (`^0.546.0`), `recharts` (`^3.10.1`), `motion` (`^12.23.24`).
+- **Build & Type-Checking (`devDependencies`)**: `vite` (`^8.3.0`), `@vitejs/plugin-react` (`^6.1.1`), `tailwindcss` (`^4.3.3`), `@tailwindcss/vite` (`^4.3.3`), `autoprefixer` (`^10.4.21`), `typescript` (`^7.0.2`), `@types/react` (`^19.3.0`), `@types/react-dom` (`^19.3.0`).
+
+### 3. Ubuntu 22.04 / 24.04 LTS System Packages (`install.sh`)
+Automatically installed via `apt-get` during 1-command installation:
+- **Compiler & Build**: `build-essential`, `pkg-config`, `libssl-dev`, `ca-certificates`, `curl`, `git` + `rustup` (`1.85.0` minimal profile).
+- **Archive & Crypto**: `tar`, `zstd`, `zip`, `unzip`, `openssl`.
+- **Network & Security**: `ufw`, `fail2ban`, `certbot`, `nginx` (when `--engine nginx`).
+
+---
+
 ## Repository Structure
 
 ```text
