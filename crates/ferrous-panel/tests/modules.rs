@@ -713,7 +713,7 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
             "stopped status",
         )?;
 
-        // 3. Rebuild action and git-deploy must return HTTP 501
+        // 3. Rebuild action and git-deploy return HTTP 200 OK and update deploy metadata
         let rebuild_req = TestRequest::post()
             .uri(&format!("/api/apps/{app_id}/action"))
             .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
@@ -724,8 +724,8 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("rebuild action failed: {e}"))?;
         ensure_eq(
             &rebuild_resp.status(),
-            &StatusCode::NOT_IMPLEMENTED,
-            "rebuild must return 501",
+            &StatusCode::OK,
+            "rebuild must return 200 OK",
         )?;
 
         let git_req = TestRequest::post()
@@ -737,8 +737,8 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("git-deploy failed: {e}"))?;
         ensure_eq(
             &git_resp.status(),
-            &StatusCode::NOT_IMPLEMENTED,
-            "git-deploy must return 501",
+            &StatusCode::OK,
+            "git-deploy must return 200 OK",
         )?;
 
         // 4. Update config writes new MemoryMax & Environment lines
@@ -763,23 +763,23 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
             "systemd unit updated cleanly",
         )?;
 
-        // 5. Unsupported site-settings feature returns 501
-        let bad_settings_req = TestRequest::put()
+        // 5. Site-settings persists per-site redirects and returns 200 OK
+        let settings_req = TestRequest::put()
             .uri(&format!("/api/apps/{app_id}/site-settings"))
             .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
             .set_json(json!({
                 "sslEnabled": false,
                 "forceHttps": false,
-                "redirects": [{ "id": "r1", "sourcePath": "/old", "targetUrl": "/new", "statusCode": 301 }]
+                "redirects": [{ "id": "r1", "sourcePath": "/old", "targetUrl": "/new", "type": "301", "keepQuery": true, "enabled": true }]
             }))
             .to_request();
-        let bad_settings_resp = try_call_service(&app, bad_settings_req)
+        let settings_resp = try_call_service(&app, settings_req)
             .await
             .map_err(|e| anyhow::anyhow!("site-settings failed: {e}"))?;
         ensure_eq(
-            &bad_settings_resp.status(),
-            &StatusCode::NOT_IMPLEMENTED,
-            "unsupported per-site redirects return 501",
+            &settings_resp.status(),
+            &StatusCode::OK,
+            "per-site redirects in site-settings must return 200 OK",
         )?;
 
         // 6. Real TCP HTTP probe returns statusCode=200 & real bodyPreview
@@ -909,11 +909,11 @@ fn security_ufw_fail2ban_and_validation() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("body error: {e}"))?,
         )?;
         ensure(
-            sec_val.get("shield").is_none(),
-            "eBPF/WAF shield omitted cleanly when unimplemented",
+            sec_val.get("antiDdosShield").is_some(),
+            "eBPF/WAF antiDdosShield must be populated in GET /api/security",
         )?;
 
-        // 4. eBPF DDoS mode returns 501
+        // 4. eBPF DDoS mode returns 200 OK and switches protectionMode
         let ddos_req = TestRequest::post()
             .uri("/api/security/ddos-mode")
             .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
@@ -924,8 +924,8 @@ fn security_ufw_fail2ban_and_validation() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("ddos mode error: {e}"))?;
         ensure_eq(
             &ddos_resp.status(),
-            &StatusCode::NOT_IMPLEMENTED,
-            "eBPF ddos-mode must return 501",
+            &StatusCode::OK,
+            "eBPF ddos-mode must return 200 OK",
         )?;
 
         ensure(!exec.calls_for("ufw").is_empty(), "ufw CLI executed")?;

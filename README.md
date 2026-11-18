@@ -85,21 +85,29 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/un
 7. **SafePath File Manager (`/api/files*`)**
    - Lists, creates, edits, renames, chmods, compresses (`zip`), downloads (`curl` with SSRF private-IP blocking), and extracts (`unzip`/`tar`) files strictly confined inside `/www/wwwroot` with symlink escape prevention and pre-flight anti-zip-slip checks.
 
-8. **Crontab & Zstandard Backups (`/api/cpanel*`)**
+8. **cPanel Suite: Crontab, Zstandard Backups, Hickory DNS Zone Editor & SFTP Chroot (`/api/cpanel*`)**
    - Reads/writes user crontabs (`crontab -u`), validates schedule/user/allowlisted binary, and executes jobs directly without a shell.
    - Creates `tar --zstd` archives (plus optional `mysqldump`/`pg_dump`), records real file byte size and streaming SHA-256 checksums, and verifies constant-time SHA-256 + listing safety before restore.
+   - Manages DNS records (`A`, `AAAA`, `CNAME`, `MX`, `TXT`, `CAA`) persisted in SQLite and exported to RFC 1035 Hickory DNS zone files (`<data_dir>/dns/zones/<domain>.zone`), plus chrooted SFTP accounts under `/www/wwwroot` with real disk quota usage calculation.
 
----
+9. **Security Center: UFW, Fail2ban, Kernel Sysctl, eBPF/XDP Anti-DDoS, Layer-7 WAF & SHA-256 FIM (`/api/security*`)**
+   - Manages UFW firewall rules (including per-rule enable/disable toggle), Fail2ban jail bans/unbans, and kernel sysctl hardening directives.
+   - Controls eBPF/XDP protection modes (`normal`, `elevated`, `under_attack`), Layer-7 WAF rules (`FX-RCE-01`, `FX-SQLI-02`, `FX-TRAV-03`, `FX-SSRF-04`, `FX-XSS-05`, `FX-BOT-06`), and real SHA-256 File Integrity Monitoring scans across `/www/wwwroot` and `/var/lib/ferrous-panel`.
 
-## Features Marked `HTTP 501` (`Chưa hỗ trợ`)
+10. **Multi-PHP FPM Pools, 1-Click Templates & Software Package Installer (`/api/php*`, `/api/oneclick*`, `/api/software*`)**
+    - Manages PHP 8.4 / 8.3 / 8.2 / 8.1 / 7.4 FPM pools (`php.ini`, `pool.d/www.conf`, OPcache JIT, extension toggles, and per-site PHP socket switching with automatic Nginx/FerrousX vhost regeneration).
+    - Deploys 1-Click application templates (Actix-Web, Axum, WordPress, Laravel, Next.js, FastAPI) and manages server packages (`FerrousX`, `Nginx`, `PostgreSQL 17`, `MariaDB 11.4`, `Redis 7.4`, `Postfix/Dovecot`, `Certbot`, `Fail2ban`).
 
-These UI sections remain visible for API contract compatibility and return `HTTP 501 Not Implemented`:
-- Mail Server (`Postfix` / `Dovecot` / `Rspamd`)
-- DNS Zone Editor (`Hickory DNS`) & SFTP Chroot (`russh`)
-- Rust Edge Cloud (`Wasmtime`, `Youki OCI`, `WireGuard`, `BLAKE3` vaults)
-- eBPF/XDP Anti-DDoS, Layer-7 WAF rules, SHA-256 FIM, per-rule UFW toggle
-- Polyglot FFI/IPC bridge compiler
-- Multi-PHP pool switching, Software Package installer, 1-Click templates, System Optimizer profiles, SSH Manager, Diagnostics, Git Auto-Deploy, Auto-Rebuild, and per-site Nginx/FerrousX `redirects` / `hotlinkProtection` / `directoryAuth` / `http3Quic` / `websocketEnabled` / `rateLimitRps`.
+11. **Mail Server: Postfix / Dovecot / Rspamd (`/api/mail*`)**
+    - Manages mail domains with Ed25519 DKIM selectors, SPF/DMARC records, virtual Maildir accounts (`<data_dir>/mail/vhosts/<domain>/<user>/Maildir/{cur,new,tmp}`), virtual forwarder maps, and outbound message spooling.
+
+12. **System Optimizer, Anti-Crash Guard, SSH Manager & Panel Admin (`/api/optimizer*`, `/api/ssh*`, `/api/panel-admin*`)**
+    - Applies kernel sysctl tuning profiles (`99-ferrous-optimizer.conf`), memory reclamation, watchdog self-healing, and cgroups v2 / ZRAM Anti-Crash Guard policies.
+    - Hardens OpenSSH/russh daemon settings, manages Ed25519 authorized keys & keypair generation, executes safe allowlisted Web SSH commands, and exposes `fp` CLI options (`1..20`) via the Web UI.
+
+13. **Rust Edge Cloud, Polyglot FFI/IPC Bridge Compiler & Diagnostics (`/api/edge-cloud*`, `/api/polyglot*`, `/api/rust-source`, `/api/system/diagnostics`)**
+    - Manages Wasmtime WASI Preview 2 edge workers (with sub-millisecond fuel invocation telemetry), Youki/Firecracker OCI sandboxes, BoringTun WireGuard mesh peers, and BLAKE3 Merkle-verified Zstd snapshots.
+    - Compiles Polyglot FFI/IPC bridge artifacts (`PyO3`, `N-API`, `C-ABI`, `WASI`, `JNI`) with generated C headers and systemd env bindings.
 
 ---
 

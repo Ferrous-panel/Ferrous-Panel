@@ -1290,7 +1290,9 @@ export function usePanelController(
       });
       if (res.ok) {
         const antiDdos = await res.json();
-        setSecurity((prev) => (prev ? { ...prev, antiDdos } : prev));
+        setSecurity((prev) =>
+          prev ? { ...prev, antiDdos, antiDdosShield: antiDdos } : prev
+        );
       }
     } catch (err) {
       console.error('[FerrousPanel] handleChangeDdosMode error:', err);
@@ -1308,7 +1310,9 @@ export function usePanelController(
       );
       if (res.ok) {
         const antiDdos = await res.json();
-        setSecurity((prev) => (prev ? { ...prev, antiDdos } : prev));
+        setSecurity((prev) =>
+          prev ? { ...prev, antiDdos, antiDdosShield: antiDdos } : prev
+        );
       }
     } catch (err) {
       console.error('[FerrousPanel] handleToggleWafRule error:', err);
@@ -1322,9 +1326,12 @@ export function usePanelController(
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.antiDdos) {
+        const shield = data.antiDdosShield || data.antiDdos;
+        if (shield) {
           setSecurity((prev) =>
-            prev ? { ...prev, antiDdos: data.antiDdos } : prev
+            prev
+              ? { ...prev, antiDdos: shield, antiDdosShield: shield }
+              : prev
           );
         }
       }

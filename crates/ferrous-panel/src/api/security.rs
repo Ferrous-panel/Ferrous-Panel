@@ -44,12 +44,16 @@ fn actor_and_ip(req: &HttpRequest) -> (String, String) {
     (actor, ip)
 }
 
-/// `GET /api/security` — loads real `ufw status numbered`, `fail2ban-client status`, and `sysctl` directives.
+/// `GET /api/security` — loads real `ufw status numbered`, `fail2ban-client status`, `sysctl` directives, and Anti-DDoS WAF/FIM state.
 pub async fn get_security(state: web::Data<AppState>) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = sec_mod::load_security_overview(state.webserver.executor().as_ref()).await?;
+    let data = sec_mod::load_security_overview(
+        &state.modules,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(data))
 }
 
@@ -79,6 +83,33 @@ pub async fn add_ufw_rule(
         &ip,
         "security.ufw.add",
         &format!("port={} proto={} action={}", body.port, body.protocol, body.action),
+    )?;
+    Ok(HttpResponse::Ok().json(rules))
+}
+
+/// `PUT /api/security/ufw/{id}/toggle` — toggles per-rule enabled state.
+pub async fn toggle_ufw_rule(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let rules = sec_mod::toggle_ufw_rule(
+        &state.modules,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.ufw.toggle",
+        &format!("id={id}"),
     )?;
     Ok(HttpResponse::Ok().json(rules))
 }
@@ -179,4 +210,89 @@ pub async fn toggle_hardening(
         &format!("id={id}"),
     )?;
     Ok(HttpResponse::Ok().json(directives))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DdosModeRequest {
+    #[serde(default)]
+    pub mode: String,
+}
+
+/// `POST /api/security/ddos-mode` — switches Anti-DDoS shield protection mode (`normal`, `elevated`, `under_attack`).
+pub async fn set_ddos_mode(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: Option<web::Json<DdosModeRequest>>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let mode = payload
+        .map(|p| p.into_inner().mode)
+        .unwrap_or_else(|| "under_attack".to_string());
+    let shield = sec_mod::set_ddos_mode(
+        &state.modules,
+        state.webserver.executor().as_ref(),
+        &mode,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.ddos_mode",
+        &format!("mode={}", shield.protection_mode),
+    )?;
+    Ok(HttpResponse::Ok().json(shield))
+}
+
+/// `PUT /api/security/waf/{id}/toggle` — enables/disables a Layer-7 WAF rule.
+pub async fn toggle_waf_rule(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let shield = sec_mod::toggle_waf_rule(&state.modules, &id)?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.waf.toggle",
+        &format!("id={id}"),
+    )?;
+    Ok(HttpResponse::Ok().json(shield))
+}
+
+/// `POST /api/security/fim-scan` — executes a real SHA-256 File Integrity Monitoring scan across `wwwroot` and `data_dir`.
+pub async fn run_fim_scan(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let (scanned_files, sha256_root, shield) =
+        sec_mod::run_fim_scan(&state.modules, &state.config)?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.fim.scan",
+        &format!("scannedFiles={scanned_files} sha256={sha256_root}"),
+    )?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "status": "verified",
+        "scannedFiles": scanned_files,
+        "sha256Root": sha256_root,
+        "antiDdos": shield,
+        "antiDdosShield": shield,
+    })))
 }

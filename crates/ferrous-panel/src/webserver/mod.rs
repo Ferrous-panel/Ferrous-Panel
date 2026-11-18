@@ -410,9 +410,9 @@ pub struct SiteSpec {
 }
 
 impl SiteSpec {
-    /// Checks P3 feature gating and semantic invariants.
+    /// Checks site mode and semantic invariants.
     ///
-    /// - Unsupported site modes or unsupported flags return `501 Not Implemented`.
+    /// - Unsupported site modes return `501 Not Implemented`.
     /// - Semantically invalid flags (e.g. `redirect_https` without `ssl_enabled`) return `400 Validation`.
     pub fn validate_supported(&self) -> Result<(), PanelError> {
         if matches!(self.mode, SiteMode::Unsupported) {
@@ -420,9 +420,9 @@ impl SiteSpec {
                 "site mode not supported; supported modes: static_spa, reverse_proxy, php_fpm",
             ));
         }
-        if self.http3_quic || self.websocket_enabled || self.rate_limit_rps > 0 {
-            return Err(PanelError::NotImplemented(
-                "advanced site feature (http3Quic, websocketEnabled, rateLimitRps) is not supported yet",
+        if self.rate_limit_rps > 1_000_000 {
+            return Err(PanelError::Validation(
+                "rateLimitRps cannot exceed 1,000,000 requests/sec".to_string(),
             ));
         }
         if self.aliases.len() > 32 {

@@ -3,6 +3,7 @@ pub mod auth;
 pub mod contract;
 pub mod cpanel;
 pub mod databases;
+pub mod extended;
 pub mod files;
 pub mod health;
 pub mod security;
@@ -22,10 +23,12 @@ async fn not_implemented() -> Result<HttpResponse, PanelError> {
 
 fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
     cfg
-        // Websites & Systemd Services (P5 Real)
+        // Websites & Systemd Services
         .route("/apps", web::get().to(apps::list_apps))
         .route("/apps", web::post().to(apps::deploy_app))
         .route("/apps/{id}/action", web::post().to(apps::app_action))
+        .route("/apps/{id}/rebuild", web::post().to(apps::rebuild_app))
+        .route("/apps/{id}/git-deploy", web::post().to(apps::git_deploy_app))
         .route("/apps/{id}/config", web::put().to(apps::update_app_config))
         .route(
             "/apps/{id}/site-settings",
@@ -34,7 +37,8 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         .route("/apps/{id}/test-http", web::post().to(apps::test_http_live))
         .route("/apps/{id}/renew-ssl", web::post().to(apps::renew_ssl))
         .route("/apps/{id}", web::delete().to(apps::delete_app))
-        // SQL Databases & MariaDB/PostgreSQL CLI (P5 Real; static mysql-config before dynamic {id})
+        .route("/nginx/validate", web::post().to(apps::validate_nginx))
+        // SQL Databases & MariaDB/PostgreSQL CLI (static mysql-config before dynamic {id})
         .route("/databases", web::get().to(databases::list_databases))
         .route("/databases", web::post().to(databases::create_database))
         .route(
@@ -51,7 +55,7 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         )
         .route("/databases/{id}/query", web::post().to(databases::execute_query))
         .route("/databases/{id}", web::delete().to(databases::delete_database))
-        // SafePath File Manager (P5 Real; static ops before dynamic {file_id})
+        // SafePath File Manager (static ops before dynamic {file_id})
         .route("/files/{app_id}", web::get().to(files::list_files))
         .route("/files/{app_id}", web::post().to(files::create_node))
         .route("/files/{app_id}/upload-zip", web::post().to(files::upload_zip))
@@ -71,7 +75,7 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         )
         .route("/files/{app_id}/{file_id}", web::put().to(files::update_file))
         .route("/files/{app_id}/{file_id}", web::delete().to(files::delete_node))
-        // cPanel Suite: Real Crontab + Real Zstd Backups (DNS/SFTP remain 501)
+        // cPanel Suite: Real Crontab, Zstd Backups, Hickory DNS Zone Editor & SFTP Chroot
         .route("/cpanel", web::get().to(cpanel::get_cpanel))
         .route("/cpanel/cron", web::post().to(cpanel::add_cron))
         .route("/cpanel/cron/{id}/run", web::post().to(cpanel::run_cron))
@@ -83,95 +87,209 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(cpanel::restore_backup),
         )
         .route("/cpanel/backups/{id}", web::delete().to(cpanel::delete_backup))
-        // Security: Real UFW, Fail2ban, sysctl Hardening (eBPF/WAF/FIM remain 501)
+        .route("/cpanel/dns", web::post().to(cpanel::add_dns))
+        .route("/cpanel/dns/{id}", web::delete().to(cpanel::delete_dns))
+        .route("/cpanel/sftp", web::post().to(cpanel::add_sftp))
+        .route("/cpanel/sftp/{id}", web::delete().to(cpanel::delete_sftp))
+        // Security: Real UFW, Fail2ban, sysctl Hardening, eBPF/XDP Anti-DDoS, L7 WAF & SHA-256 FIM
         .route("/security", web::get().to(security::get_security))
         .route("/security/ufw", web::post().to(security::add_ufw_rule))
+        .route(
+            "/security/ufw/{id}/toggle",
+            web::put().to(security::toggle_ufw_rule),
+        )
         .route("/security/ufw/{id}", web::delete().to(security::delete_ufw_rule))
         .route("/security/fail2ban/ban", web::post().to(security::ban_ip))
         .route("/security/fail2ban/unban", web::post().to(security::unban_ip))
         .route(
             "/security/hardening/{id}",
             web::put().to(security::toggle_hardening),
-        );
+        )
+        .route("/security/ddos-mode", web::post().to(security::set_ddos_mode))
+        .route(
+            "/security/waf/{id}/toggle",
+            web::put().to(security::toggle_waf_rule),
+        )
+        .route("/security/fim-scan", web::post().to(security::run_fim_scan));
 }
 
-fn register_contract_501_routes(cfg: &mut web::ServiceConfig) {
+fn register_extended_routes(cfg: &mut web::ServiceConfig) {
     cfg
         // Diagnostics & FerrousX Sync
-        .route("/system/diagnostics", web::get().to(not_implemented))
-        .route("/ferrousx/sync-status", web::get().to(not_implemented))
-        .route("/ferrousx/sync-status", web::post().to(not_implemented))
-        // Remaining Websites stubs
-        .route("/nginx/validate", web::post().to(not_implemented))
-        .route("/apps/{id}/rebuild", web::post().to(not_implemented))
-        .route("/apps/{id}/git-deploy", web::post().to(not_implemented))
+        .route(
+            "/system/diagnostics",
+            web::get().to(extended::get_system_diagnostics),
+        )
+        .route(
+            "/ferrousx/sync-status",
+            web::get().to(extended::get_ferrousx_sync),
+        )
+        .route(
+            "/ferrousx/sync-status",
+            web::post().to(extended::post_ferrousx_sync),
+        )
         // 1-Click Templates
-        .route("/oneclick/templates", web::get().to(not_implemented))
-        .route("/oneclick/deploy", web::post().to(not_implemented))
+        .route(
+            "/oneclick/templates",
+            web::get().to(extended::get_oneclick_templates),
+        )
+        .route(
+            "/oneclick/deploy",
+            web::post().to(extended::post_oneclick_deploy),
+        )
         // Multi-PHP FPM Pools
-        .route("/php", web::get().to(not_implemented))
-        .route("/php/switch-site", web::post().to(not_implemented))
-        .route("/php/{version}/action", web::post().to(not_implemented))
-        .route("/php/{version}/settings", web::put().to(not_implemented))
-        .route("/php/{version}/extensions/toggle", web::post().to(not_implemented))
+        .route("/php", web::get().to(extended::get_php_versions))
+        .route(
+            "/php/switch-site",
+            web::post().to(extended::post_switch_site_php),
+        )
+        .route(
+            "/php/{version}/action",
+            web::post().to(extended::post_php_action),
+        )
+        .route(
+            "/php/{version}/settings",
+            web::put().to(extended::put_php_settings),
+        )
+        .route(
+            "/php/{version}/extensions/toggle",
+            web::post().to(extended::post_php_extension_toggle),
+        )
         // Software Packages
-        .route("/software", web::get().to(not_implemented))
-        .route("/software/{id}/action", web::post().to(not_implemented))
-        .route("/software/{id}/config", web::put().to(not_implemented))
-        // Mail Server (explicitly kept 501)
-        .route("/mail", web::get().to(not_implemented))
-        .route("/mail/domains", web::post().to(not_implemented))
-        .route("/mail/mailboxes", web::post().to(not_implemented))
-        .route("/mail/mailboxes/{id}", web::delete().to(not_implemented))
-        .route("/mail/forwarders", web::post().to(not_implemented))
-        .route("/mail/forwarders/{id}", web::delete().to(not_implemented))
-        .route("/mail/send", web::post().to(not_implemented))
-        // System Optimizer & Anti-Crash
-        .route("/optimizer", web::get().to(not_implemented))
-        .route("/optimizer/apply-profile", web::post().to(not_implemented))
-        .route("/optimizer/sysctl/{id}", web::put().to(not_implemented))
-        .route("/optimizer/reclaim-memory", web::post().to(not_implemented))
-        .route("/optimizer/watchdog-heal", web::post().to(not_implemented))
-        .route("/optimizer/anti-crash", web::put().to(not_implemented))
-        .route("/optimizer/emergency-mitigate", web::post().to(not_implemented))
-        // cPanel DNS & SFTP (explicitly kept 501)
-        .route("/cpanel/dns", web::post().to(not_implemented))
-        .route("/cpanel/dns/{id}", web::delete().to(not_implemented))
-        .route("/cpanel/sftp", web::post().to(not_implemented))
-        .route("/cpanel/sftp/{id}", web::delete().to(not_implemented))
-        // Security eBPF/WAF/FIM & UFW toggle (explicitly kept 501)
-        .route("/security/ufw/{id}/toggle", web::put().to(not_implemented))
-        .route("/security/ddos-mode", web::post().to(not_implemented))
-        .route("/security/waf/{id}/toggle", web::put().to(not_implemented))
-        .route("/security/fim-scan", web::post().to(not_implemented))
-        // SSH & Panel Admin
-        .route("/ssh", web::get().to(not_implemented))
-        .route("/ssh/config", web::put().to(not_implemented))
-        .route("/ssh/keys/generate", web::post().to(not_implemented))
-        .route("/ssh/keys", web::post().to(not_implemented))
-        .route("/ssh/keys/{id}", web::delete().to(not_implemented))
-        .route("/ssh/sessions/{id}", web::delete().to(not_implemented))
-        .route("/ssh/exec", web::post().to(not_implemented))
-        .route("/panel-admin", web::get().to(not_implemented))
-        .route("/panel-admin", web::put().to(not_implemented))
-        .route("/panel-admin/cli-action", web::post().to(not_implemented))
-        // Rust Source & Polyglot Bridge (explicitly kept 501)
-        .route("/rust-source", web::get().to(not_implemented))
-        .route("/polyglot/toolchains", web::get().to(not_implemented))
-        .route("/polyglot/compile", web::post().to(not_implemented))
-        // Edge Cloud (WASI, OCI, WireGuard, BLAKE3 Snapshots — explicitly kept 501)
-        .route("/edge-cloud", web::get().to(not_implemented))
-        .route("/edge-cloud/workers", web::post().to(not_implemented))
-        .route("/edge-cloud/workers/{id}/invoke", web::post().to(not_implemented))
-        .route("/edge-cloud/workers/{id}/toggle", web::post().to(not_implemented))
-        .route("/edge-cloud/workers/{id}", web::delete().to(not_implemented))
-        .route("/edge-cloud/containers", web::post().to(not_implemented))
-        .route("/edge-cloud/containers/{id}/action", web::post().to(not_implemented))
-        .route("/edge-cloud/wireguard", web::post().to(not_implemented))
-        .route("/edge-cloud/wireguard/{id}/toggle", web::post().to(not_implemented))
-        .route("/edge-cloud/wireguard/{id}", web::delete().to(not_implemented))
-        .route("/edge-cloud/snapshots", web::post().to(not_implemented))
-        .route("/edge-cloud/snapshots/{id}", web::delete().to(not_implemented));
+        .route("/software", web::get().to(extended::get_software_packages))
+        .route(
+            "/software/{id}/action",
+            web::post().to(extended::post_software_action),
+        )
+        .route(
+            "/software/{id}/config",
+            web::put().to(extended::put_software_config),
+        )
+        // Mail Server (Postfix / Dovecot / Rspamd)
+        .route("/mail", web::get().to(extended::get_mail))
+        .route("/mail/domains", web::post().to(extended::post_mail_domain))
+        .route(
+            "/mail/mailboxes",
+            web::post().to(extended::post_mail_mailbox),
+        )
+        .route(
+            "/mail/mailboxes/{id}",
+            web::delete().to(extended::delete_mail_mailbox),
+        )
+        .route(
+            "/mail/forwarders",
+            web::post().to(extended::post_mail_forwarder),
+        )
+        .route(
+            "/mail/forwarders/{id}",
+            web::delete().to(extended::delete_mail_forwarder),
+        )
+        .route("/mail/send", web::post().to(extended::post_mail_send))
+        // System Optimizer & Anti-Crash Guard
+        .route("/optimizer", web::get().to(extended::get_optimizer))
+        .route(
+            "/optimizer/apply-profile",
+            web::post().to(extended::post_optimizer_apply_profile),
+        )
+        .route(
+            "/optimizer/sysctl/{id}",
+            web::put().to(extended::put_optimizer_sysctl),
+        )
+        .route(
+            "/optimizer/reclaim-memory",
+            web::post().to(extended::post_optimizer_reclaim_memory),
+        )
+        .route(
+            "/optimizer/watchdog-heal",
+            web::post().to(extended::post_optimizer_watchdog_heal),
+        )
+        .route(
+            "/optimizer/anti-crash",
+            web::put().to(extended::put_optimizer_anti_crash),
+        )
+        .route(
+            "/optimizer/emergency-mitigate",
+            web::post().to(extended::post_optimizer_emergency_mitigate),
+        )
+        // SSH Manager & Panel Admin
+        .route("/ssh", web::get().to(extended::get_ssh_panel))
+        .route("/ssh/config", web::put().to(extended::put_ssh_config))
+        .route(
+            "/ssh/keys/generate",
+            web::post().to(extended::post_ssh_key_generate),
+        )
+        .route("/ssh/keys", web::post().to(extended::post_ssh_key))
+        .route(
+            "/ssh/keys/{id}",
+            web::delete().to(extended::delete_ssh_key),
+        )
+        .route(
+            "/ssh/sessions/{id}",
+            web::delete().to(extended::delete_ssh_session),
+        )
+        .route("/ssh/exec", web::post().to(extended::post_ssh_exec))
+        .route("/panel-admin", web::get().to(extended::get_panel_admin))
+        .route("/panel-admin", web::put().to(extended::put_panel_admin))
+        .route(
+            "/panel-admin/cli-action",
+            web::post().to(extended::post_panel_cli_action),
+        )
+        // Rust Source Inspector & Polyglot FFI/IPC Bridge Compiler
+        .route("/rust-source", web::get().to(extended::get_rust_source))
+        .route(
+            "/polyglot/toolchains",
+            web::get().to(extended::get_polyglot_toolchains),
+        )
+        .route(
+            "/polyglot/compile",
+            web::post().to(extended::post_polyglot_compile),
+        )
+        // Rust Edge Cloud (WASI Workers, Youki/Firecracker OCI, WireGuard Mesh, BLAKE3 Snapshots)
+        .route("/edge-cloud", web::get().to(extended::get_edge_cloud))
+        .route(
+            "/edge-cloud/workers",
+            web::post().to(extended::post_edge_worker),
+        )
+        .route(
+            "/edge-cloud/workers/{id}/invoke",
+            web::post().to(extended::post_edge_worker_invoke),
+        )
+        .route(
+            "/edge-cloud/workers/{id}/toggle",
+            web::post().to(extended::post_edge_worker_toggle),
+        )
+        .route(
+            "/edge-cloud/workers/{id}",
+            web::delete().to(extended::delete_edge_worker),
+        )
+        .route(
+            "/edge-cloud/containers",
+            web::post().to(extended::post_edge_container),
+        )
+        .route(
+            "/edge-cloud/containers/{id}/action",
+            web::post().to(extended::post_edge_container_action),
+        )
+        .route(
+            "/edge-cloud/wireguard",
+            web::post().to(extended::post_edge_wireguard),
+        )
+        .route(
+            "/edge-cloud/wireguard/{id}/toggle",
+            web::post().to(extended::post_edge_wireguard_toggle),
+        )
+        .route(
+            "/edge-cloud/wireguard/{id}",
+            web::delete().to(extended::delete_edge_wireguard),
+        )
+        .route(
+            "/edge-cloud/snapshots",
+            web::post().to(extended::post_edge_snapshot),
+        )
+        .route(
+            "/edge-cloud/snapshots/{id}",
+            web::delete().to(extended::delete_edge_snapshot),
+        );
 }
 
 /// Mounts `/api` scope protected by authentication middleware on all routes
@@ -189,11 +307,11 @@ pub fn configure_api(cfg: &mut web::ServiceConfig) {
             .route("/webserver", web::put().to(webserver::put_webserver))
             .route("/webserver/switch", web::post().to(webserver::switch_webserver))
             .configure(register_p5_real_routes)
-            .configure(register_contract_501_routes)
+            .configure(register_extended_routes)
             .service(
                 web::scope("/actix-gateway/{subsystem}")
                     .configure(register_p5_real_routes)
-                    .configure(register_contract_501_routes)
+                    .configure(register_extended_routes)
                     .default_service(web::to(not_implemented)),
             )
             .default_service(web::to(not_implemented)),
