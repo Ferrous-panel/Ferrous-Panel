@@ -1,7 +1,7 @@
 # FerrousPanel — Trạng thái tiến độ (P1–P7 & Open-Source 1-Command Cargo Installer)
 
 ## Phase hiện tại
-- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL (TỰ ĐỘNG CÀI CARGO + 2GB SWAP + PREBUILT DIST)**
+- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL (TỰ ĐỘNG CÀI CARGO + BIẾN MÔI TRƯỜNG + 2GB SWAP + PREBUILT DIST)**
 
 ---
 
@@ -25,7 +25,7 @@
   - Các mục Mail, DNS, SFTP, Edge Cloud, eBPF/WAF/FIM, Polyglot giữ nguyên `501` và hiển thị nhãn `"Chưa hỗ trợ"` trên UI.
 - [x] **P6 – GỠ JS SERVER PRODUCTION, CLI `fp` & OPEN-SOURCE 1-COMMAND INSTALL** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`)
   - Đã xóa `server.ts`, `rust-backend/scripts/*.mjs`, `Ferrous-panel/bin/*.mjs`, `bun.lock`, và crate thừa `crates/ferrous-core/`; chuyển `rust-backend/` và `Ferrous-panel/` cũ vào `_archive/` (`exclude = ["_archive"]` trong `Cargo.toml`).
-  - Theo lựa chọn của người dùng (Lựa chọn 2): `install.sh` tự động tạo 2GB `/swapfile` nếu VPS `< 4GB RAM` và chưa có Swap, tự động cài `rustup` + `cargo` `1.85.0` (`--profile minimal`), dùng gói giao diện tĩnh `dist/` đã build sẵn (không cần cài Node.js trên VPS) và chạy `cargo build --release` trực tiếp trên VPS (kèm tuỳ chọn `--prebuilt-binary`).
+  - `install.sh` tự động tạo 2GB `/swapfile` nếu VPS `< 4GB RAM` và chưa có Swap, tự động cài `rustup` + `cargo` `1.85.0` (`--profile minimal`), tự động đăng ký biến môi trường vào `/etc/profile.d/ferrous-panel.sh`, `/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc` và `/etc/ferrous-panel/panel.env` (cũng như `ensure_default_env_file` trong `cli.rs`), dùng gói giao diện tĩnh `dist/` đã build sẵn và chạy `cargo build --release` trực tiếp trên VPS.
 - [x] **P7 – KIỂM CHỨNG** (`scripts/smoke-test.sh`)
   - Script kiểm chứng đầu-cuối cho Ubuntu 24.04 sạch với 7 hạng mục bắt buộc, in `PASS`/`FAIL` từng mục và `exit 1` nếu có bất kỳ mục nào `FAIL`.
 
@@ -50,6 +50,6 @@
 3. **Dọn dẹp crate/file thừa & đồng bộ (`crates/ferrous-core`, `bun.lock`, `main.rs`)**:
    - *Nguyên nhân gốc*: `crates/ferrous-core` là crate nháp từ trước P1 không được `ferrous-panel` hay `ferrousx` sử dụng; `main.rs` lặp lại cấu hình route thay vì gọi `configure_app` của `lib.rs`; `.env.example` và `CONTRIBUTING.md` còn chứa nội dung mẫu cũ.
    - *Cách đã sửa*: Xóa `crates/ferrous-core/` và `bun.lock`, cập nhật `Cargo.toml`, đồng bộ `main.rs` gọi trực tiếp `configure_app(cfg, app_state)`, đồng bộ `.env.example`, `CONTRIBUTING.md`, và `README.md`.
-4. **Tối ưu `install.sh` tự động cài `cargo` + 2GB Swap + Prebuilt `dist/`**:
-   - *Nguyên nhân gốc*: Người dùng chọn Lựa chọn 2 (tự động cài `cargo` khi chạy `install.sh`), yêu cầu tải sẵn gói giao diện tĩnh `dist/` (để không cần cài Node.js trên VPS) và tự động tạo 2GB Swap nếu VPS `< 4GB RAM` và chưa có Swap.
-   - *Cách đã sửa*: Bỏ `dist/` khỏi `.gitignore` và đóng gói thêm `ferrous-dist.tar.gz` trong `.github/workflows/ci-release.yml`; cập nhật `install.sh` tự động tạo `/swapfile` 2GB khi RAM `< 4GB`, tự động cài `rustup` + `cargo` 1.85.0 (`--profile minimal`), nạp `dist/` và chạy `cargo build --release` trực tiếp trên VPS.
+4. **Tối ưu `install.sh` tự động cài `cargo` + tự động thêm biến môi trường + 2GB Swap + Prebuilt `dist/`**:
+   - *Nguyên nhân gốc*: Sau khi cài `rustup`/`cargo` và `ferrous-panel`, các phiên SSH mới cần tự động nhận `PATH` (`/usr/local/bin`, `/root/.cargo/bin`), `CARGO_HOME`, `RUSTUP_HOME` và biến `FERROUS_*` mà không phải `export` tay.
+   - *Cách đã sửa*: Thêm `configure_shell_env()` vào `install.sh` tự tạo `/etc/profile.d/ferrous-panel.sh` và móc vào `/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`; đồng thời bổ sung `ensure_default_env_file()` trong `crates/ferrous-panel/src/cli.rs` để tự khởi tạo đầy đủ 11 biến môi trường trong `/etc/ferrous-panel/panel.env` (`0600`) khi chạy `fp init`.

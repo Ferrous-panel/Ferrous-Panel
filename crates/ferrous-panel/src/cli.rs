@@ -169,7 +169,7 @@ async fn run_systemctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Populates `Config` fields from a systemd `EnvironmentFile` (`panel.env`) when present.
+/// Populates `Config` fields from a systemd `EnvironmentFile` (`panel.env` or `.env`) when present.
 pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
     let Ok(raw) = std::fs::read_to_string(env_path) else {
         return;
@@ -182,8 +182,8 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
         let Some((k, v)) = trimmed.split_once('=') else {
             continue;
         };
-        let key = k.trim();
-        let val = v.trim();
+        let key = k.trim().trim_start_matches("export ").trim();
+        let val = v.trim().trim_matches('"').trim_matches('\'').trim();
         match key {
             "FERROUS_BIND" if !val.is_empty() => cfg.bind = val.to_string(),
             "FERROUS_PORT" => {
@@ -206,9 +206,119 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
                     Some(val.to_string())
                 };
             }
+            "FERROUS_SECURE_COOKIE" => {
+                cfg.secure_cookie = matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+            }
             _ => {}
         }
     }
+}
+
+/// Automatically loads `/etc/ferrous-panel/panel.env` (or `$FERROUS_ENV_FILE`) and local `.env`
+/// for any `FERROUS_*` keys not already set in the process environment.
+pub fn apply_default_env_files(cfg: &mut Config) {
+    let primary = std::env::var_os("FERROUS_ENV_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_ENV_FILE));
+    for candidate in [PathBuf::from(".env"), primary] {
+        let Ok(raw) = std::fs::read_to_string(&candidate) else {
+            continue;
+        };
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((k, v)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let key = k.trim().trim_start_matches("export ").trim();
+            if std::env::var_os(key).is_some() {
+                continue;
+            }
+            let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+            match key {
+                "FERROUS_BIND" if !val.is_empty() => cfg.bind = val.to_string(),
+                "FERROUS_PORT" => {
+                    if let Ok(p) = val.parse::<u16>() {
+                        cfg.port = p;
+                    }
+                }
+                "FERROUS_DATA_DIR" if !val.is_empty() => cfg.data_dir = PathBuf::from(val),
+                "FERROUS_WWWROOT" if !val.is_empty() => cfg.wwwroot = PathBuf::from(val),
+                "FERROUS_BACKUPS_DIR" if !val.is_empty() => cfg.backups_dir = PathBuf::from(val),
+                "FERROUS_SYSTEMD_DIR" if !val.is_empty() => {
+                    cfg.systemd_unit_dir = PathBuf::from(val);
+                }
+                "FERROUS_ADMIN_USER" if !val.is_empty() => cfg.admin_username = val.to_string(),
+                "FERROUS_SECURITY_ENTRANCE" if !val.is_empty() => {
+                    cfg.security_entrance = val.to_string();
+                }
+                "FERROUS_CUSTOM_DOMAIN" => {
+                    cfg.custom_domain = if val.is_empty() {
+                        None
+                    } else {
+                        Some(val.to_string())
+                    };
+                }
+                "FERROUS_SECURE_COOKIE" => {
+                    cfg.secure_cookie =
+                        matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Ensures `env_path` (`/etc/ferrous-panel/panel.env`) exists (mode `0600`) and contains all
+/// required `FERROUS_*` environment variables, preserving any existing custom keys.
+pub fn ensure_default_env_file(env_path: &Path, cfg: &Config) -> Result<()> {
+    let existing_keys = if env_path.is_file() {
+        let raw = std::fs::read_to_string(env_path).unwrap_or_default();
+        raw.lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    None
+                } else {
+                    t.split_once('=').map(|(k, _)| k.trim().to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let defaults: [(&str, String); 11] = [
+        ("FERROUS_BIND", cfg.bind.clone()),
+        ("FERROUS_PORT", cfg.port.to_string()),
+        ("FERROUS_DATA_DIR", cfg.data_dir.display().to_string()),
+        ("FERROUS_WWWROOT", cfg.wwwroot.display().to_string()),
+        ("FERROUS_BACKUPS_DIR", cfg.backups_dir.display().to_string()),
+        (
+            "FERROUS_SYSTEMD_DIR",
+            cfg.systemd_unit_dir.display().to_string(),
+        ),
+        ("FERROUS_ADMIN_USER", cfg.admin_username.clone()),
+        ("FERROUS_SECURITY_ENTRANCE", cfg.security_entrance.clone()),
+        (
+            "FERROUS_CUSTOM_DOMAIN",
+            cfg.custom_domain.clone().unwrap_or_default(),
+        ),
+        (
+            "FERROUS_SECURE_COOKIE",
+            if cfg.secure_cookie { "true" } else { "false" }.to_string(),
+        ),
+        ("RUST_LOG", "info,actix_web=info".to_string()),
+    ];
+
+    for (key, val) in defaults {
+        if !existing_keys.iter().any(|k| k == key) {
+            upsert_env_var(env_path, key, &val)?;
+        }
+    }
+    Ok(())
 }
 
 fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<()> {
@@ -582,6 +692,7 @@ pub async fn run_fp_command(
                 EngineKind::parse(&engine).map_err(|e| anyhow::anyhow!("{e}"))?;
             std::fs::create_dir_all(&config.data_dir)?;
             std::fs::create_dir_all(&config.wwwroot)?;
+            ensure_default_env_file(env_file, config)?;
             let (creds, maybe_secret) =
                 load_or_init_credentials(&config.credentials_path(), &config.admin_username)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -595,6 +706,7 @@ pub async fn run_fp_command(
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
             println!("Initialized FerrousPanel state at {}", config.data_dir.display());
+            println!("  Env File   : {} (mode 0600)", env_file.display());
             println!("  Web Engine : {parsed_engine}");
             println!("  Username   : {}", creds.username);
             if let Some(secret) = maybe_secret {
@@ -744,6 +856,15 @@ mod tests {
         ensure(
             content.contains("FERROUS_SECURITY_ENTRANCE=/panel-sec"),
             "FERROUS_SECURITY_ENTRANCE appended",
+        )?;
+
+        let mut cfg = Config::for_test(dir.join("data"), dir.join("wwwroot"));
+        ensure_default_env_file(&env_file, &cfg)?;
+        apply_env_file(&mut cfg, &env_file);
+        ensure(cfg.port == 9443, "apply_env_file loaded FERROUS_PORT=9443")?;
+        ensure(
+            cfg.security_entrance == "/panel-sec",
+            "apply_env_file loaded FERROUS_SECURITY_ENTRANCE",
         )?;
 
         let _ = std::fs::remove_dir_all(&dir);

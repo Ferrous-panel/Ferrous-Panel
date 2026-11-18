@@ -44,7 +44,7 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/un
 
 ### What `install.sh` Does Automatically
 1. **OOM Memory Guard**: Checks `/proc/meminfo`; if RAM `< 4GB` and no swap is active, creates and enables a `2GB /swapfile` (`chmod 0600`) so `cargo build --release` (with LTO) never runs out of memory on 1GB–2GB VPS instances.
-2. **Auto-Install Rust & Cargo 1.85.0**: Installs `build-essential`, `pkg-config`, `libssl-dev`, and runs `rustup-init -y --profile minimal --default-toolchain 1.85.0`, linking `cargo` and `rustc` into `/usr/local/bin`.
+2. **Auto-Install Rust & Cargo 1.85.0 + Environment Variables**: Installs `build-essential`, `pkg-config`, `libssl-dev`, runs `rustup-init -y --profile minimal --default-toolchain 1.85.0`, links `cargo` and `rustc` into `/usr/local/bin`, and automatically registers `/etc/profile.d/ferrous-panel.sh` + `/etc/ferrous-panel/panel.env` (`FERROUS_*`, `CARGO_HOME`, `RUSTUP_HOME`, `PATH`) across login and interactive shells (`/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`).
 3. **Prebuilt Static UI (`dist/`) + Cargo Compilation**: Uses the prebuilt `dist/` directory (or downloads `ferrous-dist.tar.gz` from GitHub Releases) so **Node.js is never needed on the VPS**, then compiles `ferrous-panel` (and `ferrousx-bin` when `--engine ferrousx` is selected) with `cargo build --release`.
 4. **First-Run Argon2id Credentials & Systemd Hardening**: Generates a 24-character one-time admin password from kernel `OsRng`, stores only its Argon2id hash (`0600`), configures `ferrous-panel.service` (`NoNewPrivileges=true`, `PrivateTmp=true`), verifies `GET /api/health == 200`, and enables `UFW`.
 
