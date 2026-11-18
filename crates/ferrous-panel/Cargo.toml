@@ -4,27 +4,29 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Pure Rust single-binary control panel server (Actix-Web + SQLite + Argon2id + sysinfo + embedded SPA)."
 
 [lints]
 workspace = true
 
 [dependencies]
-actix-web = "4.9"
-anyhow = "1.0"
-argon2 = { version = "0.5", features = ["std"] }
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4.5", features = ["derive", "env"] }
-mime_guess = "2.0"
-rand = "0.8"
-rusqlite = { version = "0.32", features = ["bundled"] }
-rust-embed = "8.5"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-subtle = "2.6"
-sysinfo = "0.33"
-thiserror = "2.0"
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+actix-web.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+chrono.workspace = true
+clap.workspace = true
+mime_guess.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
