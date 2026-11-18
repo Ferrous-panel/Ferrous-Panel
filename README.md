@@ -6,7 +6,8 @@
 
 Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous-panel` + optional `ferrousx-bin`).
 
-- **Zero JS server runtime on VPS**: Frontend React assets (`dist/`) are compiled at CI/build time (`vite build`) and embedded directly inside the `ferrous-panel` binary via `rust-embed`.
+- **100% Pure-Rust Backend on VPS**: Frontend React assets (`dist/`) are prebuilt (`vite build`) and embedded directly inside the `ferrous-panel` binary via `rust-embed` (zero Node.js runtime on the VPS).
+- **Automated 1-Command Installer (`install.sh`)**: Automatically creates a 2GB `/swapfile` on low-RAM VPS (`< 4GB RAM`) to prevent OOM, installs `rustup` / `cargo` `1.85.0` (`--profile minimal`), embeds the prebuilt `dist/` UI, compiles `ferrous-panel` with `cargo build --release`, and configures `systemd` + `UFW`.
 - **Zero fabricated metrics & zero hidden shells**: System metrics come from `/proc` + `sysinfo`; all privileged host operations run via allowlisted argv execution (`execve`, no `sh -c`) and strict validated newtypes (`Domain`, `ServiceName`, `Port`, `SafePath`, `SqlIdentifier`, `PortOrRange`, `CronSchedule`, `SafeLinuxUser`, `OctalMode`).
 - **Fail-closed HTTP 501**: Unimplemented subsystems return `HTTP 501 Not Implemented` and display `"Chưa hỗ trợ"` in the UI rather than returning mock data.
 
@@ -14,9 +15,9 @@ Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous
 
 ## 1-Command Installation (Ubuntu 22.04 / 24.04 LTS)
 
-Install prebuilt release binaries (`x86_64` / `aarch64`, SHA-256 verified) with **zero Node.js, Bun, or Cargo installed on the VPS**:
+Run **one single command** on a fresh Ubuntu 22.04 / 24.04 VPS. The installer automatically provisions a 2GB swap file (if RAM < 4GB), installs `cargo` 1.85.0 via `rustup`, embeds the prebuilt `dist/` frontend without needing Node.js on the VPS, compiles the release binary, and starts `ferrous-panel.service`:
 
-### Option A — Default Install (with Nginx Engine)
+### Option A — Default 1-Command Install (with Nginx Engine)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
 ```
@@ -26,20 +27,28 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/in
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --engine ferrousx
 ```
 
-### Custom Port / Entrance / Update / Uninstall (1 Command)
+### Custom Options / Fast Prebuilt Mode / Update / Uninstall
 ```bash
-# Custom port & entrance path:
+# Custom port & security entrance path:
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --port 9443 --entrance /admin
 
-# 1-Command In-Place Update (preserves /var/lib/ferrous-panel & sites):
+# Optional: Skip Cargo compilation and download prebuilt binary directly:
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --prebuilt-binary
+
+# 1-Command In-Place Update (pulls latest code & rebuilds via Cargo, preserving /var/lib/ferrous-panel):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash
 
 # 1-Command Uninstall (preserves /www/wwwroot & databases):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/uninstall.sh | sudo bash
 ```
 
-- **First-run credentials**: Generated once via kernel CSPRNG (`OsRng`), printed once to the terminal during install, and stored solely as an Argon2id hash (`0600`). Passwords are **never** accepted via command-line arguments.
-- **Default loopback bind (`127.0.0.1:8443`)**: Access via SSH tunnel:
+### What `install.sh` Does Automatically
+1. **OOM Memory Guard**: Checks `/proc/meminfo`; if RAM `< 4GB` and no swap is active, creates and enables a `2GB /swapfile` (`chmod 0600`) so `cargo build --release` (with LTO) never runs out of memory on 1GB–2GB VPS instances.
+2. **Auto-Install Rust & Cargo 1.85.0**: Installs `build-essential`, `pkg-config`, `libssl-dev`, and runs `rustup-init -y --profile minimal --default-toolchain 1.85.0`, linking `cargo` and `rustc` into `/usr/local/bin`.
+3. **Prebuilt Static UI (`dist/`) + Cargo Compilation**: Uses the prebuilt `dist/` directory (or downloads `ferrous-dist.tar.gz` from GitHub Releases) so **Node.js is never needed on the VPS**, then compiles `ferrous-panel` (and `ferrousx-bin` when `--engine ferrousx` is selected) with `cargo build --release`.
+4. **First-Run Argon2id Credentials & Systemd Hardening**: Generates a 24-character one-time admin password from kernel `OsRng`, stores only its Argon2id hash (`0600`), configures `ferrous-panel.service` (`NoNewPrivileges=true`, `PrivateTmp=true`), verifies `GET /api/health == 200`, and enables `UFW`.
+
+- **Default loopback bind (`127.0.0.1:8443`)**: Access securely via SSH port forwarding:
   ```bash
   ssh -N -L 8443:127.0.0.1:8443 root@<VPS_IP>
   ```
@@ -117,12 +126,9 @@ fp webserver    # (alias: 19) View or switch active engine (`fp webserver nginx|
 
 ---
 
-## Building From Source & Smoke Testing
+## Local Verification & Smoke Testing
 
 ```bash
-npm ci --legacy-peer-deps
-npm run build
-npx tsc --noEmit
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -142,9 +148,10 @@ sudo bash scripts/smoke-test.sh
 ├── crates/
 │   ├── ferrous-panel/                 # Control plane daemon, API, auth, modules, fp CLI & embedded dist/
 │   └── ferrousx/                      # Standalone HTTP/HTTPS/FastCGI/WS Rust web server (ferrousx-bin)
+├── dist/                              # Prebuilt static React UI embedded into ferrous-panel via rust-embed
 ├── scripts/
 │   └── smoke-test.sh                  # Ubuntu 24.04 end-to-end verification script (P7)
-├── src/                               # React 19 + TypeScript + Tailwind frontend UI
+├── src/                               # React 19 + TypeScript + Tailwind frontend UI source
 ├── package.json                       # Frontend Vite scripts ("dev", "build")
 ├── install.sh / update.sh / uninstall.sh
 ├── .github/                           # CI/Release workflow & open-source Issue/PR templates

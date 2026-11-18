@@ -1,7 +1,6 @@
-# Node & Frontend dependencies
+# Node & Frontend dependencies (dist/ is kept tracked so Cargo embeds UI without Node on VPS)
 node_modules/
 build/
-dist/
 coverage/
 
 # Rust build artifacts

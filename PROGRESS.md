@@ -1,7 +1,7 @@
-# FerrousPanel — Trạng thái tiến độ (P1–P7 & Open-Source 1-Command Setup)
+# FerrousPanel — Trạng thái tiến độ (P1–P7 & Open-Source 1-Command Cargo Installer)
 
 ## Phase hiện tại
-- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL**
+- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL (TỰ ĐỘNG CÀI CARGO + 2GB SWAP + PREBUILT DIST)**
 
 ---
 
@@ -23,10 +23,9 @@
 - [x] **P5 – MODULE HỆ THỐNG THẬT** (`crates/ferrous-panel/src/modules/{apps,databases,files,cpanel,security}.rs`, `tests/modules.rs`)
   - `systemd` unit thật + đọc `MainPID`/`MemoryCurrent`; `ufw` + `fail2ban-client` + `sysctl`; `mysql`/`psql` CLI thật (không lưu plaintext password, trả `409` nếu thiếu binary); `tar --zstd` + SHA-256 thật cho backups; `SafePath` chống zip-slip cho file manager; `crontab` thật.
   - Các mục Mail, DNS, SFTP, Edge Cloud, eBPF/WAF/FIM, Polyglot giữ nguyên `501` và hiển thị nhãn `"Chưa hỗ trợ"` trên UI.
-- [x] **P6 – GỠ JS SERVER PRODUCTION, CLI `fp` & OPEN-SOURCE 1-COMMAND INSTALL** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`, `CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`)
+- [x] **P6 – GỠ JS SERVER PRODUCTION, CLI `fp` & OPEN-SOURCE 1-COMMAND INSTALL** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`)
   - Đã xóa `server.ts`, `rust-backend/scripts/*.mjs`, `Ferrous-panel/bin/*.mjs`, `bun.lock`, và crate thừa `crates/ferrous-core/`; chuyển `rust-backend/` và `Ferrous-panel/` cũ vào `_archive/` (`exclude = ["_archive"]` trong `Cargo.toml`).
-  - `install.sh`, `update.sh`, `uninstall.sh` hỗ trợ cài đặt/cập nhật/gỡ bỏ bằng 1 lệnh (`curl -fsSL ... | sudo bash`) không cần tương tác bàn phím, hỗ trợ chọn `--engine nginx|ferrousx`, xác thực `SHA256SUMS.txt` và kiểm tra `/api/health`.
-  - `.github/workflows/ci-release.yml` tự động build đa kiến trúc (`x86_64` + `aarch64`) và phát hành GitHub Release (`latest`) ngay khi push lên `main` hoặc tag `v*` với `permissions: contents: write`.
+  - Theo lựa chọn của người dùng (Lựa chọn 2): `install.sh` tự động tạo 2GB `/swapfile` nếu VPS `< 4GB RAM` và chưa có Swap, tự động cài `rustup` + `cargo` `1.85.0` (`--profile minimal`), dùng gói giao diện tĩnh `dist/` đã build sẵn (không cần cài Node.js trên VPS) và chạy `cargo build --release` trực tiếp trên VPS (kèm tuỳ chọn `--prebuilt-binary`).
 - [x] **P7 – KIỂM CHỨNG** (`scripts/smoke-test.sh`)
   - Script kiểm chứng đầu-cuối cho Ubuntu 24.04 sạch với 7 hạng mục bắt buộc, in `PASS`/`FAIL` từng mục và `exit 1` nếu có bất kỳ mục nào `FAIL`.
 
@@ -51,6 +50,6 @@
 3. **Dọn dẹp crate/file thừa & đồng bộ (`crates/ferrous-core`, `bun.lock`, `main.rs`)**:
    - *Nguyên nhân gốc*: `crates/ferrous-core` là crate nháp từ trước P1 không được `ferrous-panel` hay `ferrousx` sử dụng; `main.rs` lặp lại cấu hình route thay vì gọi `configure_app` của `lib.rs`; `.env.example` và `CONTRIBUTING.md` còn chứa nội dung mẫu cũ.
    - *Cách đã sửa*: Xóa `crates/ferrous-core/` và `bun.lock`, cập nhật `Cargo.toml`, đồng bộ `main.rs` gọi trực tiếp `configure_app(cfg, app_state)`, đồng bộ `.env.example`, `CONTRIBUTING.md`, và `README.md`.
-4. **Cấu hình Open-Source & Cài đặt 1 lệnh (`install.sh`, `.github/workflows/ci-release.yml`)**:
-   - *Nguyên nhân gốc*: Trước đây `install.sh` khi chạy trực tiếp trên terminal (`[ -t 0 ]`) vẫn dừng chờ người dùng nhập phím chọn engine, và `.github/workflows/ci-release.yml` thiếu `permissions: contents: write` cũng như chỉ phát hành bản `x86_64` khi có tag `v*`.
-   - *Cách đã sửa*: Thiết lập mặc định không chặn (`WEB_ENGINE="nginx"`, truyền `--engine ferrousx` qua `bash -s -- --engine ferrousx` hoặc `--interactive` nếu muốn menu), thêm `permissions: contents: write` + cross-compile `aarch64` vào `ci-release.yml`, tự động phát hành `latest` release khi push lên `main`, và bổ sung bộ khung Open Source (`CODE_OF_CONDUCT.md`, `.github/ISSUE_TEMPLATE/*`, `.github/PULL_REQUEST_TEMPLATE.md`).
+4. **Tối ưu `install.sh` tự động cài `cargo` + 2GB Swap + Prebuilt `dist/`**:
+   - *Nguyên nhân gốc*: Người dùng chọn Lựa chọn 2 (tự động cài `cargo` khi chạy `install.sh`), yêu cầu tải sẵn gói giao diện tĩnh `dist/` (để không cần cài Node.js trên VPS) và tự động tạo 2GB Swap nếu VPS `< 4GB RAM` và chưa có Swap.
+   - *Cách đã sửa*: Bỏ `dist/` khỏi `.gitignore` và đóng gói thêm `ferrous-dist.tar.gz` trong `.github/workflows/ci-release.yml`; cập nhật `install.sh` tự động tạo `/swapfile` 2GB khi RAM `< 4GB`, tự động cài `rustup` + `cargo` 1.85.0 (`--profile minimal`), nạp `dist/` và chạy `cargo build --release` trực tiếp trên VPS.

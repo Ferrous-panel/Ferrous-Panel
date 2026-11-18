@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # FerrousPanel — 1-Command Open-Source Installer (Ubuntu 22.04 / 24.04 LTS)
-# Pure-Rust single-binary control plane (zero Node.js, Bun, or Cargo on VPS).
+#
+# Automatically:
+#   1. Provisions a 2GB /swapfile if RAM < 4GB and no swap is active (OOM guard)
+#   2. Installs system packages + Rust 1.85 toolchain (rustup + cargo)
+#   3. Fetches prebuilt static UI (dist/) & compiles ferrous-panel via Cargo
+#      (zero Node.js or npm needed on the VPS; embeds dist/ via rust-embed)
+#   4. Configures Nginx or FerrousX, Argon2id 0600 credentials, systemd & UFW
 #
 # 1-Command Install (default Nginx engine):
 #   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
@@ -20,7 +26,9 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 REPO_SLUG="${FERROUS_REPO:-Ferrous-panel/Ferrous-Panel}"
+GIT_BRANCH="${FERROUS_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
+RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-1.85.0}"
 PANEL_BIND="${FERROUS_BIND:-127.0.0.1}"
 PANEL_PORT="${FERROUS_PORT:-8443}"
 SECURITY_ENTRANCE="${FERROUS_SECURITY_ENTRANCE:-/panel}"
@@ -28,11 +36,14 @@ ADMIN_USER="${FERROUS_ADMIN_USER:-admin_ferrous}"
 CUSTOM_DOMAIN="${FERROUS_CUSTOM_DOMAIN:-}"
 WEB_ENGINE="${FERROUS_ENGINE:-nginx}"
 INTERACTIVE_MODE=false
+AUTO_SWAP=true
+PREBUILT_BINARY_ONLY=false
 
 DATA_DIR="/var/lib/ferrous-panel"
 ENV_FILE="/etc/ferrous-panel/panel.env"
 WWWROOT="/www/wwwroot"
 BACKUPS_DIR="/var/backups/ferrous-panel"
+SRC_DIR="/usr/local/src/ferrous-panel"
 BIN_PANEL="/usr/local/bin/ferrous-panel"
 BIN_FERROUSX="/usr/local/bin/ferrousx-bin"
 
@@ -51,7 +62,10 @@ Options:
   --entrance <PATH>           Security entrance path (default: /panel)
   --admin-user <USER>         Initial admin username (default: admin_ferrous)
   --domain <DOMAIN>           Optional custom panel domain
+  --branch <BRANCH>           Git branch to build from (default: main)
   --version <TAG|latest>      GitHub Release version tag (default: latest)
+  --prebuilt-binary           Download prebuilt binary instead of compiling with Cargo
+  --no-swap                   Do not auto-create 2GB /swapfile on low-RAM VPS
   --interactive               Prompt interactively for engine selection
   -y, --yes, --unattended     Run non-interactively (default for 1-command install)
   -h, --help                  Show this help message
@@ -72,7 +86,10 @@ while [[ $# -gt 0 ]]; do
     --entrance) SECURITY_ENTRANCE="$2"; shift 2 ;;
     --domain|--custom-domain) CUSTOM_DOMAIN="$2"; shift 2 ;;
     --engine) WEB_ENGINE="$2"; shift 2 ;;
+    --branch) GIT_BRANCH="$2"; shift 2 ;;
     --version) RELEASE_TAG="$2"; shift 2 ;;
+    --prebuilt-binary) PREBUILT_BINARY_ONLY=true; shift ;;
+    --no-swap) AUTO_SWAP=false; shift ;;
     --interactive) INTERACTIVE_MODE=true; shift ;;
     -y|--yes|--unattended) INTERACTIVE_MODE=false; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -135,16 +152,88 @@ else
   RELEASE_BASE="https://github.com/${REPO_SLUG}/releases/download/${RELEASE_TAG}"
 fi
 
-echo -e "${BLUE}[1/6] Installing runtime system utilities (no Node.js, Bun, or Cargo)...${NC}"
+# ==============================================================================
+# [1/7] Memory & 2GB Swap Protection (prevents Cargo OOM on 1GB-2GB RAM VPS)
+# ==============================================================================
+echo -e "${BLUE}[1/7] Checking system memory & swap protection...${NC}"
+MEM_TOTAL_KB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 4194304)"
+SWAP_TOTAL_KB="$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+MEM_TOTAL_MB=$((MEM_TOTAL_KB / 1024))
+SWAP_TOTAL_MB=$((SWAP_TOTAL_KB / 1024))
+
+if [ "$AUTO_SWAP" = true ] && [ "$MEM_TOTAL_MB" -lt 3800 ] && [ "$SWAP_TOTAL_MB" -lt 512 ]; then
+  if [ ! -f /swapfile ]; then
+    echo -e "${CYAN}[*] Low RAM detected (${MEM_TOTAL_MB} MB) with no active swap. Creating 2GB /swapfile to prevent Cargo OOM...${NC}"
+    if fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none 2>/dev/null; then
+      chmod 0600 /swapfile
+      mkswap /swapfile >/dev/null 2>&1 || true
+      swapon /swapfile >/dev/null 2>&1 || true
+      if ! grep -q '^/swapfile ' /etc/fstab 2>/dev/null; then
+        echo '/swapfile none swap sw 0 0' >> /etc/fstab
+      fi
+      echo -e "${GREEN}[+] Activated 2GB /swapfile.${NC}"
+    else
+      echo -e "${YELLOW}[!] Could not allocate /swapfile (container/filesystem limit); continuing...${NC}"
+    fi
+  else
+    swapon /swapfile >/dev/null 2>&1 || true
+  fi
+else
+  echo -e "${CYAN}[*] Memory OK (RAM=${MEM_TOTAL_MB} MB, Swap=${SWAP_TOTAL_MB} MB).${NC}"
+fi
+
+# ==============================================================================
+# [2/7] System Dependencies & Automated Rust / Cargo 1.85 Installation
+# ==============================================================================
+echo -e "${BLUE}[2/7] Installing system packages & build utilities (zero Node.js on VPS)...${NC}"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y -q
-CORE_PKGS=(ca-certificates curl tar zstd zip unzip openssl ufw fail2ban certbot)
+CORE_PKGS=(
+  ca-certificates curl git build-essential pkg-config libssl-dev
+  tar zstd zip unzip openssl ufw fail2ban certbot
+)
 if [ "$WEB_ENGINE" = "nginx" ]; then
   CORE_PKGS+=(nginx)
 fi
 apt-get install -y -q "${CORE_PKGS[@]}"
 
-echo -e "${BLUE}[2/6] Preparing system directories (/var/lib/ferrous-panel, /www/wwwroot, /www/acme)...${NC}"
+export RUSTUP_HOME="${RUSTUP_HOME:-/root/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-/root/.cargo}"
+export PATH="${CARGO_HOME}/bin:${PATH}"
+
+ensure_cargo_installed() {
+  local need_install=false
+  if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+    need_install=true
+  else
+    local ver_minor
+    ver_minor="$(rustc --version | awk '{print $2}' | awk -F'.' '{print ($1 * 100) + $2}' 2>/dev/null || echo 0)"
+    if [ "${ver_minor:-0}" -lt 185 ]; then
+      need_install=true
+    fi
+  fi
+
+  if [ "$need_install" = true ]; then
+    echo -e "${BLUE}[*] Installing Rust toolchain (${RUST_TOOLCHAIN}) & Cargo automatically via rustup...${NC}"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+  else
+    echo -e "${CYAN}[*] Found existing Rust toolchain: $(rustc --version) / $(cargo --version)${NC}"
+  fi
+
+  if [ -x "${CARGO_HOME}/bin/cargo" ]; then
+    ln -sf "${CARGO_HOME}/bin/cargo" /usr/local/bin/cargo
+  fi
+  if [ -x "${CARGO_HOME}/bin/rustc" ]; then
+    ln -sf "${CARGO_HOME}/bin/rustc" /usr/local/bin/rustc
+  fi
+}
+
+ensure_cargo_installed
+
+# ==============================================================================
+# [3/7] Prepare System Directories
+# ==============================================================================
+echo -e "${BLUE}[3/7] Preparing system directories (/var/lib/ferrous-panel, /www/wwwroot, /www/acme)...${NC}"
 mkdir -p /etc/ferrous-panel "${DATA_DIR}" "${WWWROOT}" /www/acme "${BACKUPS_DIR}"
 chmod 700 "${DATA_DIR}" /etc/ferrous-panel "${BACKUPS_DIR}"
 chown -R www-data:www-data "${WWWROOT}" /www/acme 2>/dev/null || true
@@ -152,20 +241,15 @@ chown -R www-data:www-data "${WWWROOT}" /www/acme 2>/dev/null || true
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-install_or_download_binary() {
+curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
+
+download_release_binary() {
   local asset_name="$1"
-  local local_fallback="$2"
-  local dest_path="$3"
+  local dest_path="$2"
   local url="${RELEASE_BASE}/${asset_name}"
   local tmp_file="${TMP_DIR}/${asset_name}"
 
-  if [ -x "$local_fallback" ]; then
-    echo -e "${CYAN}[*] Using local prebuilt binary ${local_fallback} -> ${dest_path}${NC}"
-    install -m 0755 "$local_fallback" "$dest_path"
-    return 0
-  fi
-
-  echo -e "${CYAN}[*] Downloading ${url}...${NC}"
+  echo -e "${CYAN}[*] Downloading prebuilt binary ${url}...${NC}"
   curl -fsSL --retry 3 --connect-timeout 10 -o "$tmp_file" "$url"
 
   if [ -f "${TMP_DIR}/SHA256SUMS.txt" ] && grep -q " ${asset_name}\$" "${TMP_DIR}/SHA256SUMS.txt"; then
@@ -175,16 +259,69 @@ install_or_download_binary() {
   install -m 0755 "$tmp_file" "$dest_path"
 }
 
-echo -e "${BLUE}[3/6] Installing verified FerrousPanel release binary (${ARCH})...${NC}"
-curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
+# ==============================================================================
+# [4/7] Fetch Source + Prebuilt Static dist/ & Build with Cargo
+# ==============================================================================
+echo -e "${BLUE}[4/7] Building FerrousPanel with Cargo (embedding prebuilt static dist/ UI)...${NC}"
 
-install_or_download_binary "ferrous-panel-linux-${ARCH}" "./target/release/ferrous-panel" "${BIN_PANEL}"
+if [ "$PREBUILT_BINARY_ONLY" = true ]; then
+  download_release_binary "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
+  if [ "$WEB_ENGINE" = "ferrousx" ]; then
+    download_release_binary "ferrousx-bin-linux-${ARCH}" "${BIN_FERROUSX}"
+  fi
+else
+  # Determine source workspace directory (current directory if inside repo, otherwise clone to /usr/local/src/ferrous-panel)
+  BUILD_WORKSPACE=""
+  if [ -f "./Cargo.toml" ] && [ -d "./crates/ferrous-panel" ]; then
+    BUILD_WORKSPACE="$(pwd)"
+    echo -e "${CYAN}[*] Using current repository workspace at ${BUILD_WORKSPACE}${NC}"
+  else
+    echo -e "${CYAN}[*] Syncing source repository (${REPO_SLUG}@${GIT_BRANCH}) to ${SRC_DIR}...${NC}"
+    mkdir -p "$(dirname "${SRC_DIR}")"
+    if [ -d "${SRC_DIR}/.git" ]; then
+      git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
+      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+    else
+      rm -rf "${SRC_DIR}"
+      git clone --depth 1 --branch "${GIT_BRANCH}" "https://github.com/${REPO_SLUG}.git" "${SRC_DIR}"
+    fi
+    BUILD_WORKSPACE="${SRC_DIR}"
+  fi
+
+  # Ensure prebuilt dist/ static UI exists (download ferrous-dist.tar.gz if dist/index.html is missing)
+  if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
+    echo -e "${CYAN}[*] Downloading prebuilt static frontend bundle (ferrous-dist.tar.gz)...${NC}"
+    mkdir -p "${BUILD_WORKSPACE}/dist"
+    if curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null; then
+      tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${BUILD_WORKSPACE}/dist"
+    fi
+  fi
+
+  CARGO_PKGS=(-p ferrous-panel)
+  if [ "$WEB_ENGINE" = "ferrousx" ]; then
+    CARGO_PKGS+=(-p ferrousx)
+  fi
+
+  echo -e "${CYAN}[*] Running: cargo build --release ${CARGO_PKGS[*]} ...${NC}"
+  (
+    cd "${BUILD_WORKSPACE}"
+    cargo build --release "${CARGO_PKGS[@]}"
+  )
+
+  install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrous-panel" "${BIN_PANEL}"
+  if [ "$WEB_ENGINE" = "ferrousx" ] && [ -x "${BUILD_WORKSPACE}/target/release/ferrousx-bin" ]; then
+    install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+  fi
+fi
+
 ln -sf "${BIN_PANEL}" /usr/local/bin/fp
 ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 
+# ==============================================================================
+# [5/7] Configure Active Web Server Engine (Nginx or FerrousX)
+# ==============================================================================
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
-  echo -e "${BLUE}[4/6] Installing FerrousX web server binary & configuring ferrousx.service...${NC}"
-  install_or_download_binary "ferrousx-bin-linux-${ARCH}" "./target/release/ferrousx-bin" "${BIN_FERROUSX}"
+  echo -e "${BLUE}[5/7] Configuring FerrousX web server (ferrousx.service)...${NC}"
   mkdir -p /etc/ferrousx/sites
   if [ ! -f /etc/ferrousx/ferrousx.toml ]; then
     cat > /etc/ferrousx/ferrousx.toml <<'EOF_FX'
@@ -222,11 +359,14 @@ EOF_FX_SVC
   systemctl daemon-reload
   systemctl enable --now ferrousx.service
 else
-  echo -e "${BLUE}[4/6] Configuring Nginx (nginx.service) with /www/acme ACME challenge root...${NC}"
+  echo -e "${BLUE}[5/7] Configuring Nginx (nginx.service) with /www/acme ACME challenge root...${NC}"
   systemctl enable --now nginx.service
 fi
 
-echo -e "${BLUE}[5/6] Initializing Argon2id credentials, SQLite store, and systemd unit...${NC}"
+# ==============================================================================
+# [6/7] Initialize Argon2id 0600 Credentials, SQLite & ferrous-panel.service
+# ==============================================================================
+echo -e "${BLUE}[6/7] Initializing Argon2id credentials, SQLite store, and systemd unit...${NC}"
 cat > "${ENV_FILE}" <<EOF_ENV
 FERROUS_BIND=${PANEL_BIND}
 FERROUS_PORT=${PANEL_PORT}
@@ -283,7 +423,10 @@ for _ in $(seq 1 25); do
   sleep 0.2
 done
 
-echo -e "${BLUE}[6/6] Configuring UFW rules (SSH + 80 + 443)...${NC}"
+# ==============================================================================
+# [7/7] Configure UFW Firewall
+# ==============================================================================
+echo -e "${BLUE}[7/7] Configuring UFW rules (SSH + 80 + 443)...${NC}"
 ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
 ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
 ufw allow "${ACTIVE_SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
@@ -298,10 +441,11 @@ ufw --force enable >/dev/null 2>&1 || true
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${GREEN}${BOLD}  FerrousPanel Installed Cleanly (100% Pure-Rust Open-Source Edition)${NC}"
+echo -e "${GREEN}${BOLD}  FerrousPanel Installed Cleanly (100% Pure-Rust + Cargo 1.85)${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo -e "  Binary            : ${BIN_PANEL} (embedded dist/ SPA)"
 echo -e "  CLI Symlinks      : fp / ferrous -> ${BIN_PANEL}"
+echo -e "  Rust Toolchain    : $(cargo --version 2>/dev/null || echo 'prebuilt')"
 echo -e "  Web Engine        : ${WEB_ENGINE}"
 echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE}"
 echo -e "  Admin Username    : ${ADMIN_USER}"
