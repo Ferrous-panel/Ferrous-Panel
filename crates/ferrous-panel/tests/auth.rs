@@ -320,7 +320,7 @@ fn login_session_telemetry_logout_rate_limit_and_audit() -> Result<()> {
 
         // Authenticated unimplemented route must return 501 (not fake success)
         let unimpl_req = TestRequest::get()
-            .uri("/api/apps")
+            .uri("/api/unknown-unimplemented-endpoint")
             .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
             .to_request();
         let unimpl_resp = try_call_service(&app, unimpl_req)

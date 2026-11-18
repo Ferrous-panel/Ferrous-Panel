@@ -687,12 +687,25 @@ fn stub_contract_routes_return_401_unauth_and_501_when_authenticated() -> Result
             };
             let resp = try_call_service(&app, req)
                 .await
-                .map_err(|e| anyhow::anyhow!("auth stub error {uri}: {e}"))?;
+                .map_err(|e| anyhow::anyhow!("auth route error {uri}: {e}"))?;
             ensure(
-                resp.status() == StatusCode::NOT_IMPLEMENTED,
-                &format!("authenticated {method} {uri} must return 501"),
+                resp.status() == StatusCode::OK,
+                &format!("authenticated {method} {uri} must return 200 OK"),
             )?;
         }
+
+        // Unknown route fallback must still return 501 Not Implemented
+        let unknown_req = TestRequest::get()
+            .uri("/api/nonexistent-endpoint")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let unknown_resp = try_call_service(&app, unknown_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("unknown route error: {e}"))?;
+        ensure(
+            unknown_resp.status() == StatusCode::NOT_IMPLEMENTED,
+            "authenticated unknown route must return 501",
+        )?;
 
         Ok(())
     })

@@ -1,6 +1,7 @@
 pub mod apps;
 pub mod cpanel;
 pub mod databases;
+pub mod extended;
 pub mod files;
 pub mod security;
 
@@ -8,6 +9,8 @@ use crate::api::contract::{BackupArchiveItem, ManagedApp, TelemetryHistoryPoint}
 use crate::error::PanelError;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -33,7 +36,7 @@ pub struct CronRunMeta {
     pub last_output: String,
 }
 
-/// Persistent SQLite metadata store for P5 operational modules (`panel.db`).
+/// Persistent SQLite metadata store for operational modules (`panel.db`).
 ///
 /// Security guarantee: Database passwords and root credentials are NEVER stored here.
 #[derive(Debug)]
@@ -96,6 +99,11 @@ impl ModuleStore {
                 sha256 TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS panel_kv_store (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
             ",
         )?;
@@ -401,5 +409,32 @@ impl ModuleStore {
         let conn = self.lock_conn()?;
         let affected = conn.execute("DELETE FROM cpanel_backups WHERE id = ?1", params![id])?;
         Ok(affected > 0)
+    }
+
+    // ---- Generic Structured State KV Store ----
+
+    pub fn get_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, PanelError> {
+        let conn = self.lock_conn()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM panel_kv_store WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|s| serde_json::from_str(&s).map_err(PanelError::from))
+            .transpose()
+    }
+
+    pub fn put_json<T: Serialize>(&self, key: &str, value: &T) -> Result<(), PanelError> {
+        let raw = serde_json::to_string(value)?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO panel_kv_store (key, value_json, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+            params![key, raw, now],
+        )?;
+        Ok(())
     }
 }

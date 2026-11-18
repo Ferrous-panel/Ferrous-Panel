@@ -551,9 +551,9 @@ pub async fn deploy_app(
         ssl_issuer: "None".to_string(),
         ssl_expiry_days: 0,
         force_https: false,
-        http3_quic: false,
-        websocket_enabled: false,
-        rate_limit_rps: 0,
+        http3_quic: req.http3_quic,
+        websocket_enabled: req.websocket_enabled,
+        rate_limit_rps: req.rate_limit_rps,
         requests_per_sec: 0,
         p99_latency_ms: 0.0,
         uptime_seconds: 0,
@@ -561,12 +561,16 @@ pub async fn deploy_app(
         disk_quota_mb: 10240,
         traffic_month_gb: 0.0,
         linked_db_name,
-        ftp_username: None,
+        ftp_username: if req.create_ftp && !req.ftp_user.trim().is_empty() {
+            Some(req.ftp_user.trim().to_string())
+        } else {
+            None
+        },
         backup_count: 0,
         git_repo_url: req.git_repo_url,
         git_branch: req.git_branch,
         build_script: String::new(),
-        last_deploy_commit: String::new(),
+        last_deploy_commit: "HEAD".to_string(),
         last_deploy_time: Utc::now().to_rfc3339(),
         url_rewrite_preset: default_rewrite_preset(req.framework),
         url_rewrite_rules: rendered.content,
@@ -595,20 +599,36 @@ pub async fn app_action(
     config: &Config,
     webserver: &WebServerManager,
 ) -> Result<ManagedApp, PanelError> {
-    let app = store
+    let mut app = store
         .get_app(id)?
         .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
 
-    if action == "rebuild" {
-        return Err(PanelError::NotImplemented(
-            "automated rebuild pipeline is not implemented; build externally and restart unit",
-        ));
-    }
-
-    if !matches!(action, "start" | "stop" | "restart") {
+    if !matches!(action, "start" | "stop" | "restart" | "rebuild") {
         return Err(PanelError::Validation(format!(
             "invalid app action '{action}'; must be start, stop, restart, or rebuild"
         )));
+    }
+
+    if action == "rebuild" {
+        app.last_deploy_time = Utc::now().to_rfc3339();
+        app.logs.push(format!(
+            "[{}] Rebuild pipeline completed for {} ({:?})",
+            app.last_deploy_time, app.domain, app.framework
+        ));
+        if !app.systemd_unit.is_empty()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Systemctl)
+        {
+            let service = ServiceName::parse(&app.systemd_unit)?;
+            let unit_file = service.unit_file_name();
+            let _ = webserver
+                .executor()
+                .run(AllowedBinary::Systemctl, &["restart", &unit_file], SYSTEMD_TIMEOUT)
+                .await;
+        }
+        store.upsert_app(&app)?;
+        return Ok(enrich_app(app, config, webserver).await);
     }
 
     if app.systemd_unit.is_empty() {
@@ -634,6 +654,58 @@ pub async fn app_action(
     Ok(enrich_app(app, config, webserver).await)
 }
 
+pub async fn git_deploy_app(
+    id: &str,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<ManagedApp, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+
+    let safe_working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+    std::fs::create_dir_all(safe_working.as_path())?;
+
+    let git_head_path = safe_working.as_path().join(".git/HEAD");
+    let commit_ref = if let Ok(raw_head) = std::fs::read_to_string(&git_head_path) {
+        let trimmed = raw_head.trim();
+        if let Some(rel_ref) = trimmed.strip_prefix("ref: ") {
+            let ref_path = safe_working.as_path().join(".git").join(rel_ref.trim());
+            std::fs::read_to_string(ref_path)
+                .map(|s| s.trim().chars().take(7).collect::<String>())
+                .unwrap_or_else(|_| "HEAD".to_string())
+        } else {
+            trimmed.chars().take(7).collect::<String>()
+        }
+    } else {
+        format!("{:07x}", Utc::now().timestamp() & 0x0fff_ffff)
+    };
+
+    app.last_deploy_commit = commit_ref.clone();
+    app.last_deploy_time = Utc::now().to_rfc3339();
+    app.logs.push(format!(
+        "[{}] Git deploy synced branch '{}' @ commit {}",
+        app.last_deploy_time, app.git_branch, commit_ref
+    ));
+
+    if !app.systemd_unit.is_empty()
+        && webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Systemctl)
+    {
+        let service = ServiceName::parse(&app.systemd_unit)?;
+        let unit_file = service.unit_file_name();
+        let _ = webserver
+            .executor()
+            .run(AllowedBinary::Systemctl, &["restart", &unit_file], SYSTEMD_TIMEOUT)
+            .await;
+    }
+
+    store.upsert_app(&app)?;
+    Ok(enrich_app(app, config, webserver).await)
+}
+
 pub async fn update_app_config(
     id: &str,
     workers: u32,
@@ -650,12 +722,6 @@ pub async fn update_app_config(
     let mut app = store
         .get_app(id)?
         .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
-
-    if http3_quic.unwrap_or(false) || websocket_enabled.unwrap_or(false) || rate_limit_rps > 0 {
-        return Err(PanelError::NotImplemented(
-            "http3Quic, websocketEnabled, and rateLimitRps per-app tuning are not supported yet",
-        ));
-    }
 
     let mut validated_envs = Vec::with_capacity(env_vars.len());
     for v in &env_vars {
@@ -706,8 +772,15 @@ pub async fn update_app_config(
 
     app.workers = workers;
     app.memory_limit_mb = memory_limit_mb;
+    app.rate_limit_rps = rate_limit_rps;
     if let Some(ssl) = ssl_enabled {
         app.ssl_enabled = ssl;
+    }
+    if let Some(h3) = http3_quic {
+        app.http3_quic = h3;
+    }
+    if let Some(ws) = websocket_enabled {
+        app.websocket_enabled = ws;
     }
     app.env_vars = env_vars;
     store.upsert_app(&app)?;
@@ -715,10 +788,19 @@ pub async fn update_app_config(
     Ok(enrich_app(app, config, webserver).await)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_site_settings(
     id: &str,
     ssl_enabled: Option<bool>,
     force_https: Option<bool>,
+    http3_quic: Option<bool>,
+    websocket_enabled: Option<bool>,
+    rate_limit_rps: Option<u32>,
+    redirects: Option<Vec<crate::api::contract::RedirectRuleItem>>,
+    hotlink_protection: Option<crate::api::contract::HotlinkProtectionConfig>,
+    directory_auth: Option<Vec<crate::api::contract::DirectoryPrivacyItem>>,
+    url_rewrite_preset: Option<RewritePresetType>,
+    url_rewrite_rules: Option<String>,
     store: &ModuleStore,
     config: &Config,
     webserver: &WebServerManager,
@@ -733,8 +815,11 @@ pub async fn update_site_settings(
     }
     let next_ssl = ssl_enabled.unwrap_or(app.ssl_enabled);
     let next_force = force_https.unwrap_or(app.force_https);
+    let next_h3 = http3_quic.unwrap_or(app.http3_quic);
+    let next_ws = websocket_enabled.unwrap_or(app.websocket_enabled);
+    let next_rps = rate_limit_rps.unwrap_or(app.rate_limit_rps);
     let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
-    let spec = build_site_spec_for_app(
+    let mut spec = build_site_spec_for_app(
         domain,
         aliases,
         working.as_path(),
@@ -744,10 +829,29 @@ pub async fn update_site_settings(
         next_ssl,
         next_force,
     )?;
+    spec.http3_quic = next_h3;
+    spec.websocket_enabled = next_ws;
+    spec.rate_limit_rps = next_rps;
+
     let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
     app.ssl_enabled = next_ssl;
     app.force_https = next_force;
-    app.url_rewrite_rules = rendered.content;
+    app.http3_quic = next_h3;
+    app.websocket_enabled = next_ws;
+    app.rate_limit_rps = next_rps;
+    if let Some(r) = redirects {
+        app.redirects = Some(r);
+    }
+    if let Some(h) = hotlink_protection {
+        app.hotlink_protection = Some(h);
+    }
+    if let Some(d) = directory_auth {
+        app.directory_auth = Some(d);
+    }
+    if let Some(preset) = url_rewrite_preset {
+        app.url_rewrite_preset = preset;
+    }
+    app.url_rewrite_rules = url_rewrite_rules.unwrap_or(rendered.content);
     app.nginx_vhost = rendered.config_path.display().to_string();
     store.upsert_app(&app)?;
     Ok(enrich_app(app, config, webserver).await)

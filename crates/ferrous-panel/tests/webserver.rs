@@ -599,18 +599,15 @@ fn unsupported_site_modes_return_501_and_invalid_ssl_redirect_returns_400() -> R
         "unsupported SiteMode must return NotImplemented (501)",
     )?;
 
-    // Unsupported advanced flag http3Quic => 501
+    // Supported advanced flag http3Quic renders cleanly
     unsupported_mode.mode = SiteMode::StaticSpa {
         index_file: SafeFilename::parse("index.html")?,
         spa_fallback: false,
     };
     unsupported_mode.http3_quic = true;
     ensure(
-        matches!(
-            nginx.render_site(&unsupported_mode),
-            Err(PanelError::NotImplemented(_))
-        ),
-        "unsupported http3Quic flag must return NotImplemented (501)",
+        nginx.render_site(&unsupported_mode).is_ok(),
+        "supported http3Quic flag must render without error",
     )?;
 
     // Invalid redirectHttps=true with sslEnabled=false => 400 Validation

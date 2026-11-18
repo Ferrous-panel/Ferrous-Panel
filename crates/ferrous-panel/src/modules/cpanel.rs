@@ -781,8 +781,219 @@ pub fn delete_backup(
     list_backups_verified(store, config)
 }
 
-/// Loads cPanel overview: real cron jobs + real zstd backups.
-/// DNS (`dns_records`) and SFTP (`sftp_accounts`) remain unimplemented (HTTP 501 on mutation routes).
+const KV_DNS_RECORDS: &str = "cpanel.dns_records";
+const KV_SFTP_ACCOUNTS: &str = "cpanel.sftp_accounts";
+
+fn write_dns_zone_files(config: &Config, records: &[DnsRecordItem]) -> Result<(), PanelError> {
+    let zones_dir = config.data_dir.join("dns/zones");
+    std::fs::create_dir_all(&zones_dir)?;
+    let mut by_domain: std::collections::BTreeMap<String, Vec<&DnsRecordItem>> =
+        std::collections::BTreeMap::new();
+    for rec in records {
+        by_domain.entry(rec.domain.clone()).or_default().push(rec);
+    }
+    for (domain, list) in by_domain {
+        let mut buf = format!(
+            "; Hickory DNS Zone File for {domain}\n$ORIGIN {domain}.\n$TTL 300\n@ IN SOA ns1.{domain}. hostmaster.{domain}. ( 2026111801 3600 900 1209600 300 )\n"
+        );
+        for r in list {
+            let prio = r.priority.map(|p| format!("{p} ")).unwrap_or_default();
+            buf.push_str(&format!(
+                "{} {} IN {} {}{}\n",
+                r.host, r.ttl, r.record_type, prio, r.value
+            ));
+        }
+        let zone_path = zones_dir.join(format!("{domain}.zone"));
+        crate::webserver::atomic_write_file(&zone_path, buf.as_bytes(), 0o644)?;
+    }
+    Ok(())
+}
+
+pub fn list_dns_records(store: &ModuleStore) -> Result<Vec<DnsRecordItem>, PanelError> {
+    Ok(store.get_json::<Vec<DnsRecordItem>>(KV_DNS_RECORDS)?.unwrap_or_default())
+}
+
+pub fn add_dns_record(
+    store: &ModuleStore,
+    config: &Config,
+    domain: &str,
+    record_type: &str,
+    host: &str,
+    value: &str,
+    ttl: u32,
+    priority: Option<u16>,
+) -> Result<Vec<DnsRecordItem>, PanelError> {
+    let clean_domain = Domain::parse(domain)?;
+    let rtype = record_type.trim().to_ascii_uppercase();
+    if !matches!(rtype.as_str(), "A" | "AAAA" | "CNAME" | "MX" | "TXT" | "CAA") {
+        return Err(PanelError::Validation(format!(
+            "unsupported DNS record type '{record_type}'"
+        )));
+    }
+    let clean_host = host.trim();
+    let clean_val = value.trim();
+    if clean_host.is_empty() || clean_val.is_empty() {
+        return Err(PanelError::Validation(
+            "DNS host and value cannot be empty".to_string(),
+        ));
+    }
+    if clean_host.contains('\n') || clean_val.contains('\n') {
+        return Err(PanelError::Validation(
+            "DNS record fields cannot contain newlines".to_string(),
+        ));
+    }
+    let bounded_ttl = ttl.clamp(60, 604_800);
+    let mut records = list_dns_records(store)?;
+    let id = format!("dns-{:x}-{}", Utc::now().timestamp_millis(), records.len() + 1);
+    records.insert(
+        0,
+        DnsRecordItem {
+            id,
+            domain: clean_domain.as_str().to_string(),
+            record_type: rtype.clone(),
+            host: clean_host.to_string(),
+            value: clean_val.to_string(),
+            ttl: bounded_ttl,
+            priority: if rtype == "MX" {
+                Some(priority.unwrap_or(10))
+            } else {
+                priority
+            },
+        },
+    );
+    store.put_json(KV_DNS_RECORDS, &records)?;
+    write_dns_zone_files(config, &records)?;
+    Ok(records)
+}
+
+pub fn delete_dns_record(
+    store: &ModuleStore,
+    config: &Config,
+    id: &str,
+) -> Result<Vec<DnsRecordItem>, PanelError> {
+    let mut records = list_dns_records(store)?;
+    let before = records.len();
+    records.retain(|r| r.id != id);
+    if records.len() == before {
+        return Err(PanelError::NotFound(format!("DNS record '{id}' not found")));
+    }
+    store.put_json(KV_DNS_RECORDS, &records)?;
+    write_dns_zone_files(config, &records)?;
+    Ok(records)
+}
+
+fn dir_used_mb(path: &Path) -> f64 {
+    fn sum_bytes(p: &Path, depth: u8) -> u64 {
+        if depth > 6 {
+            return 0;
+        }
+        let Ok(rd) = std::fs::read_dir(p) else {
+            return 0;
+        };
+        let mut total = 0u64;
+        for entry in rd.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_file() {
+                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+            } else if ft.is_dir() {
+                total = total.saturating_add(sum_bytes(&entry.path(), depth + 1));
+            }
+        }
+        total
+    }
+    let bytes = sum_bytes(path, 0);
+    ((bytes as f64) / (1024.0 * 1024.0) * 100.0).round() / 100.0
+}
+
+pub fn list_sftp_accounts(
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<Vec<SftpAccountItem>, PanelError> {
+    let mut accounts = store
+        .get_json::<Vec<SftpAccountItem>>(KV_SFTP_ACCOUNTS)?
+        .unwrap_or_default();
+    for acc in &mut accounts {
+        if let Ok(safe) = SafePath::under_root(&config.wwwroot, &acc.chroot_dir) {
+            acc.used_mb = dir_used_mb(safe.as_path());
+        }
+    }
+    Ok(accounts)
+}
+
+pub fn add_sftp_account(
+    store: &ModuleStore,
+    config: &Config,
+    username: &str,
+    target_app: &str,
+    auth_method: &str,
+    quota_mb: u64,
+) -> Result<Vec<SftpAccountItem>, PanelError> {
+    let clean_user = LinuxUser::parse(username)?;
+    let target_trimmed = target_app.trim();
+    let rel_target = if target_trimmed.is_empty() {
+        clean_user.as_str()
+    } else {
+        target_trimmed
+    };
+    let safe_chroot = SafePath::under_root(&config.wwwroot, rel_target)?;
+    std::fs::create_dir_all(safe_chroot.as_path())?;
+
+    let mut accounts = list_sftp_accounts(store, config)?;
+    if accounts
+        .iter()
+        .any(|a| a.username.eq_ignore_ascii_case(clean_user.as_str()))
+    {
+        return Err(PanelError::Conflict(format!(
+            "SFTP account '{}' already exists",
+            clean_user.as_str()
+        )));
+    }
+    let id = format!("sftp-{}", clean_user.as_str());
+    let used_mb = dir_used_mb(safe_chroot.as_path());
+    accounts.insert(
+        0,
+        SftpAccountItem {
+            id,
+            username: clean_user.as_str().to_string(),
+            chroot_dir: safe_chroot.as_path().display().to_string(),
+            target_app: rel_target.to_string(),
+            auth_method: if auth_method.trim().is_empty() {
+                "Ed25519 SSH Key".to_string()
+            } else {
+                auth_method.trim().to_string()
+            },
+            quota_mb: quota_mb.max(64),
+            used_mb,
+            status: "active".to_string(),
+        },
+    );
+    store.put_json(KV_SFTP_ACCOUNTS, &accounts)?;
+    Ok(accounts)
+}
+
+pub fn delete_sftp_account(
+    store: &ModuleStore,
+    config: &Config,
+    id: &str,
+) -> Result<Vec<SftpAccountItem>, PanelError> {
+    let mut accounts = list_sftp_accounts(store, config)?;
+    let before = accounts.len();
+    accounts.retain(|a| a.id != id);
+    if accounts.len() == before {
+        return Err(PanelError::NotFound(format!(
+            "SFTP account '{id}' not found"
+        )));
+    }
+    store.put_json(KV_SFTP_ACCOUNTS, &accounts)?;
+    Ok(accounts)
+}
+
+/// Loads cPanel overview: real cron jobs, DNS zone records, zstd backups, and SFTP chroot accounts.
 pub async fn load_cpanel_overview(
     store: &ModuleStore,
     config: &Config,
@@ -790,8 +1001,8 @@ pub async fn load_cpanel_overview(
 ) -> Result<CpanelData, PanelError> {
     let cron_jobs = list_cron_jobs_for_default_users(store, executor).await?;
     let backups = list_backups_verified(store, config)?;
-    let dns_records: Vec<DnsRecordItem> = Vec::new();
-    let sftp_accounts: Vec<SftpAccountItem> = Vec::new();
+    let dns_records = list_dns_records(store)?;
+    let sftp_accounts = list_sftp_accounts(store, config)?;
 
     Ok(CpanelData {
         cron_jobs,

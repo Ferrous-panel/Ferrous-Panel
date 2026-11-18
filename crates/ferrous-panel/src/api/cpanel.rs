@@ -242,3 +242,147 @@ pub async fn delete_backup(
     )?;
     Ok(HttpResponse::Ok().json(backups))
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddDnsRequest {
+    pub domain: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub host: String,
+    pub value: String,
+    #[serde(default = "default_dns_ttl")]
+    pub ttl: u32,
+    #[serde(default)]
+    pub priority: Option<u16>,
+}
+
+const fn default_dns_ttl() -> u32 {
+    300
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddSftpRequest {
+    pub username: String,
+    #[serde(default)]
+    pub target_app: String,
+    #[serde(default)]
+    pub auth_method: String,
+    #[serde(default = "default_sftp_quota")]
+    pub quota_mb: u64,
+}
+
+const fn default_sftp_quota() -> u64 {
+    2048
+}
+
+/// `POST /api/cpanel/dns` — creates a DNS zone record in SQLite and writes RFC 1035 zone file.
+pub async fn add_dns(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: Option<web::Json<AddDnsRequest>>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let Some(body) = payload.map(web::Json::into_inner) else {
+        let records = cpanel_mod::list_dns_records(&state.modules)?;
+        return Ok(HttpResponse::Ok().json(records));
+    };
+    let records = cpanel_mod::add_dns_record(
+        &state.modules,
+        &state.config,
+        &body.domain,
+        &body.record_type,
+        &body.host,
+        &body.value,
+        body.ttl,
+        body.priority,
+    )?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "cpanel.dns.add",
+        &format!("domain={} type={} host={}", body.domain, body.record_type, body.host),
+    )?;
+    Ok(HttpResponse::Ok().json(records))
+}
+
+/// `DELETE /api/cpanel/dns/{id}` — removes a DNS zone record and re-writes RFC 1035 zone file.
+pub async fn delete_dns(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let records = cpanel_mod::delete_dns_record(&state.modules, &state.config, &id)?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "cpanel.dns.delete",
+        &format!("id={id}"),
+    )?;
+    Ok(HttpResponse::Ok().json(records))
+}
+
+/// `POST /api/cpanel/sftp` — creates a chrooted SFTP account under `wwwroot`.
+pub async fn add_sftp(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: Option<web::Json<AddSftpRequest>>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let Some(body) = payload.map(web::Json::into_inner) else {
+        let accounts = cpanel_mod::list_sftp_accounts(&state.modules, &state.config)?;
+        return Ok(HttpResponse::Ok().json(accounts));
+    };
+    let accounts = cpanel_mod::add_sftp_account(
+        &state.modules,
+        &state.config,
+        &body.username,
+        &body.target_app,
+        &body.auth_method,
+        body.quota_mb,
+    )?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "cpanel.sftp.add",
+        &format!("username={} targetApp={}", body.username, body.target_app),
+    )?;
+    Ok(HttpResponse::Ok().json(accounts))
+}
+
+/// `DELETE /api/cpanel/sftp/{id}` — deletes an SFTP chroot account.
+pub async fn delete_sftp(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let accounts = cpanel_mod::delete_sftp_account(&state.modules, &state.config, &id)?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "cpanel.sftp.delete",
+        &format!("id={id}"),
+    )?;
+    Ok(HttpResponse::Ok().json(accounts))
+}
