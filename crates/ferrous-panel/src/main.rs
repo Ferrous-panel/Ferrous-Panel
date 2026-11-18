@@ -103,6 +103,7 @@ fn main() -> anyhow::Result<()> {
 
     init_tracing();
     let mut config = Config::parse();
+    ferrous_panel::cli::apply_default_env_files(&mut config);
     if config.reload_webserver {
         let hook_exe = std::env::current_exe()
             .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/ferrous-panel"));

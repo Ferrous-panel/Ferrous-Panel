@@ -228,7 +228,44 @@ ensure_cargo_installed() {
   fi
 }
 
+configure_shell_env() {
+  echo -e "${CYAN}[*] Registering environment variables in /etc/profile.d/ferrous-panel.sh and shell profiles...${NC}"
+  cat > /etc/profile.d/ferrous-panel.sh <<'EOF_PROFILE'
+# Managed by FerrousPanel — System-wide Rust/Cargo & FerrousPanel environment variables
+export RUSTUP_HOME="/root/.rustup"
+export CARGO_HOME="/root/.cargo"
+export FERROUS_ENV_FILE="/etc/ferrous-panel/panel.env"
+
+case ":${PATH}:" in
+  *":/usr/local/bin:"*) ;;
+  *) export PATH="/usr/local/bin:${PATH}" ;;
+esac
+
+if [ -d "/root/.cargo/bin" ]; then
+  case ":${PATH}:" in
+    *":/root/.cargo/bin:"*) ;;
+    *) export PATH="/root/.cargo/bin:${PATH}" ;;
+  esac
+fi
+
+if [ -r "/etc/ferrous-panel/panel.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/ferrous-panel/panel.env
+  set +a
+fi
+EOF_PROFILE
+  chmod 0644 /etc/profile.d/ferrous-panel.sh
+
+  for rc_file in /root/.bashrc /root/.profile /etc/bash.bashrc; do
+    if [ -f "$rc_file" ] && ! grep -q '/etc/profile.d/ferrous-panel.sh' "$rc_file" 2>/dev/null; then
+      printf '\n# FerrousPanel & Cargo environment\n[ -f /etc/profile.d/ferrous-panel.sh ] && . /etc/profile.d/ferrous-panel.sh\n' >> "$rc_file"
+    fi
+  done
+}
+
 ensure_cargo_installed
+configure_shell_env
 
 # ==============================================================================
 # [3/7] Prepare System Directories
@@ -373,9 +410,13 @@ FERROUS_PORT=${PANEL_PORT}
 FERROUS_DATA_DIR=${DATA_DIR}
 FERROUS_WWWROOT=${WWWROOT}
 FERROUS_BACKUPS_DIR=${BACKUPS_DIR}
+FERROUS_SYSTEMD_DIR=/etc/systemd/system
 FERROUS_ADMIN_USER=${ADMIN_USER}
 FERROUS_SECURITY_ENTRANCE=${SECURITY_ENTRANCE}
 FERROUS_CUSTOM_DOMAIN=${CUSTOM_DOMAIN}
+FERROUS_SECURE_COOKIE=false
+RUSTUP_HOME=${RUSTUP_HOME}
+CARGO_HOME=${CARGO_HOME}
 RUST_LOG=info,actix_web=info
 EOF_ENV
 chmod 0600 "${ENV_FILE}"

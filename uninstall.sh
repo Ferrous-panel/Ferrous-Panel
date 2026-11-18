@@ -46,6 +46,7 @@ rm -f /etc/systemd/system/ferrous-certbot-renew.timer
 systemctl daemon-reload
 
 rm -f /usr/local/bin/ferrous-panel /usr/local/bin/ferrousx-bin /usr/local/bin/fp /usr/local/bin/ferrous
+rm -f /etc/profile.d/ferrous-panel.sh
 
 echo -e "${GREEN}FerrousPanel binaries and systemd services removed.${NC}"
 echo "Website files (/www/wwwroot), panel state (/var/lib/ferrous-panel), and SQL databases were preserved."
