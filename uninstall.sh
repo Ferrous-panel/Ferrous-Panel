@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FerrousPanel — Clean Uninstaller (Preserves /www/wwwroot and databases)
+# FerrousPanel — 1-Command Clean Uninstaller
+# Preserves /www/wwwroot, /var/lib/ferrous-panel, and SQL databases.
+#
+# 1-Command Uninstall:
+#   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/uninstall.sh | sudo bash
 # ==============================================================================
 set -euo pipefail
 
@@ -9,12 +13,21 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
+PROMPT_CONFIRM=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --interactive) PROMPT_CONFIRM=true; shift ;;
+    -y|--yes) PROMPT_CONFIRM=false; shift ;;
+    *) shift ;;
+  esac
+done
+
 if [ "$(id -u)" -ne 0 ]; then
   echo -e "${RED}[ERROR] uninstall.sh must be run as root (use sudo).${NC}" >&2
   exit 1
 fi
 
-if [ -t 0 ]; then
+if [ "$PROMPT_CONFIRM" = true ] && [ -t 0 ]; then
   read -rp "Stop and remove ferrous-panel/ferrousx services & binaries? (y/N): " confirm
   if [[ ! "${confirm:-N}" =~ ^[yY]([eE][sS])?$ ]]; then
     echo "Aborted."

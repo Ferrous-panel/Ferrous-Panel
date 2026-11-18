@@ -1,10 +1,48 @@
 # FerrousPanel
 
-Pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous-panel` + optional `ferrousx-bin`).
+[![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](LICENSE)
+[![Rust: 1.85+](https://img.shields.io/badge/Rust-1.85%2B-dea584.svg)](Cargo.toml)
+[![OS: Ubuntu 22.04 / 24.04 LTS](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04%20LTS-E95420.svg)](install.sh)
+
+Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous-panel` + optional `ferrousx-bin`).
 
 - **Zero JS server runtime on VPS**: Frontend React assets (`dist/`) are compiled at CI/build time (`vite build`) and embedded directly inside the `ferrous-panel` binary via `rust-embed`.
 - **Zero fabricated metrics & zero hidden shells**: System metrics come from `/proc` + `sysinfo`; all privileged host operations run via allowlisted argv execution (`execve`, no `sh -c`) and strict validated newtypes (`Domain`, `ServiceName`, `Port`, `SafePath`, `SqlIdentifier`, `PortOrRange`, `CronSchedule`, `SafeLinuxUser`, `OctalMode`).
 - **Fail-closed HTTP 501**: Unimplemented subsystems return `HTTP 501 Not Implemented` and display `"Chưa hỗ trợ"` in the UI rather than returning mock data.
+
+---
+
+## 1-Command Installation (Ubuntu 22.04 / 24.04 LTS)
+
+Install prebuilt release binaries (`x86_64` / `aarch64`, SHA-256 verified) with **zero Node.js, Bun, or Cargo installed on the VPS**:
+
+### Option A — Default Install (with Nginx Engine)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
+```
+
+### Option B — Pure-Rust Stack (with FerrousX Engine)
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --engine ferrousx
+```
+
+### Custom Port / Entrance / Update / Uninstall (1 Command)
+```bash
+# Custom port & entrance path:
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --port 9443 --entrance /admin
+
+# 1-Command In-Place Update (preserves /var/lib/ferrous-panel & sites):
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash
+
+# 1-Command Uninstall (preserves /www/wwwroot & databases):
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/uninstall.sh | sudo bash
+```
+
+- **First-run credentials**: Generated once via kernel CSPRNG (`OsRng`), printed once to the terminal during install, and stored solely as an Argon2id hash (`0600`). Passwords are **never** accepted via command-line arguments.
+- **Default loopback bind (`127.0.0.1:8443`)**: Access via SSH tunnel:
+  ```bash
+  ssh -N -L 8443:127.0.0.1:8443 root@<VPS_IP>
+  ```
 
 ---
 
@@ -56,27 +94,6 @@ These UI sections remain visible for API contract compatibility and return `HTTP
 
 ---
 
-## VPS Installation (Prebuilt Release Binaries Only)
-
-No Node.js, Bun, or Cargo toolchain is installed on the target VPS.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
-```
-
-Options:
-- `--engine nginx|ferrousx` — installs **only** `nginx` (`apt`) OR **only** `ferrousx-bin` (GitHub Release).
-- `--bind <IP>` (default `127.0.0.1`), `--port <PORT>` (default `8443`), `--entrance <PATH>` (default `/panel`), `--admin-user <NAME>`.
-- Passwords are **never** accepted via command-line arguments. Initial password is generated once via `OsRng`; change it anytime with `sudo fp passwd`.
-
-For loopback installs (`127.0.0.1:8443`), connect securely via SSH port forwarding:
-
-```bash
-ssh -N -L 8443:127.0.0.1:8443 root@<VPS_IP>
-```
-
----
-
 ## Built-in Terminal CLI (`fp`)
 
 `fp` and `ferrous` are symlinks to `/usr/local/bin/ferrous-panel` implemented directly with `clap`:
@@ -100,40 +117,43 @@ fp webserver    # (alias: 19) View or switch active engine (`fp webserver nginx|
 
 ---
 
-## Building From Source (CI / Development)
-
-Build frontend assets first so `rust-embed` packs `dist/` into `ferrous-panel`:
+## Building From Source & Smoke Testing
 
 ```bash
 npm ci --legacy-peer-deps
 npm run build
+npx tsc --noEmit
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
-```
 
-Compiled binaries:
-- `target/release/ferrous-panel`
-- `target/release/ferrousx-bin`
+# Run Ubuntu 24.04 end-to-end verification suite:
+sudo bash scripts/smoke-test.sh
+```
 
 ---
 
 ## Repository Structure
 
 ```text
-├── Cargo.toml                         # Rust 1.85 Workspace (excludes _archive/)
+├── Cargo.toml                         # Rust 1.85 Workspace (ferrous-panel + ferrousx; excludes _archive/)
+├── PROGRESS.md                        # Phase tracker (P1–P7), assumptions & root-cause log
 ├── crates/
 │   ├── ferrous-panel/                 # Control plane daemon, API, auth, modules, fp CLI & embedded dist/
-│   ├── ferrousx/                      # Standalone HTTP/HTTPS/FastCGI/WS Rust web server (ferrousx-bin)
-│   └── ferrous-core/                  # Core shared crate
+│   └── ferrousx/                      # Standalone HTTP/HTTPS/FastCGI/WS Rust web server (ferrousx-bin)
+├── scripts/
+│   └── smoke-test.sh                  # Ubuntu 24.04 end-to-end verification script (P7)
 ├── src/                               # React 19 + TypeScript + Tailwind frontend UI
-├── package.json                       # Single script: "build": "vite build"
+├── package.json                       # Frontend Vite scripts ("dev", "build")
 ├── install.sh / update.sh / uninstall.sh
-├── .github/workflows/ci-release.yml   # vite build -> cargo test/clippy -> cargo build --release
-└── _archive/                          # Archived legacy JS/Rust prototypes (outside Cargo workspace)
+├── .github/                           # CI/Release workflow & open-source Issue/PR templates
+└── _archive/                          # Archived legacy prototypes (excluded from Cargo workspace)
 ```
 
-## License
+## Open Source Governance & License
 
-MIT License — see [LICENSE](LICENSE).
+- **License**: [MIT License](LICENSE)
+- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
+- **Code of Conduct**: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- **Security Policy**: [SECURITY.md](SECURITY.md)

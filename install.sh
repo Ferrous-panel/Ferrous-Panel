@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# FerrousPanel — Pure-Rust VPS Control Panel Installer (Ubuntu 22.04 / 24.04 LTS)
-# Downloads prebuilt release binaries only (zero Node.js, Bun, or Cargo on VPS).
+# FerrousPanel — 1-Command Open-Source Installer (Ubuntu 22.04 / 24.04 LTS)
+# Pure-Rust single-binary control plane (zero Node.js, Bun, or Cargo on VPS).
 #
-# Quick Install:
+# 1-Command Install (default Nginx engine):
 #   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
+#
+# 1-Command Install with FerrousX (Pure-Rust HTTP/HTTPS/FastCGI/WS engine):
+#   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --engine ferrousx
 # ==============================================================================
 set -euo pipefail
 
@@ -23,8 +26,8 @@ PANEL_PORT="${FERROUS_PORT:-8443}"
 SECURITY_ENTRANCE="${FERROUS_SECURITY_ENTRANCE:-/panel}"
 ADMIN_USER="${FERROUS_ADMIN_USER:-admin_ferrous}"
 CUSTOM_DOMAIN="${FERROUS_CUSTOM_DOMAIN:-}"
-WEB_ENGINE="${FERROUS_ENGINE:-}"
-AUTO_CONFIRM=false
+WEB_ENGINE="${FERROUS_ENGINE:-nginx}"
+INTERACTIVE_MODE=false
 
 DATA_DIR="/var/lib/ferrous-panel"
 ENV_FILE="/etc/ferrous-panel/panel.env"
@@ -32,6 +35,28 @@ WWWROOT="/www/wwwroot"
 BACKUPS_DIR="/var/backups/ferrous-panel"
 BIN_PANEL="/usr/local/bin/ferrous-panel"
 BIN_FERROUSX="/usr/local/bin/ferrousx-bin"
+
+usage() {
+  cat <<'EOF_HELP'
+FerrousPanel 1-Command Installer (Ubuntu 22.04 / 24.04 LTS)
+
+Usage:
+  curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- [OPTIONS]
+
+Options:
+  --engine <nginx|ferrousx>   Frontend web server engine (default: nginx)
+  --bind <IP>                 Listen address (default: 127.0.0.1)
+  --port <PORT>               Listen TCP port 1..65535 (default: 8443)
+  --entrance <PATH>           Security entrance path (default: /panel)
+  --admin-user <USER>         Initial admin username (default: admin_ferrous)
+  --domain <DOMAIN>           Optional custom panel domain
+  --version <TAG|latest>      GitHub Release version tag (default: latest)
+  --interactive               Prompt interactively for engine selection
+  -y, --yes, --unattended     Run non-interactively (default for 1-command install)
+  -h, --help                  Show this help message
+EOF_HELP
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,9 +73,12 @@ while [[ $# -gt 0 ]]; do
     --domain|--custom-domain) CUSTOM_DOMAIN="$2"; shift 2 ;;
     --engine) WEB_ENGINE="$2"; shift 2 ;;
     --version) RELEASE_TAG="$2"; shift 2 ;;
-    -y|--yes|--unattended) AUTO_CONFIRM=true; shift ;;
+    --interactive) INTERACTIVE_MODE=true; shift ;;
+    -y|--yes|--unattended) INTERACTIVE_MODE=false; shift ;;
+    -h|--help) usage; exit 0 ;;
     *)
       echo -e "${RED}[ERROR] Unknown option: $1${NC}" >&2
+      usage >&2
       exit 1
       ;;
   esac
@@ -78,20 +106,16 @@ case "$ARCH_RAW" in
     ;;
 esac
 
-if [ -z "$WEB_ENGINE" ]; then
-  if [ "$AUTO_CONFIRM" = false ] && [ -t 0 ]; then
-    echo ""
-    echo -e "${BOLD}Select Frontend Web Server Engine:${NC}"
-    echo "  1) nginx    (apt install nginx)"
-    echo "  2) ferrousx (Pure-Rust HTTP/HTTPS/FastCGI/WebSocket binary)"
-    read -rp "Choose [1/2, default 1]: " engine_choice || true
-    case "${engine_choice:-1}" in
-      2|ferrousx) WEB_ENGINE="ferrousx" ;;
-      *) WEB_ENGINE="nginx" ;;
-    esac
-  else
-    WEB_ENGINE="nginx"
-  fi
+if [ "$INTERACTIVE_MODE" = true ] && [ -t 0 ]; then
+  echo ""
+  echo -e "${BOLD}Select Frontend Web Server Engine:${NC}"
+  echo "  1) nginx    (apt install nginx)"
+  echo "  2) ferrousx (Pure-Rust HTTP/HTTPS/FastCGI/WebSocket binary)"
+  read -rp "Choose [1/2, default 1]: " engine_choice || true
+  case "${engine_choice:-1}" in
+    2|ferrousx) WEB_ENGINE="ferrousx" ;;
+    *) WEB_ENGINE="nginx" ;;
+  esac
 fi
 
 WEB_ENGINE="$(echo "$WEB_ENGINE" | tr '[:upper:]' '[:lower:]')"
@@ -128,11 +152,18 @@ chown -R www-data:www-data "${WWWROOT}" /www/acme 2>/dev/null || true
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-download_release_binary() {
+install_or_download_binary() {
   local asset_name="$1"
-  local dest_path="$2"
+  local local_fallback="$2"
+  local dest_path="$3"
   local url="${RELEASE_BASE}/${asset_name}"
   local tmp_file="${TMP_DIR}/${asset_name}"
+
+  if [ -x "$local_fallback" ]; then
+    echo -e "${CYAN}[*] Using local prebuilt binary ${local_fallback} -> ${dest_path}${NC}"
+    install -m 0755 "$local_fallback" "$dest_path"
+    return 0
+  fi
 
   echo -e "${CYAN}[*] Downloading ${url}...${NC}"
   curl -fsSL --retry 3 --connect-timeout 10 -o "$tmp_file" "$url"
@@ -144,16 +175,16 @@ download_release_binary() {
   install -m 0755 "$tmp_file" "$dest_path"
 }
 
-echo -e "${BLUE}[3/6] Downloading verified FerrousPanel release binary (${ARCH})...${NC}"
+echo -e "${BLUE}[3/6] Installing verified FerrousPanel release binary (${ARCH})...${NC}"
 curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
 
-download_release_binary "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
+install_or_download_binary "ferrous-panel-linux-${ARCH}" "./target/release/ferrous-panel" "${BIN_PANEL}"
 ln -sf "${BIN_PANEL}" /usr/local/bin/fp
 ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
-  echo -e "${BLUE}[4/6] Downloading FerrousX web server binary & configuring ferrousx.service...${NC}"
-  download_release_binary "ferrousx-bin-linux-${ARCH}" "${BIN_FERROUSX}"
+  echo -e "${BLUE}[4/6] Installing FerrousX web server binary & configuring ferrousx.service...${NC}"
+  install_or_download_binary "ferrousx-bin-linux-${ARCH}" "./target/release/ferrousx-bin" "${BIN_FERROUSX}"
   mkdir -p /etc/ferrousx/sites
   if [ ! -f /etc/ferrousx/ferrousx.toml ]; then
     cat > /etc/ferrousx/ferrousx.toml <<'EOF_FX'
@@ -209,11 +240,12 @@ RUST_LOG=info,actix_web=info
 EOF_ENV
 chmod 0600 "${ENV_FILE}"
 
-"${BIN_PANEL}" \
+INIT_OUTPUT="$("${BIN_PANEL}" \
   --data-dir "${DATA_DIR}" \
   --wwwroot "${WWWROOT}" \
   --admin-username "${ADMIN_USER}" \
-  fp init --engine "${WEB_ENGINE}"
+  fp init --engine "${WEB_ENGINE}")"
+echo "${INIT_OUTPUT}"
 
 cat > /etc/systemd/system/ferrous-panel.service <<'EOF_SVC'
 [Unit]
@@ -239,26 +271,42 @@ EOF_SVC
 systemctl daemon-reload
 systemctl enable --now ferrous-panel.service
 
+# Wait up to 5s for /api/health to respond
+HEALTH_PROBE_HOST="${PANEL_BIND}"
+if [ "${HEALTH_PROBE_HOST}" = "0.0.0.0" ]; then
+  HEALTH_PROBE_HOST="127.0.0.1"
+fi
+for _ in $(seq 1 25); do
+  if curl -fsS "http://${HEALTH_PROBE_HOST}:${PANEL_PORT}/api/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+
 echo -e "${BLUE}[6/6] Configuring UFW rules (SSH + 80 + 443)...${NC}"
 ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
 ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
 ufw allow "${ACTIVE_SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
 ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
 ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
+if [ "${PANEL_BIND}" != "127.0.0.1" ] && [ "${PANEL_BIND}" != "::1" ]; then
+  ufw allow "${PANEL_PORT}/tcp" comment 'FerrousPanel' >/dev/null 2>&1 || true
+fi
 ufw default deny incoming >/dev/null 2>&1 || true
 ufw default allow outgoing >/dev/null 2>&1 || true
 ufw --force enable >/dev/null 2>&1 || true
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${GREEN}${BOLD}  FerrousPanel installed cleanly (pure-Rust binaries only)${NC}"
+echo -e "${GREEN}${BOLD}  FerrousPanel Installed Cleanly (100% Pure-Rust Open-Source Edition)${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo -e "  Binary            : ${BIN_PANEL} (embedded dist/ SPA)"
 echo -e "  CLI Symlinks      : fp / ferrous -> ${BIN_PANEL}"
 echo -e "  Web Engine        : ${WEB_ENGINE}"
-echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}"
+echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE}"
+echo -e "  Admin Username    : ${ADMIN_USER}"
 echo -e "  Credentials Hash  : ${DATA_DIR}/admin.credentials.json (mode 0600, Argon2id)"
 echo -e "  Panel Env Config  : ${ENV_FILE}"
-echo -e "  Reset Password    : sudo fp passwd"
-echo -e "  SSH Tunnel Access : ssh -N -L ${PANEL_PORT}:${PANEL_BIND}:${PANEL_PORT} root@<VPS_IP>"
+echo -e "  CLI Toolbox       : sudo fp        (or: sudo fp passwd / sudo fp status)"
+echo -e "  SSH Tunnel Access : ssh -N -L ${PANEL_PORT}:${HEALTH_PROBE_HOST}:${PANEL_PORT} root@<VPS_IP>"
 echo -e "${GREEN}==============================================================================${NC}"

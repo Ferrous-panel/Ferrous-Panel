@@ -1,7 +1,6 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/ferrous-core",
     "crates/ferrous-panel",
     "crates/ferrousx",
 ]
@@ -13,6 +12,11 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/Ferrous-panel/Ferrous-Panel"
+homepage = "https://github.com/Ferrous-panel/Ferrous-Panel"
+documentation = "https://github.com/Ferrous-panel/Ferrous-Panel#readme"
+readme = "README.md"
+keywords = ["vps", "control-panel", "ubuntu", "actix-web", "rustls"]
+categories = ["command-line-utilities", "network-programming", "web-programming::http-server"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
