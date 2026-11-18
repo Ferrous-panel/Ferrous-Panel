@@ -296,11 +296,15 @@ export function usePanelController(
           setMysqlConfig(data);
         } catch {}
       }
-      if (mailRes.status === 'fulfilled' && mailRes.value.ok) {
-        try {
-          const data = await mailRes.value.json();
-          setMailData(data);
-        } catch {}
+      if (mailRes.status === 'fulfilled') {
+        if (mailRes.value.ok) {
+          try {
+            const data = await mailRes.value.json();
+            setMailData(data);
+          } catch {}
+        } else {
+          setMailData(null);
+        }
       }
       if (optRes.status === 'fulfilled' && optRes.value.ok) {
         try {
@@ -332,11 +336,15 @@ export function usePanelController(
           setRustFiles(Array.isArray(data) ? data : []);
         } catch {}
       }
-      if (edgeRes && edgeRes.status === 'fulfilled' && edgeRes.value.ok) {
-        try {
-          const data = await edgeRes.value.json();
-          setEdgeCloud(data);
-        } catch {}
+      if (edgeRes && edgeRes.status === 'fulfilled') {
+        if (edgeRes.value.ok) {
+          try {
+            const data = await edgeRes.value.json();
+            setEdgeCloud(data);
+          } catch {}
+        } else {
+          setEdgeCloud(null);
+        }
       }
     } catch (err) {
       console.error('[FerrousPanel] fetchAllData failed:', err);

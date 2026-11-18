@@ -133,11 +133,19 @@ export const RustEdgeCloudView: React.FC<RustEdgeCloudViewProps> = ({
 
   if (!edgeCloud) {
     return (
-      <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-sm text-slate-500">
-        {tr(
-          'Đang tải cấu hình Rust Edge Cloud & WASI Runtime...',
-          'Loading Rust Edge Cloud & WASI Runtime...'
-        )}
+      <div className="p-6 rounded-xl border border-amber-500/30 bg-white dark:bg-slate-900 space-y-2">
+        <div className="text-xs font-mono font-bold text-amber-600 dark:text-amber-400">
+          Chưa hỗ trợ (HTTP 501)
+        </div>
+        <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+          Rust Edge Cloud (Wasmtime / Youki OCI / WireGuard / BLAKE3) — Chưa hỗ trợ
+        </h2>
+        <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+          {tr(
+            'Phân hệ Edge Cloud & WASI Runtime chưa được bật trên nhân Rust thuần; API /api/edge-cloud trả về 501 Not Implemented.',
+            'Edge Cloud & WASI Runtime is not implemented yet; /api/edge-cloud returns HTTP 501 Not Implemented.'
+          )}
+        </p>
       </div>
     );
   }

@@ -362,7 +362,7 @@ export default function App() {
                 />
               )}
 
-              {activeTab === 'mail' && controller.mailData && (
+              {activeTab === 'mail' && (
                 <MailServerView
                   mailData={controller.mailData}
                   onAddDomain={controller.handleAddMailDomain}

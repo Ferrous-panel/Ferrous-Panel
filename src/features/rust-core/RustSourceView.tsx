@@ -47,6 +47,7 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
     'binding' | 'rust' | 'header' | 'systemd'
   >('binding');
   const [copiedSnippet, setCopiedSnippet] = useState<boolean>(false);
+  const [polyglotUnsupported, setPolyglotUnsupported] = useState<boolean>(false);
 
   useEffect(() => {
     let mounted = true;
@@ -57,14 +58,17 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
           const data = await res.json();
           if (mounted && Array.isArray(data)) {
             setToolchains(data);
+            setPolyglotUnsupported(false);
+            handleCompileBridge('Python (PyO3 / FastAPI)');
           }
+        } else if (mounted) {
+          setPolyglotUnsupported(true);
         }
       } catch {
         // Ignore network errors during initial load
       }
     };
     loadPolyglot();
-    handleCompileBridge('Python (PyO3 / FastAPI)');
     return () => {
       mounted = false;
     };
@@ -195,6 +199,14 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
 
       {subTab === 'polyglot' ? (
         <div className="space-y-6">
+          {polyglotUnsupported && (
+            <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 text-xs text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2">
+              <span>
+                <strong>Polyglot FFI/IPC Engine — Chưa hỗ trợ:</strong> Endpoint <code className="font-mono">/api/polyglot/toolchains</code> &amp; <code className="font-mono">/api/polyglot/compile</code> hiện trả về <code className="font-mono">HTTP 501 Not Implemented</code>.
+              </span>
+              <span className="font-mono font-bold shrink-0">Chưa hỗ trợ (501)</span>
+            </div>
+          )}
           {/* Interactive Polyglot Compiler & FFI Bridge Studio */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
             {/* Compiler Configuration Panel */}

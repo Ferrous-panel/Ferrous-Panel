@@ -120,7 +120,13 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
   >('Ed25519 SSH Key');
   const [sftpQuota, setSftpQuota] = useState(5120);
 
-  if (!cpanel) return null;
+  if (!cpanel) {
+    return (
+      <div className="p-6 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs text-slate-500">
+        Đang tải dữ liệu Cron Jobs &amp; Kho sao lưu Zstd...
+      </div>
+    );
+  }
 
   const showToast = (msg: string) => {
     setBannerMsg(msg);
@@ -457,7 +463,14 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
 
       {/* 2. DNS ZONE EDITOR */}
       {subTab === 'dns' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="space-y-4">
+          <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 text-xs text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2">
+            <span>
+              <strong>DNS Zone Editor (Hickory DNS) — Chưa hỗ trợ:</strong> Endpoint <code className="font-mono">/api/cpanel/dns</code> hiện trả về <code className="font-mono">HTTP 501 Not Implemented</code>.
+            </span>
+            <span className="font-mono font-bold shrink-0">Chưa hỗ trợ (501)</span>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
             <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-4 font-display">
               Thêm Bản ghi DNS (FerrousDNS Hickory)
@@ -598,6 +611,7 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
               </table>
             </div>
           </div>
+          </div>
         </div>
       )}
 
@@ -723,7 +737,14 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
 
       {/* 4. SFTP CHROOT ACCOUNTS */}
       {subTab === 'sftp' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="space-y-4">
+          <div className="p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 text-xs text-amber-700 dark:text-amber-300 flex items-center justify-between gap-2">
+            <span>
+              <strong>SFTP Chroot Accounts (russh) — Chưa hỗ trợ:</strong> Endpoint <code className="font-mono">/api/cpanel/sftp</code> hiện trả về <code className="font-mono">HTTP 501 Not Implemented</code>.
+            </span>
+            <span className="font-mono font-bold shrink-0">Chưa hỗ trợ (501)</span>
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           <div className="lg:col-span-4 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5">
             <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 mb-4 font-display">
               Tạo Tài khoản SFTP Chroot (FerrousSFTP russh)
@@ -851,6 +872,7 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
                 </tbody>
               </table>
             </div>
+          </div>
           </div>
         </div>
       )}
