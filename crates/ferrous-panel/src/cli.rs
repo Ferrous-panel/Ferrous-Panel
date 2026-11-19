@@ -5,7 +5,7 @@ use crate::auth::password::{
 use crate::config::Config;
 use crate::error::PanelError;
 use crate::system::cmd::{self, AllowedBinary};
-use crate::system::validate::Port;
+use crate::system::validate::{Domain, Port};
 use crate::webserver::{atomic_write_file, EngineKind, WebServerManager};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -109,9 +109,24 @@ pub enum FpCommand {
     /// (9) Reset security entrance path back to '/'
     #[command(alias = "9", name = "clear-entrance")]
     ClearEntrance,
+    /// (10) Set or change Web Panel custom domain in panel.env
+    #[command(alias = "10")]
+    Domain {
+        /// Custom domain (e.g. panel.example.com; prompted interactively if omitted)
+        domain: Option<String>,
+    },
     /// (11) Validate active web server config, ensure /www/acme permissions, and reload engine
     #[command(alias = "11")]
     Repair,
+    /// (12) Clear Web Panel custom domain binding in panel.env
+    #[command(alias = "12", name = "clear-domain")]
+    ClearDomain,
+    /// (13) Change Web Panel listen bind IP (0.0.0.0 for public IP or 127.0.0.1 for local-only)
+    #[command(alias = "13")]
+    Bind {
+        /// Bind IP address (0.0.0.0 or 127.0.0.1; prompted interactively if omitted)
+        ip: Option<String>,
+    },
     /// (14) Show panel URL, active engine, credential file path, and admin username (never prints stored password)
     #[command(alias = "14", alias = "default", alias = "info")]
     Status,
@@ -403,6 +418,12 @@ async fn print_status(config: &Config) -> Result<()> {
     if let Some(ref dom) = config.custom_domain {
         if !dom.trim().is_empty() {
             println!("  Custom Domain    : {dom}");
+            println!(
+                "  Panel URL (Domain): http://{}:{}{}",
+                dom.trim(),
+                config.port,
+                config.security_entrance
+            );
         }
     }
     println!("  Admin Username   : {username}");
@@ -507,20 +528,44 @@ pub async fn run_fp_command(
             let plain_secret = if generate {
                 generate_initial_password().map_err(|e| anyhow::anyhow!("{e}"))?
             } else {
-                let input = prompt_line(
-                    "Enter new Admin password (8..=256 chars; input read from stdin): ",
-                )?;
-                let confirm = prompt_line("Confirm new Admin password: ")?;
-                if input != confirm {
-                    bail!("passwords do not match");
+                let mut accepted: Option<String> = None;
+                for attempt in 1..=3 {
+                    let input = prompt_line(
+                        "Enter new Admin password (8..=256 chars; input read from stdin): ",
+                    )?;
+                    if !(8..=256).contains(&input.len()) {
+                        eprintln!(
+                            "Password length must be 8..=256 chars (got {} chars). Attempt {attempt}/3.",
+                            input.len()
+                        );
+                        continue;
+                    }
+                    let confirm = prompt_line("Confirm new Admin password: ")?;
+                    if input != confirm {
+                        eprintln!(
+                            "Passwords do not match (enter the exact same password twice). Attempt {attempt}/3."
+                        );
+                        continue;
+                    }
+                    accepted = Some(input);
+                    break;
                 }
-                crate::auth::password::RedactedSecret::new(input)
+                let Some(valid_pw) = accepted else {
+                    bail!("password update aborted after 3 invalid/mismatched attempts");
+                };
+                crate::auth::password::RedactedSecret::new(valid_pw)
             };
             let updated =
                 update_admin_password(&creds_path, &config.admin_username, plain_secret.expose())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Ok(auth_store) = crate::auth::store::AuthStore::open(&config.db_path()) {
+                let _ = auth_store.revoke_all_sessions();
+            }
+            if AllowedBinary::Systemctl.is_available() {
+                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+            }
             println!(
-                "Updated Argon2id password hash for '{}' in {} (mode 0600).",
+                "Updated Argon2id password hash for '{}' in {} (mode 0600) and reloaded panel service.",
                 updated.username,
                 creds_path.display()
             );
@@ -540,8 +585,12 @@ pub async fn run_fp_command(
             let updated =
                 update_admin_username(&creds_path, &config.admin_username, &new_user)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let _ = upsert_env_var(env_file, "FERROUS_ADMIN_USER", &updated.username);
+            if AllowedBinary::Systemctl.is_available() {
+                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+            }
             println!(
-                "Updated Admin username to '{}' in {}.",
+                "Updated Admin username to '{}' in {} and reloaded panel service.",
                 updated.username,
                 creds_path.display()
             );
@@ -595,6 +644,82 @@ pub async fn run_fp_command(
             }
             println!(
                 "Reset FERROUS_SECURITY_ENTRANCE=/ in {}.",
+                env_file.display()
+            );
+        }
+        FpCommand::Domain { domain } => {
+            let raw = match domain {
+                Some(d) => d,
+                None => prompt_line(
+                    "Enter panel custom domain (e.g. panel.example.com, or 'clear' to remove): ",
+                )?,
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("clear")
+                || trimmed.eq_ignore_ascii_case("none")
+            {
+                upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+                if AllowedBinary::Systemctl.is_available() {
+                    let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                }
+                println!("Cleared FERROUS_CUSTOM_DOMAIN in {}.", env_file.display());
+            } else {
+                let valid_domain = Domain::parse(trimmed).map_err(|e| anyhow::anyhow!("{e}"))?;
+                upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", valid_domain.as_str())?;
+                if AllowedBinary::Systemctl.is_available() {
+                    let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                }
+                println!(
+                    "Updated FERROUS_CUSTOM_DOMAIN={} in {} and restarted panel service.",
+                    valid_domain.as_str(),
+                    env_file.display()
+                );
+                println!(
+                    "  Panel URL: http://{}:{}{}",
+                    valid_domain.as_str(),
+                    config.port,
+                    config.security_entrance
+                );
+            }
+        }
+        FpCommand::ClearDomain => {
+            upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+            if AllowedBinary::Systemctl.is_available() {
+                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+            }
+            println!(
+                "Cleared FERROUS_CUSTOM_DOMAIN in {} and restarted panel service.",
+                env_file.display()
+            );
+        }
+        FpCommand::Bind { ip } => {
+            let raw = match ip {
+                Some(v) => v,
+                None => prompt_line(
+                    "Enter listen bind IP (0.0.0.0 for public VPS IP, 127.0.0.1 for local-only): ",
+                )?,
+            };
+            let trimmed = raw.trim();
+            let parsed_ip: std::net::IpAddr = trimmed
+                .parse()
+                .with_context(|| format!("invalid IP address '{trimmed}'"))?;
+            let ip_str = parsed_ip.to_string();
+            upsert_env_var(env_file, "FERROUS_BIND", &ip_str)?;
+            if !parsed_ip.is_loopback() && AllowedBinary::Ufw.is_available() {
+                let rule = format!("{}/tcp", config.port);
+                let _ = cmd::run(
+                    AllowedBinary::Ufw,
+                    &["allow", &rule, "comment", "FerrousPanel"],
+                    CLI_CMD_TIMEOUT,
+                )
+                .await;
+            }
+            if AllowedBinary::Systemctl.is_available() {
+                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+            }
+            println!(
+                "Updated FERROUS_BIND={ip_str} in {} and restarted panel service.",
                 env_file.display()
             );
         }
@@ -731,14 +856,15 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
     println!("======================================================================");
     println!("  FERROUS-PANEL CLI (`fp`) — Pure Rust VPS Management Toolbox");
     println!("======================================================================");
-    println!("  (1)  Restart panel service       (9)  Clear security entrance ('/')");
+    println!("  (1)  Restart panel service       (10) Change panel custom domain");
     println!("  (2)  Stop panel service          (11) Validate & reload web engine");
-    println!("  (3)  Start panel service         (14) Show panel status & endpoints");
-    println!("  (4)  Reload web engine + panel   (15) Check system service health");
-    println!("  (5)  Change Admin password       (16) Show panel systemd logs");
-    println!("  (6)  Change Admin username       (19) Show web engine status");
-    println!("  (7)  Change panel listening port (0)  Exit");
-    println!("  (8)  Change security entrance");
+    println!("  (3)  Start panel service         (12) Clear panel custom domain");
+    println!("  (4)  Reload web engine + panel   (13) Change bind IP (0.0.0.0/local)");
+    println!("  (5)  Change Admin password       (14) Show panel status & endpoints");
+    println!("  (6)  Change Admin username       (15) Check system service health");
+    println!("  (7)  Change panel listening port (16) Show panel systemd logs");
+    println!("  (8)  Change security entrance    (19) Show web engine status");
+    println!("  (9)  Clear security entrance '/' (0)  Exit");
     println!("======================================================================");
 
     let choice = prompt_line("Select action [0-19]: ")?;
@@ -753,7 +879,10 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
         "7" => FpCommand::Port { port: None },
         "8" => FpCommand::Entrance { path: None },
         "9" => FpCommand::ClearEntrance,
+        "10" => FpCommand::Domain { domain: None },
         "11" => FpCommand::Repair,
+        "12" => FpCommand::ClearDomain,
+        "13" => FpCommand::Bind { ip: None },
         "14" => FpCommand::Status,
         "15" => FpCommand::Check,
         "16" => FpCommand::Logs { lines: 40 },
@@ -827,6 +956,32 @@ mod tests {
                 }))
             ),
             "ferrous-panel fp check must parse cleanly",
+        )?;
+
+        let domain_cmd = FpCli::try_parse_from(["fp", "domain", "panel.example.com"])?;
+        ensure(
+            matches!(
+                domain_cmd.command,
+                Some(FpCommand::Domain {
+                    domain: Some(ref d)
+                }) if d == "panel.example.com"
+            ),
+            "fp domain panel.example.com must parse cleanly",
+        )?;
+
+        let clear_dom = FpCli::try_parse_from(["fp", "12"])?;
+        ensure(
+            matches!(clear_dom.command, Some(FpCommand::ClearDomain)),
+            "fp 12 must map to ClearDomain",
+        )?;
+
+        let bind_cmd = FpCli::try_parse_from(["fp", "bind", "0.0.0.0"])?;
+        ensure(
+            matches!(
+                bind_cmd.command,
+                Some(FpCommand::Bind { ip: Some(ref ip) }) if ip == "0.0.0.0"
+            ),
+            "fp bind 0.0.0.0 must parse cleanly",
         )?;
 
         Ok(())
