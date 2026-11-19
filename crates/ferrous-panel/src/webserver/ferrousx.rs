@@ -281,6 +281,34 @@ server_tokens = false\n"
             Ok(())
         })
     }
+
+    pub fn enable(&self) -> BoxFuture<'_, Result<(), PanelError>> {
+        Box::pin(async move {
+            if !self.is_installed() {
+                return Ok(());
+            }
+            let unit = self.paths.service_name.as_str();
+            let _ = self
+                .executor
+                .run(AllowedBinary::Systemctl, &["enable", unit], CMD_TIMEOUT)
+                .await;
+            Ok(())
+        })
+    }
+
+    pub fn disable(&self) -> BoxFuture<'_, Result<(), PanelError>> {
+        Box::pin(async move {
+            if !self.is_installed() {
+                return Ok(());
+            }
+            let unit = self.paths.service_name.as_str();
+            let _ = self
+                .executor
+                .run(AllowedBinary::Systemctl, &["disable", unit], CMD_TIMEOUT)
+                .await;
+            Ok(())
+        })
+    }
 }
 
 impl WebServerEngine for FerrousxEngine {

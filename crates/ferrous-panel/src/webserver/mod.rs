@@ -1144,6 +1144,16 @@ impl WebServerManager {
         }
     }
 
+    /// Gracefully reloads the active engine if running, or starts it if stopped.
+    pub async fn reload_or_start_configured_engine(&self) -> Result<(), PanelError> {
+        let cfg = self.store.load_config()?;
+        if self.engine_is_active(cfg.frontend_engine).await.unwrap_or(false) {
+            self.reload_engine(cfg.frontend_engine).await
+        } else {
+            self.start_engine(cfg.frontend_engine).await
+        }
+    }
+
     pub async fn validate_configured_engine(&self) -> Result<ValidationReport, PanelError> {
         let cfg = self.store.load_config()?;
         self.validate_engine(cfg.frontend_engine).await
@@ -1417,7 +1427,11 @@ impl WebServerManager {
             )));
         }
 
-        // Step 5: Persist active `frontend_engine`.
+        // Step 5: Persist active `frontend_engine` and systemd boot state (prevents port 80/443 race on reboot).
+        if old_engine != target_engine {
+            let _ = self.disable_engine(old_engine).await;
+        }
+        let _ = self.enable_engine(target_engine).await;
         self.store.save_frontend_engine(target_engine)?;
         let _ = auth_store.append_audit_log(
             Some(actor),
@@ -1549,6 +1563,20 @@ impl WebServerManager {
         match engine {
             EngineKind::Nginx => self.nginx.stop().await,
             EngineKind::Ferrousx => self.ferrousx.stop().await,
+        }
+    }
+
+    async fn enable_engine(&self, engine: EngineKind) -> Result<(), PanelError> {
+        match engine {
+            EngineKind::Nginx => self.nginx.enable().await,
+            EngineKind::Ferrousx => self.ferrousx.enable().await,
+        }
+    }
+
+    async fn disable_engine(&self, engine: EngineKind) -> Result<(), PanelError> {
+        match engine {
+            EngineKind::Nginx => self.nginx.disable().await,
+            EngineKind::Ferrousx => self.ferrousx.disable().await,
         }
     }
 

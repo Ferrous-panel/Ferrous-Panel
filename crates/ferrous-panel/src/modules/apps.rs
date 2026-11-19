@@ -402,20 +402,77 @@ pub async fn deploy_app(
         WebServerEngineType::Nginx => EngineKind::Nginx,
     });
 
-    // Build and apply web server site configuration FIRST (validates nginx -t / ferrousx-bin --check-config)
-    let spec = build_site_spec_for_app(
+    // Build and apply web server site configuration FIRST (validates nginx -t / ferrousx-bin --check-config).
+    // Never write ssl_certificate directives before the real PEM files exist on disk (prevents `nginx -t` failure).
+    let cert_ready = webserver
+        .ssl
+        .site_cert_paths(&domain)
+        .map(|(cert, key)| cert.is_file() && key.is_file())
+        .unwrap_or(false);
+    let mut effective_ssl = req.ssl_enabled && cert_ready;
+    let mut spec = build_site_spec_for_app(
         domain.clone(),
         parsed_aliases.clone(),
         safe_working.as_path(),
         &config.wwwroot,
         req.framework,
         req.internal_port,
-        req.ssl_enabled,
+        effective_ssl,
         false,
     )?;
-    let rendered = webserver
+    spec.http3_quic = req.http3_quic;
+    spec.websocket_enabled = req.websocket_enabled;
+    spec.rate_limit_rps = req.rate_limit_rps;
+    let mut rendered = webserver
         .upsert_and_apply_site(&spec, preferred_engine)
         .await?;
+
+    let mut initial_logs = Vec::new();
+    if req.ssl_enabled && !effective_ssl {
+        if webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Certbot)
+        {
+            match webserver
+                .ssl
+                .issue_certificate(&domain, &parsed_aliases, None)
+                .await
+            {
+                Ok(status) if status.present => {
+                    spec.ssl_enabled = true;
+                    if let Ok(ssl_rendered) = webserver
+                        .upsert_and_apply_site(&spec, preferred_engine)
+                        .await
+                    {
+                        rendered = ssl_rendered;
+                        effective_ssl = true;
+                        initial_logs.push(format!(
+                            "[{}] Issued Let's Encrypt certificate and enabled HTTPS for {}",
+                            Utc::now().to_rfc3339(),
+                            domain.as_str()
+                        ));
+                    }
+                }
+                Ok(_) => {
+                    initial_logs.push(format!(
+                        "[{}] Deployed HTTP vhost cleanly (SSL pending: point DNS to this VPS then run SSL issue/renew)",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+                Err(err) => {
+                    initial_logs.push(format!(
+                        "[{}] Deployed HTTP vhost cleanly (initial SSL issuance skipped: {err}; point DNS to this VPS then retry SSL)",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+            }
+        } else {
+            initial_logs.push(format!(
+                "[{}] Deployed HTTP vhost cleanly (certbot not installed on host)",
+                Utc::now().to_rfc3339()
+            ));
+        }
+    }
 
     let mut systemd_unit = String::new();
     if !is_static_runtime(req.framework) && !is_php_runtime(req.framework) {
@@ -547,7 +604,7 @@ pub async fn deploy_app(
         cpu_percent: 0.0,
         pid: None,
         status: AppStatus::Stopped,
-        ssl_enabled: req.ssl_enabled,
+        ssl_enabled: effective_ssl,
         ssl_issuer: "None".to_string(),
         ssl_expiry_days: 0,
         force_https: false,
@@ -583,7 +640,7 @@ pub async fn deploy_app(
         hotlink_protection: None,
         directory_auth: None,
         env_vars: Vec::new(),
-        logs: Vec::new(),
+        logs: initial_logs,
         systemd_unit,
         nginx_vhost: rendered.config_path.display().to_string(),
     };
@@ -818,6 +875,30 @@ pub async fn update_site_settings(
     let next_h3 = http3_quic.unwrap_or(app.http3_quic);
     let next_ws = websocket_enabled.unwrap_or(app.websocket_enabled);
     let next_rps = rate_limit_rps.unwrap_or(app.rate_limit_rps);
+
+    if next_ssl {
+        let mut cert_ready = webserver
+            .ssl
+            .site_cert_paths(&domain)
+            .map(|(cert, key)| cert.is_file() && key.is_file())
+            .unwrap_or(false);
+        if !cert_ready
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Certbot)
+        {
+            if let Ok(issued) = webserver.ssl.issue_certificate(&domain, &aliases, None).await {
+                cert_ready = issued.present;
+            }
+        }
+        if !cert_ready {
+            return Err(PanelError::Validation(format!(
+                "SSL certificate not found for {} — ensure DNS A/AAAA points to this VPS and issue SSL first",
+                domain.as_str()
+            )));
+        }
+    }
+
     let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
     let mut spec = build_site_spec_for_app(
         domain,
@@ -863,13 +944,53 @@ pub async fn renew_ssl(
     config: &Config,
     webserver: &WebServerManager,
 ) -> Result<ManagedApp, PanelError> {
-    let app = store
+    let mut app = store
         .get_app(id)?
         .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
     let domain = Domain::parse(&app.domain)?;
-    webserver.ssl.renew_all().await?;
-    let _ = webserver.ssl.read_cert_status(&domain).await?;
-    webserver.reload_configured_engine().await?;
+    let mut aliases = Vec::with_capacity(app.aliases.len());
+    for a in &app.aliases {
+        let trimmed = a.trim();
+        if !trimmed.is_empty() {
+            aliases.push(Domain::parse(trimmed)?);
+        }
+    }
+
+    let current_cert = webserver.ssl.read_cert_status(&domain).await?;
+    if !current_cert.present {
+        webserver
+            .ssl
+            .issue_certificate(&domain, &aliases, None)
+            .await?;
+    } else {
+        webserver.ssl.renew_all().await?;
+    }
+
+    let updated_cert = webserver.ssl.read_cert_status(&domain).await?;
+    if updated_cert.present && !app.ssl_enabled {
+        let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+        let mut spec = build_site_spec_for_app(
+            domain,
+            aliases,
+            working.as_path(),
+            &config.wwwroot,
+            app.framework,
+            app.internal_port,
+            true,
+            app.force_https,
+        )?;
+        spec.http3_quic = app.http3_quic;
+        spec.websocket_enabled = app.websocket_enabled;
+        spec.rate_limit_rps = app.rate_limit_rps;
+        let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
+        app.ssl_enabled = true;
+        app.url_rewrite_rules = rendered.content;
+        app.nginx_vhost = rendered.config_path.display().to_string();
+        store.upsert_app(&app)?;
+    } else {
+        webserver.reload_configured_engine().await?;
+    }
+
     Ok(enrich_app(app, config, webserver).await)
 }
 

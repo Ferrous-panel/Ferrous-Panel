@@ -9,6 +9,9 @@
 # Force sync/install latest FerrousX from GitHub (Ferrous-panel/FerrousX):
 #   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx
 #
+# Update FerrousPanel & validate/sync Nginx engine:
+#   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --engine nginx
+#
 # Update ONLY FerrousX from GitHub (skip rebuilding ferrous-panel):
 #   curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx-only
 # ==============================================================================
@@ -43,17 +46,21 @@ FERROUSX_ADMIN_TOKEN_FILE="/etc/ferrousx/admin.token"
 
 UPDATE_PANEL=true
 FORCE_FERROUSX=false
+FORCE_NGINX=false
 
 usage() {
   cat <<'EOF_HELP'
-FerrousPanel & FerrousX 1-Command Updater
+FerrousPanel, Nginx & FerrousX 1-Command Updater
 
 Usage:
   sudo bash update.sh [OPTIONS] [RELEASE_TAG]
 
 Options:
+  --nginx                      Ensure Nginx is installed, synced, validated (nginx -t) & reloaded
+  --nginx-only                 Validate & sync ONLY Nginx (do not rebuild ferrous-panel)
   --ferrousx                   Sync & rebuild latest FerrousX from github.com/Ferrous-panel/FerrousX
   --ferrousx-only              Update ONLY FerrousX from GitHub (do not rebuild ferrous-panel)
+  --engine <nginx|ferrousx>    Target web engine to update & validate
   --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
   --version <TAG|latest>       GitHub Release tag for prebuilt fallback (default: latest)
@@ -63,6 +70,15 @@ EOF_HELP
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --nginx|--with-nginx)
+      FORCE_NGINX=true
+      shift
+      ;;
+    --nginx-only)
+      FORCE_NGINX=true
+      UPDATE_PANEL=false
+      shift
+      ;;
     --ferrousx|--with-ferrousx)
       FORCE_FERROUSX=true
       shift
@@ -73,9 +89,14 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --engine)
-      if [ "${2:-}" = "ferrousx" ]; then
-        FORCE_FERROUSX=true
-      fi
+      case "${2:-}" in
+        ferrousx) FORCE_FERROUSX=true ;;
+        nginx) FORCE_NGINX=true ;;
+        *)
+          echo -e "${RED}[ERROR] --engine must be 'nginx' or 'ferrousx' (got '${2:-}').${NC}" >&2
+          exit 1
+          ;;
+      esac
       shift 2
       ;;
     --ferrousx-branch)
@@ -426,8 +447,95 @@ if [ "$UPDATE_PANEL" = true ]; then
   systemctl restart ferrous-panel.service 2>/dev/null || true
 fi
 
+update_nginx_engine() {
+  echo -e "${BLUE}${BOLD}[*] Syncing & verifying Nginx web server on VPS...${NC}"
+  if ! command -v nginx >/dev/null 2>&1; then
+    if [ "$FORCE_NGINX" = true ] && command -v apt-get >/dev/null 2>&1; then
+      echo -e "${CYAN}[*] Installing nginx package via apt-get...${NC}"
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y -q
+      apt-get install -y -q nginx
+    else
+      return 0
+    fi
+  fi
+
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/nginx/snippets /www/acme/.well-known/acme-challenge
+  chown -R www-data:www-data /www/acme 2>/dev/null || true
+
+  if [ ! -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+    cat > /etc/nginx/snippets/fastcgi-php.conf <<'EOF_NGX_PHP'
+# Managed by FerrousPanel — fallback FastCGI PHP snippet
+fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+try_files $fastcgi_script_name =404;
+set $path_info $fastcgi_path_info;
+fastcgi_param PATH_INFO $path_info;
+fastcgi_index index.php;
+include fastcgi.conf;
+EOF_NGX_PHP
+  fi
+
+  if [ ! -f /etc/nginx/conf.d/ferrous-defaults.conf ]; then
+    {
+      echo "# Managed by FerrousPanel — safe global Nginx defaults"
+      if ! grep -Eq '^[[:space:]]*client_max_body_size[[:space:]]' /etc/nginx/nginx.conf 2>/dev/null; then
+        echo "client_max_body_size 128m;"
+      fi
+      if ! grep -Eq '^[[:space:]]*server_names_hash_bucket_size[[:space:]]' /etc/nginx/nginx.conf 2>/dev/null; then
+        echo "server_names_hash_bucket_size 128;"
+      fi
+    } > /etc/nginx/conf.d/ferrous-defaults.conf
+    if ! nginx -t >/dev/null 2>&1; then
+      rm -f /etc/nginx/conf.d/ferrous-defaults.conf
+    fi
+  fi
+
+  if [ -L /etc/nginx/sites-enabled/default ] && [ "$(readlink -f /etc/nginx/sites-enabled/default 2>/dev/null || true)" = "/etc/nginx/sites-available/default" ]; then
+    cat > /etc/nginx/sites-available/ferrous-default.conf <<'EOF_NGX_DEF'
+# Managed by FerrousPanel — Default catch-all vhost with ACME HTTP-01 webroot
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /www/wwwroot;
+    server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /www/acme;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF_NGX_DEF
+    ln -sf /etc/nginx/sites-available/ferrous-default.conf /etc/nginx/sites-enabled/default
+  fi
+
+  if nginx -t; then
+    if systemctl is-active --quiet nginx.service 2>/dev/null; then
+      systemctl reload nginx.service
+      echo -e "${GREEN}[+] Validated & gracefully reloaded nginx.service.${NC}"
+    elif [ "$FORCE_NGINX" = true ] && ! systemctl is-active --quiet ferrousx.service 2>/dev/null; then
+      systemctl enable --now nginx.service
+      echo -e "${GREEN}[+] Validated, enabled & started nginx.service.${NC}"
+    else
+      echo -e "${CYAN}[*] nginx config syntax OK (service inactive — switch active engine via 'sudo fp webserver nginx').${NC}"
+    fi
+  else
+    echo -e "${YELLOW}[!] nginx -t reported an issue; leaving existing running process untouched.${NC}"
+  fi
+}
+
 if [ "$FORCE_FERROUSX" = true ] || [ -x "${BIN_FERROUSX}" ]; then
   update_ferrousx_from_github
 fi
 
-echo -e "${GREEN}${BOLD}Update completed cleanly. State in /var/lib/ferrous-panel and /etc/ferrousx preserved.${NC}"
+if [ "$FORCE_NGINX" = true ] || systemctl is-active --quiet nginx.service 2>/dev/null; then
+  update_nginx_engine
+fi
+
+echo -e "${GREEN}${BOLD}Update completed cleanly. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"

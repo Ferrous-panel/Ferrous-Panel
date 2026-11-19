@@ -154,6 +154,34 @@ impl NginxEngine {
             Ok(())
         })
     }
+
+    pub fn enable(&self) -> BoxFuture<'_, Result<(), PanelError>> {
+        Box::pin(async move {
+            if !self.is_installed() {
+                return Ok(());
+            }
+            let unit = self.paths.service_name.as_str();
+            let _ = self
+                .executor
+                .run(AllowedBinary::Systemctl, &["enable", unit], CMD_TIMEOUT)
+                .await;
+            Ok(())
+        })
+    }
+
+    pub fn disable(&self) -> BoxFuture<'_, Result<(), PanelError>> {
+        Box::pin(async move {
+            if !self.is_installed() {
+                return Ok(());
+            }
+            let unit = self.paths.service_name.as_str();
+            let _ = self
+                .executor
+                .run(AllowedBinary::Systemctl, &["disable", unit], CMD_TIMEOUT)
+                .await;
+            Ok(())
+        })
+    }
 }
 
 impl WebServerEngine for NginxEngine {
@@ -189,7 +217,11 @@ impl WebServerEngine for NginxEngine {
             live_root.to_string()
         };
 
-        let route_block = render_nginx_route_block(&spec.mode, &doc_root.to_string());
+        let route_block = render_nginx_route_block(
+            &spec.mode,
+            &doc_root.to_string(),
+            spec.websocket_enabled,
+        );
         let acme_block = format!(
             "    location ^~ /.well-known/acme-challenge/ {{\n        root {acme_str};\n        default_type \"text/plain\";\n        try_files $uri =404;\n    }}"
         );
@@ -404,7 +436,7 @@ server {{\n\
     }
 }
 
-fn render_nginx_route_block(mode: &SiteMode, doc_root: &str) -> String {
+fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: bool) -> String {
     match mode {
         SiteMode::StaticSpa {
             index_file,
@@ -425,6 +457,13 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str) -> String {
         }
         SiteMode::ReverseProxy { upstream } => {
             let url = upstream.http_url();
+            let ws_block = if websocket_enabled {
+                "\n        proxy_set_header Upgrade $http_upgrade;\n\
+        proxy_set_header Connection \"upgrade\";\n\
+        proxy_read_timeout 3600s;"
+            } else {
+                ""
+            };
             format!(
                 "    location / {{\n\
         proxy_pass {url};\n\
@@ -432,7 +471,7 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str) -> String {
         proxy_set_header Host $host;\n\
         proxy_set_header X-Real-IP $remote_addr;\n\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
-        proxy_set_header X-Forwarded-Proto $scheme;\n\
+        proxy_set_header X-Forwarded-Proto $scheme;{ws_block}\n\
     }}"
             )
         }

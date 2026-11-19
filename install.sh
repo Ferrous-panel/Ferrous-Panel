@@ -558,6 +558,11 @@ ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 # ==============================================================================
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
   echo -e "${BLUE}[5/7] Configuring FerrousX web server (ferrousx.env + admin.token + ferrousx.service)...${NC}"
+  # Prevent port 80/443 collision if Ubuntu/VPS image had nginx running
+  if systemctl is-active --quiet nginx.service 2>/dev/null || systemctl is-enabled --quiet nginx.service 2>/dev/null; then
+    echo -e "${CYAN}[*] Stopping & disabling nginx.service so FerrousX exclusively binds ports 80/443...${NC}"
+    systemctl disable --now nginx.service 2>/dev/null || true
+  fi
   mkdir -p /etc/ferrousx/sites /etc/ferrousx/ssl /run/ferrousx /var/log/ferrousx /var/cache/ferrousx
   chmod 0750 /etc/ferrousx /etc/ferrousx/sites /etc/ferrousx/ssl /run/ferrousx
 
@@ -626,8 +631,74 @@ EOF_FX_SVC
   systemctl daemon-reload
   systemctl enable --now ferrousx.service
 else
-  echo -e "${BLUE}[5/7] Configuring Nginx (nginx.service) with /www/acme ACME challenge root...${NC}"
-  systemctl enable --now nginx.service
+  echo -e "${BLUE}[5/7] Configuring Nginx (nginx.service) with /www/acme ACME challenge root & snippets...${NC}"
+  # Prevent port 80/443 collision if ferrousx.service was previously running
+  if systemctl is-active --quiet ferrousx.service 2>/dev/null || systemctl is-enabled --quiet ferrousx.service 2>/dev/null; then
+    echo -e "${CYAN}[*] Stopping & disabling ferrousx.service so Nginx exclusively binds ports 80/443...${NC}"
+    systemctl disable --now ferrousx.service 2>/dev/null || true
+  fi
+
+  mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/conf.d /etc/nginx/snippets /www/acme/.well-known/acme-challenge
+  chown -R www-data:www-data /www/acme 2>/dev/null || true
+
+  # Ensure standard fastcgi-php.conf snippet exists for PHP-FPM sites on all Debian/Ubuntu variants
+  if [ ! -f /etc/nginx/snippets/fastcgi-php.conf ]; then
+    cat > /etc/nginx/snippets/fastcgi-php.conf <<'EOF_NGX_PHP'
+# Managed by FerrousPanel — fallback FastCGI PHP snippet
+fastcgi_split_path_info ^(.+?\.php)(/.*)$;
+try_files $fastcgi_script_name =404;
+set $path_info $fastcgi_path_info;
+fastcgi_param PATH_INFO $path_info;
+fastcgi_index index.php;
+include fastcgi.conf;
+EOF_NGX_PHP
+  fi
+
+  # Safe global upload/domain bucket defaults (only directives not duplicated in stock nginx.conf)
+  if [ ! -f /etc/nginx/conf.d/ferrous-defaults.conf ]; then
+    {
+      echo "# Managed by FerrousPanel — safe global Nginx defaults"
+      if ! grep -Eq '^[[:space:]]*client_max_body_size[[:space:]]' /etc/nginx/nginx.conf 2>/dev/null; then
+        echo "client_max_body_size 128m;"
+      fi
+      if ! grep -Eq '^[[:space:]]*server_names_hash_bucket_size[[:space:]]' /etc/nginx/nginx.conf 2>/dev/null; then
+        echo "server_names_hash_bucket_size 128;"
+      fi
+    } > /etc/nginx/conf.d/ferrous-defaults.conf
+    if ! nginx -t >/dev/null 2>&1; then
+      rm -f /etc/nginx/conf.d/ferrous-defaults.conf
+    fi
+  fi
+
+  # Upgrade stock untouched Ubuntu default vhost so port 80 serves /www/acme/.well-known/acme-challenge/
+  if [ -L /etc/nginx/sites-enabled/default ] && [ "$(readlink -f /etc/nginx/sites-enabled/default 2>/dev/null || true)" = "/etc/nginx/sites-available/default" ]; then
+    cat > /etc/nginx/sites-available/ferrous-default.conf <<'EOF_NGX_DEF'
+# Managed by FerrousPanel — Default catch-all vhost with ACME HTTP-01 webroot
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+
+    root /www/wwwroot;
+    server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /www/acme;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+EOF_NGX_DEF
+    ln -sf /etc/nginx/sites-available/ferrous-default.conf /etc/nginx/sites-enabled/default
+  fi
+
+  nginx -t
+  systemctl enable nginx.service
+  systemctl restart nginx.service
 fi
 
 # ==============================================================================
@@ -747,6 +818,9 @@ echo -e "  Web Engine        : ${WEB_ENGINE}"
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
   echo -e "  FerrousX Binary   : ${BIN_FERROUSX} (CLI: ${BIN_FERROUSX_CTL} / fx)"
   echo -e "  FerrousX Env/Tok  : ${FERROUSX_ENV_FILE} (0640) | ${FERROUSX_ADMIN_TOKEN_FILE} (0600)"
+else
+  NGINX_VER="$(nginx -v 2>&1 | sed 's|.*nginx/||' || echo 'installed')"
+  echo -e "  Nginx Version     : ${NGINX_VER} (/etc/nginx/sites-enabled)"
 fi
 if [ "${PANEL_BIND}" = "127.0.0.1" ] || [ "${PANEL_BIND}" = "::1" ]; then
   echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE} (local-only)"
