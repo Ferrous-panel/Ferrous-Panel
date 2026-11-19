@@ -283,13 +283,36 @@ fn collect_disk_bytes(disks: &Disks) -> (u64, u64) {
 }
 
 fn detect_nginx_presence() -> String {
-    if std::path::Path::new("/usr/sbin/nginx").is_file()
-        || std::path::Path::new("/usr/bin/nginx").is_file()
-    {
-        "installed".to_string()
+    let bin = if std::path::Path::new("/usr/sbin/nginx").is_file() {
+        Some("/usr/sbin/nginx")
+    } else if std::path::Path::new("/usr/bin/nginx").is_file() {
+        Some("/usr/bin/nginx")
     } else {
-        "not installed".to_string()
+        None
+    };
+
+    let Some(nginx_bin) = bin else {
+        return "not installed".to_string();
+    };
+
+    if let Ok(out) = std::process::Command::new(nginx_bin).arg("-v").output() {
+        // `nginx -v` prints version info to stderr (e.g. "nginx version: nginx/1.24.0 (Ubuntu)")
+        let raw = if !out.stderr.is_empty() {
+            String::from_utf8_lossy(&out.stderr).to_string()
+        } else {
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        if let Some(trimmed) = raw.lines().next().map(str::trim) {
+            if let Some(ver) = trimmed.strip_prefix("nginx version:") {
+                let clean = ver.trim();
+                if !clean.is_empty() {
+                    return clean.to_string();
+                }
+            }
+        }
     }
+
+    "installed".to_string()
 }
 
 fn round1(v: f64) -> f64 {

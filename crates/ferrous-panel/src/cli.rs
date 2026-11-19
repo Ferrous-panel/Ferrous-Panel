@@ -556,7 +556,7 @@ pub async fn run_fp_command(
             let manager = WebServerManager::open_system(&config.db_path(), hook_exe)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             manager
-                .reload_configured_engine()
+                .reload_or_start_configured_engine()
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             if AllowedBinary::Systemctl.is_available() {
@@ -782,7 +782,7 @@ pub async fn run_fp_command(
                 bail!("engine validation failed: {}", report.output);
             }
             manager
-                .reload_configured_engine()
+                .reload_or_start_configured_engine()
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             println!(
