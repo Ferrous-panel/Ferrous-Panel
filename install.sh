@@ -31,13 +31,16 @@ FERROUSX_REPO="${FERROUSX_REPO:-Ferrous-panel/FerrousX}"
 FERROUSX_BRANCH="${FERROUSX_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
 RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-stable}"
-PANEL_BIND="${FERROUS_BIND:-127.0.0.1}"
+PANEL_BIND="${FERROUS_BIND:-0.0.0.0}"
 PANEL_PORT="${FERROUS_PORT:-8443}"
 SECURITY_ENTRANCE="${FERROUS_SECURITY_ENTRANCE:-/panel}"
 ADMIN_USER="${FERROUS_ADMIN_USER:-admin_ferrous}"
+ADMIN_USER_EXPLICIT=false
+CUSTOM_ADMIN_PASS=""
 CUSTOM_DOMAIN="${FERROUS_CUSTOM_DOMAIN:-}"
 WEB_ENGINE="${FERROUS_ENGINE:-nginx}"
 INTERACTIVE_MODE=false
+UNATTENDED_MODE=false
 AUTO_SWAP=true
 PREBUILT_BINARY_ONLY=false
 
@@ -63,7 +66,8 @@ Usage:
 
 Options:
   --engine <nginx|ferrousx>   Frontend web server engine (default: nginx)
-  --bind <IP>                 Listen address (default: 127.0.0.1)
+  --bind <IP>                 Listen address (default: 0.0.0.0 for direct VPS IP access)
+  --local-only                Bind strictly to 127.0.0.1 (access via SSH tunnel only)
   --port <PORT>               Listen TCP port 1..65535 (default: 8443)
   --entrance <PATH>           Security entrance path (default: /panel)
   --admin-user <USER>         Initial admin username (default: admin_ferrous)
@@ -72,8 +76,8 @@ Options:
   --version <TAG|latest>      GitHub Release version tag (default: latest)
   --prebuilt-binary           Download prebuilt binary instead of compiling with Cargo
   --no-swap                   Do not auto-create 2GB /swapfile on low-RAM VPS
-  --interactive               Prompt interactively for engine selection
-  -y, --yes, --unattended     Run non-interactively (default for 1-command install)
+  --interactive               Prompt interactively for engine and admin account setup
+  -y, --yes, --unattended     Skip interactive prompts (auto-generate credentials)
   -h, --help                  Show this help message
 EOF_HELP
 }
@@ -86,8 +90,9 @@ while [[ $# -gt 0 ]]; do
       echo -e "${YELLOW}Use 'sudo fp passwd' after installation to change it interactively.${NC}" >&2
       exit 1
       ;;
-    --admin-user) ADMIN_USER="$2"; shift 2 ;;
+    --admin-user) ADMIN_USER="$2"; ADMIN_USER_EXPLICIT=true; shift 2 ;;
     --bind) PANEL_BIND="$2"; shift 2 ;;
+    --local-only) PANEL_BIND="127.0.0.1"; shift ;;
     --port) PANEL_PORT="$2"; shift 2 ;;
     --entrance) SECURITY_ENTRANCE="$2"; shift 2 ;;
     --domain|--custom-domain) CUSTOM_DOMAIN="$2"; shift 2 ;;
@@ -96,8 +101,8 @@ while [[ $# -gt 0 ]]; do
     --version) RELEASE_TAG="$2"; shift 2 ;;
     --prebuilt-binary) PREBUILT_BINARY_ONLY=true; shift ;;
     --no-swap) AUTO_SWAP=false; shift ;;
-    --interactive) INTERACTIVE_MODE=true; shift ;;
-    -y|--yes|--unattended) INTERACTIVE_MODE=false; shift ;;
+    --interactive) INTERACTIVE_MODE=true; UNATTENDED_MODE=false; shift ;;
+    -y|--yes|--unattended) INTERACTIVE_MODE=false; UNATTENDED_MODE=true; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo -e "${RED}[ERROR] Unknown option: $1${NC}" >&2
@@ -129,16 +134,81 @@ case "$ARCH_RAW" in
     ;;
 esac
 
-if [ "$INTERACTIVE_MODE" = true ] && [ -t 0 ]; then
+detect_local_ip() {
+  local ip=""
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
+  if [ -z "$ip" ]; then
+    ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  fi
+  echo "${ip:-127.0.0.1}"
+}
+
+detect_public_ip() {
+  local ip=""
+  for url in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipv4.icanhazip.com"; do
+    ip="$(curl -4 -fsS --connect-timeout 2 --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  detect_local_ip
+}
+
+VPS_LOCAL_IP="$(detect_local_ip)"
+VPS_PUBLIC_IP="$(detect_public_ip)"
+echo -e "${BLUE}[*] Detected VPS IP: ${BOLD}${VPS_PUBLIC_IP}${NC}${BLUE} (Local: ${VPS_LOCAL_IP})${NC}"
+
+HAS_TTY=false
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  HAS_TTY=true
+fi
+
+if [ "$INTERACTIVE_MODE" = true ] && [ "$HAS_TTY" = true ]; then
   echo ""
   echo -e "${BOLD}Select Frontend Web Server Engine:${NC}"
   echo "  1) nginx    (apt install nginx)"
   echo "  2) ferrousx (Pure-Rust HTTP/HTTPS/FastCGI/WebSocket binary)"
-  read -rp "Choose [1/2, default 1]: " engine_choice || true
-  case "${engine_choice:-1}" in
+  read -t 15 -rp "Choose [1/2, default ${WEB_ENGINE}]: " engine_choice </dev/tty || true
+  case "${engine_choice:-}" in
+    1|nginx) WEB_ENGINE="nginx" ;;
     2|ferrousx) WEB_ENGINE="ferrousx" ;;
-    *) WEB_ENGINE="nginx" ;;
   esac
+fi
+
+if [ "$UNATTENDED_MODE" = false ] && [ "$HAS_TTY" = true ]; then
+  if [ "$ADMIN_USER_EXPLICIT" = false ] && [ -z "${FERROUS_ADMIN_USER:-}" ]; then
+    echo ""
+    echo -e "${CYAN}${BOLD}[*] Admin Account Setup (press Enter to use defaults / auto-generate):${NC}"
+    read -t 15 -rp "  Admin username [${ADMIN_USER}] (15s timeout): " input_user </dev/tty || true
+    input_user="$(echo "${input_user:-}" | tr -d '[:space:]')"
+    if [ -n "$input_user" ]; then
+      if [[ "$input_user" =~ ^[A-Za-z0-9_-]{3,64}$ ]]; then
+        ADMIN_USER="$input_user"
+      else
+        echo -e "${YELLOW}[!] Invalid username '${input_user}' (must be 3..=64 chars [A-Za-z0-9_-]); keeping '${ADMIN_USER}'.${NC}"
+      fi
+    fi
+
+    if [ ! -f "${DATA_DIR}/admin.credentials.json" ]; then
+      read -t 15 -rsp "  Admin password (8+ chars, Enter = auto-generate 24-char OsRng password): " input_pass </dev/tty || true
+      echo "" >/dev/tty 2>/dev/null || true
+      if [ -n "${input_pass:-}" ]; then
+        if [ "${#input_pass}" -ge 8 ] && [ "${#input_pass}" -le 256 ]; then
+          read -t 15 -rsp "  Confirm Admin password: " confirm_pass </dev/tty || true
+          echo "" >/dev/tty 2>/dev/null || true
+          if [ "$input_pass" = "${confirm_pass:-}" ]; then
+            CUSTOM_ADMIN_PASS="$input_pass"
+            echo -e "${GREEN}[+] Custom Admin password accepted (will be hashed with Argon2id 0600).${NC}"
+          else
+            echo -e "${YELLOW}[!] Passwords did not match; falling back to auto-generated OsRng password.${NC}"
+          fi
+        else
+          echo -e "${YELLOW}[!] Password must be 8..=256 chars; falling back to auto-generated OsRng password.${NC}"
+        fi
+      fi
+    fi
+  fi
 fi
 
 WEB_ENGINE="$(echo "$WEB_ENGINE" | tr '[:upper:]' '[:lower:]')"
@@ -403,6 +473,10 @@ else
       if [ -x "${BUILD_WORKSPACE}/target/release/ferrousx-bin" ]; then
         install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
       fi
+      if [ -x "${BUILD_WORKSPACE}/target/release/ferrousx-ctl" ]; then
+        install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}"
+        ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
+      fi
     fi
   fi
 fi
@@ -515,6 +589,28 @@ INIT_OUTPUT="$("${BIN_PANEL}" \
   fp init --engine "${WEB_ENGINE}")"
 echo "${INIT_OUTPUT}"
 
+GENERATED_PASS="$(printf '%s\n' "${INIT_OUTPUT}" | awk '/Password[[:space:]]*:/ {print $3; exit}' || true)"
+
+# If user explicitly chose a different admin username on an already-initialized VPS, apply it cleanly
+CURRENT_STORED_USER="$(printf '%s\n' "${INIT_OUTPUT}" | awk '/Username[[:space:]]*:/ {print $3; exit}' || true)"
+if [ -n "${CURRENT_STORED_USER}" ] && [ "${CURRENT_STORED_USER}" != "${ADMIN_USER}" ]; then
+  "${BIN_PANEL}" \
+    --data-dir "${DATA_DIR}" \
+    --wwwroot "${WWWROOT}" \
+    fp username "${ADMIN_USER}"
+fi
+
+# If user entered a custom password interactively, pass it via stdin (never via CLI args)
+if [ -n "${CUSTOM_ADMIN_PASS}" ]; then
+  printf '%s\n%s\n' "${CUSTOM_ADMIN_PASS}" "${CUSTOM_ADMIN_PASS}" | "${BIN_PANEL}" \
+    --data-dir "${DATA_DIR}" \
+    --wwwroot "${WWWROOT}" \
+    --admin-username "${ADMIN_USER}" \
+    fp passwd >/dev/null
+  GENERATED_PASS="(custom password set during install)"
+  unset CUSTOM_ADMIN_PASS
+fi
+
 cat > /etc/systemd/system/ferrous-panel.service <<'EOF_SVC'
 [Unit]
 Description=FerrousPanel Pure-Rust VPS Control Plane
@@ -538,6 +634,7 @@ EOF_SVC
 
 systemctl daemon-reload
 systemctl enable --now ferrous-panel.service
+systemctl restart ferrous-panel.service
 
 # Wait up to 5s for /api/health to respond
 HEALTH_PROBE_HOST="${PANEL_BIND}"
@@ -554,7 +651,7 @@ done
 # ==============================================================================
 # [7/7] Configure UFW Firewall
 # ==============================================================================
-echo -e "${BLUE}[7/7] Configuring UFW rules (SSH + 80 + 443)...${NC}"
+echo -e "${BLUE}[7/7] Configuring UFW rules (SSH + 80 + 443 + Panel Port ${PANEL_PORT})...${NC}"
 ACTIVE_SSH_PORT="$(ss -tlnp 2>/dev/null | grep -E 'sshd|ssh' | awk '{print $4}' | awk -F':' '{print $NF}' | grep -E '^[0-9]+$' | head -n 1 || true)"
 ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
 ufw allow "${ACTIVE_SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
@@ -579,10 +676,20 @@ if [ "$WEB_ENGINE" = "ferrousx" ]; then
   echo -e "  FerrousX Binary   : ${BIN_FERROUSX} (CLI: ${BIN_FERROUSX_CTL} / fx)"
   echo -e "  FerrousX Env/Tok  : ${FERROUSX_ENV_FILE} (0640) | ${FERROUSX_ADMIN_TOKEN_FILE} (0600)"
 fi
-echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE}"
-echo -e "  Admin Username    : ${ADMIN_USER}"
+if [ "${PANEL_BIND}" = "127.0.0.1" ] || [ "${PANEL_BIND}" = "::1" ]; then
+  echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE} (local-only)"
+  echo -e "  SSH Tunnel Access : ssh -N -L ${PANEL_PORT}:${HEALTH_PROBE_HOST}:${PANEL_PORT} root@${VPS_PUBLIC_IP}"
+else
+  echo -e "  Internet Panel URL: ${BOLD}http://${VPS_PUBLIC_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}${NC}"
+  echo -e "  Internal Panel URL: http://${VPS_LOCAL_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}"
+fi
+echo -e "  Admin Username    : ${BOLD}${ADMIN_USER}${NC}"
+if [ -n "${GENERATED_PASS}" ] && [[ "${GENERATED_PASS}" != "(already"* ]]; then
+  echo -e "  Admin Password    : ${BOLD}${GENERATED_PASS}${NC} (SHOWN ONCE ONLY)"
+else
+  echo -e "  Admin Password    : (already set; run 'sudo fp passwd' to change)"
+fi
 echo -e "  Credentials Hash  : ${DATA_DIR}/admin.credentials.json (mode 0600, Argon2id)"
 echo -e "  Panel Env Config  : ${ENV_FILE}"
-echo -e "  CLI Toolbox       : sudo fp        (or: sudo fp passwd / sudo fp status)"
-echo -e "  SSH Tunnel Access : ssh -N -L ${PANEL_PORT}:${HEALTH_PROBE_HOST}:${PANEL_PORT} root@<VPS_IP>"
+echo -e "  CLI Toolbox       : sudo fp        (or: sudo fp passwd / sudo fp username / sudo fp status)"
 echo -e "${GREEN}==============================================================================${NC}"
