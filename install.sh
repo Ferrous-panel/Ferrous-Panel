@@ -27,6 +27,8 @@ NC='\033[0m'
 
 REPO_SLUG="${FERROUS_REPO:-Ferrous-panel/Ferrous-Panel}"
 GIT_BRANCH="${FERROUS_BRANCH:-main}"
+FERROUSX_REPO="${FERROUSX_REPO:-Ferrous-panel/FerrousX}"
+FERROUSX_BRANCH="${FERROUSX_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
 RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-1.85.0}"
 PANEL_BIND="${FERROUS_BIND:-127.0.0.1}"
@@ -41,11 +43,15 @@ PREBUILT_BINARY_ONLY=false
 
 DATA_DIR="/var/lib/ferrous-panel"
 ENV_FILE="/etc/ferrous-panel/panel.env"
+FERROUSX_ENV_FILE="/etc/ferrousx/ferrousx.env"
+FERROUSX_ADMIN_TOKEN_FILE="/etc/ferrousx/admin.token"
 WWWROOT="/www/wwwroot"
 BACKUPS_DIR="/var/backups/ferrous-panel"
 SRC_DIR="/usr/local/src/ferrous-panel"
+FERROUSX_SRC_DIR="/usr/local/src/ferrousx"
 BIN_PANEL="/usr/local/bin/ferrous-panel"
 BIN_FERROUSX="/usr/local/bin/ferrousx-bin"
+BIN_FERROUSX_CTL="/usr/local/bin/ferrousx-ctl"
 
 usage() {
   cat <<'EOF_HELP'
@@ -235,6 +241,7 @@ configure_shell_env() {
 export RUSTUP_HOME="/root/.rustup"
 export CARGO_HOME="/root/.cargo"
 export FERROUS_ENV_FILE="/etc/ferrous-panel/panel.env"
+export FERROUSX_ENV_FILE="/etc/ferrousx/ferrousx.env"
 
 case ":${PATH}:" in
   *":/usr/local/bin:"*) ;;
@@ -252,6 +259,13 @@ if [ -r "/etc/ferrous-panel/panel.env" ]; then
   set -a
   # shellcheck disable=SC1091
   . /etc/ferrous-panel/panel.env
+  set +a
+fi
+
+if [ -r "/etc/ferrousx/ferrousx.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . /etc/ferrousx/ferrousx.env
   set +a
 fi
 EOF_PROFILE
@@ -334,20 +348,51 @@ else
     fi
   fi
 
-  CARGO_PKGS=(-p ferrous-panel)
-  if [ "$WEB_ENGINE" = "ferrousx" ]; then
-    CARGO_PKGS+=(-p ferrousx)
-  fi
-
-  echo -e "${CYAN}[*] Running: cargo build --release ${CARGO_PKGS[*]} ...${NC}"
+  echo -e "${CYAN}[*] Running: cargo build --release -p ferrous-panel ...${NC}"
   (
     cd "${BUILD_WORKSPACE}"
-    cargo build --release "${CARGO_PKGS[@]}"
+    cargo build --release -p ferrous-panel
   )
 
   install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrous-panel" "${BIN_PANEL}"
-  if [ "$WEB_ENGINE" = "ferrousx" ] && [ -x "${BUILD_WORKSPACE}/target/release/ferrousx-bin" ]; then
-    install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+
+  if [ "$WEB_ENGINE" = "ferrousx" ]; then
+    echo -e "${CYAN}[*] Syncing latest FerrousX from GitHub (${FERROUSX_REPO}@${FERROUSX_BRANCH}) into ${FERROUSX_SRC_DIR}...${NC}"
+    FX_BUILT=false
+    mkdir -p "$(dirname "${FERROUSX_SRC_DIR}")"
+    if (
+      if [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
+        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 origin "${FERROUSX_BRANCH}" &&
+        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}"
+      else
+        rm -rf "${FERROUSX_SRC_DIR}" &&
+        git clone --depth 1 --branch "${FERROUSX_BRANCH}" "https://github.com/${FERROUSX_REPO}.git" "${FERROUSX_SRC_DIR}"
+      fi
+    ); then
+      FX_COMMIT="$(git -C "${FERROUSX_SRC_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'main')"
+      echo -e "${CYAN}[*] Building upstream FerrousX (${FX_COMMIT}) binaries (ferrousx-bin + ferrousx-ctl)...${NC}"
+      if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
+        if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
+          install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+          FX_BUILT=true
+        fi
+        if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" ]; then
+          install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}"
+          ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
+        fi
+      fi
+    fi
+
+    if [ "$FX_BUILT" = false ]; then
+      echo -e "${YELLOW}[!] Falling back to embedded workspace FerrousX crate (-p ferrousx)...${NC}"
+      (
+        cd "${BUILD_WORKSPACE}"
+        cargo build --release -p ferrousx
+      )
+      if [ -x "${BUILD_WORKSPACE}/target/release/ferrousx-bin" ]; then
+        install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+      fi
+    fi
   fi
 fi
 
@@ -358,8 +403,33 @@ ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 # [5/7] Configure Active Web Server Engine (Nginx or FerrousX)
 # ==============================================================================
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
-  echo -e "${BLUE}[5/7] Configuring FerrousX web server (ferrousx.service)...${NC}"
-  mkdir -p /etc/ferrousx/sites
+  echo -e "${BLUE}[5/7] Configuring FerrousX web server (ferrousx.env + admin.token + ferrousx.service)...${NC}"
+  mkdir -p /etc/ferrousx/sites /etc/ferrousx/ssl /run/ferrousx /var/log/ferrousx /var/cache/ferrousx
+  chmod 0750 /etc/ferrousx /etc/ferrousx/sites /etc/ferrousx/ssl /run/ferrousx
+
+  if [ ! -f "${FERROUSX_ADMIN_TOKEN_FILE}" ]; then
+    (umask 077 && openssl rand -hex 32 > "${FERROUSX_ADMIN_TOKEN_FILE}")
+    chmod 0600 "${FERROUSX_ADMIN_TOKEN_FILE}"
+  fi
+
+  if [ ! -f "${FERROUSX_ENV_FILE}" ]; then
+    cat > "${FERROUSX_ENV_FILE}" <<'EOF_FX_ENV'
+# Managed by FerrousPanel — FerrousX dynamic runtime environment
+FERROUSX_CONFIG=/etc/ferrousx/ferrousx.toml
+FERROUSX_SITES_DIR=/etc/ferrousx/sites
+FERROUSX_ENV_FILE=/etc/ferrousx/ferrousx.env
+FERROUSX_PANEL_UDS=/run/ferrousx/panel-admin.sock
+FERROUSX_ADMIN_TOKEN_FILE=/etc/ferrousx/admin.token
+FERROUSX_WORKERS=4
+FERROUSX_LOG_LEVEL=info
+FERROUSX_ACME_WEBROOT=/www/acme
+FERROUSX_TLS_DIR=/etc/ferrousx/ssl
+FERROUSX_CACHE_DIR=/var/cache/ferrousx
+FERROUSX_SERVER_TOKENS=false
+EOF_FX_ENV
+    chmod 0640 "${FERROUSX_ENV_FILE}"
+  fi
+
   if [ ! -f /etc/ferrousx/ferrousx.toml ]; then
     cat > /etc/ferrousx/ferrousx.toml <<'EOF_FX'
 # Managed by FerrousPanel — FerrousX master configuration
@@ -381,8 +451,13 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStartPre=/usr/local/bin/ferrousx-bin --config /etc/ferrousx/ferrousx.toml --check-config
-ExecStart=/usr/local/bin/ferrousx-bin --config /etc/ferrousx/ferrousx.toml
+Environment=FERROUSX_CONFIG=/etc/ferrousx/ferrousx.toml
+EnvironmentFile=-/etc/ferrousx/ferrousx.env
+EnvironmentFile=-/etc/ferrous-panel/panel.env
+RuntimeDirectory=ferrousx
+RuntimeDirectoryMode=0750
+ExecStartPre=/usr/local/bin/ferrousx-bin --check-config --config ${FERROUSX_CONFIG}
+ExecStart=/usr/local/bin/ferrousx-bin --config ${FERROUSX_CONFIG}
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
@@ -488,6 +563,10 @@ echo -e "  Binary            : ${BIN_PANEL} (embedded dist/ SPA)"
 echo -e "  CLI Symlinks      : fp / ferrous -> ${BIN_PANEL}"
 echo -e "  Rust Toolchain    : $(cargo --version 2>/dev/null || echo 'prebuilt')"
 echo -e "  Web Engine        : ${WEB_ENGINE}"
+if [ "$WEB_ENGINE" = "ferrousx" ]; then
+  echo -e "  FerrousX Binary   : ${BIN_FERROUSX} (CLI: ${BIN_FERROUSX_CTL} / fx)"
+  echo -e "  FerrousX Env/Tok  : ${FERROUSX_ENV_FILE} (0640) | ${FERROUSX_ADMIN_TOKEN_FILE} (0600)"
+fi
 echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE}"
 echo -e "  Admin Username    : ${ADMIN_USER}"
 echo -e "  Credentials Hash  : ${DATA_DIR}/admin.credentials.json (mode 0600, Argon2id)"

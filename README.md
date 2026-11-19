@@ -35,8 +35,14 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/in
 # Optional: Skip Cargo compilation and download prebuilt binary directly:
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --prebuilt-binary
 
-# 1-Command In-Place Update (pulls latest code & rebuilds via Cargo, preserving /var/lib/ferrous-panel):
+# 1-Command In-Place Update (pulls latest FerrousPanel + FerrousX if installed):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash
+
+# Sync / Update FerrousX directly from github.com/Ferrous-panel/FerrousX (ferrousx-bin + ferrousx-ctl + ferrousx.env):
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx
+
+# Update ONLY FerrousX from GitHub (skip rebuilding ferrous-panel):
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx-only
 
 # 1-Command Uninstall (preserves /www/wwwroot & databases):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/uninstall.sh | sudo bash
@@ -67,7 +73,8 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/un
 
 3. **Selectable Web Server Engine (`nginx` or `ferrousx`) + Certbot SSL**
    - Switchable global engine (`GET/PUT /api/webserver`, `POST /api/webserver/switch`) with zero port overlap: pre-validates all sites (`nginx -t` or `ferrousx-bin --check-config`), stops old engine, starts new engine on `:80`/`:443`, probes each site over TCP HTTP, and rolls back automatically on failure.
-   - `crates/ferrousx` (`ferrousx-bin`): standalone pure-Rust HTTP/HTTPS server (`tokio`, `hyper 1`, `rustls` SNI + ALPN `h2`/`http1.1`) supporting `static_spa`, `reverse_proxy` (including WebSockets), `php_fpm` (Unix socket FastCGI), `redirect_https`, SIGHUP hot-reload, and `--check-config`.
+   - **Upstream FerrousX Sync (`Ferrous-panel/FerrousX @ 48659720`, `0.1.0-security-hardened`, FX-001..FX-013)**: `install.sh --engine ferrousx` and `update.sh --ferrousx` pull & compile upstream `ferrousx-bin` + `ferrousx-ctl` (`fx`), provision `/etc/ferrousx/ferrousx.env` (`0640`) + `/etc/ferrousx/admin.token` (`0600`), and wire `ferrousx.service` with `EnvironmentFile=-/etc/ferrousx/ferrousx.env` and `EnvironmentFile=-/etc/ferrous-panel/panel.env`.
+   - Embedded fallback `crates/ferrousx` (`ferrousx-bin`): standalone pure-Rust HTTP/HTTPS server (`tokio`, `hyper 1`, `rustls` SNI + ALPN `h2`/`http1.1`) supporting `ferrousx.env` dynamic env resolution, upstream TOML aliases (`workers`, `bind_http_addr`, `bind_https_addr`, `waf_mode`), `static_spa`, `reverse_proxy` (including WebSockets), `php_fpm` (Unix socket FastCGI), `redirect_https`, SIGHUP hot-reload, and `-c`/`-t`/`--check-config`.
    - SSL via `certbot certonly --webroot -w /www/acme` with `/.well-known/acme-challenge/` served by both engines, X.509 expiry parsed from `/etc/letsencrypt/live/<domain>/`, and systemd auto-renewal timer.
 
 4. **Websites & Systemd Services (`/api/apps*`)**
