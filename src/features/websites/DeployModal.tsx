@@ -104,7 +104,7 @@ export const DeployModal: React.FC<DeployModalProps> = ({
 
   const handleFrameworkChange = (nextFw: WebsiteRuntimeType) => {
     setFramework(nextFw);
-    const clean = domain.toLowerCase().trim() || 'app.ferroushub.vn';
+    const clean = domain.toLowerCase().trim() || 'app.example.com';
     const prefix = clean.split('.')[0]?.replace(/[^a-z0-9-]/g, '-') || 'app';
     const isNextStatic = nextFw === 'Vite + React 19 / Vue 3 SPA' || nextFw === 'Static HTML / SPA';
     const isNextPhp = nextFw === 'PHP 8.3-FPM' || nextFw === 'PHP / Symfony 7';

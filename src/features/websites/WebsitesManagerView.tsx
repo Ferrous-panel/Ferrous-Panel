@@ -1658,8 +1658,10 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
                       <div className="text-slate-500">
                         Webhook URL:{' '}
                         <span className="text-orange-600 dark:text-orange-400">
-                          https://panel.ferroushub.vn/api/webhook/
-                          {selectedApp.id}
+                          {typeof window !== 'undefined'
+                            ? window.location.origin
+                            : ''}
+                          /api/apps/{selectedApp.id}/git-deploy
                         </span>
                       </div>
                     </div>

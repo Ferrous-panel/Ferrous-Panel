@@ -262,6 +262,9 @@ update_ferrousx_from_github() {
     ); then
       local fx_commit
       fx_commit="$(git -C "${FERROUSX_SRC_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'main')"
+      if [ -f "${FERROUSX_SRC_DIR}/Cargo.toml" ] && grep -q '^rust-version = ' "${FERROUSX_SRC_DIR}/Cargo.toml"; then
+        sed -i '/^rust-version = /d' "${FERROUSX_SRC_DIR}/Cargo.toml"
+      fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml" ] && ! grep -Eq '^[[:space:]]*anyhow[[:space:]]*[.=]' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml"; then
         echo -e "${CYAN}[*] Applying compatibility patch: adding anyhow.workspace = true to upstream ferrousx-core/Cargo.toml...${NC}"
         awk '/^\[dependencies\]$/ { print; print "anyhow.workspace = true"; next } { print }' \
@@ -318,6 +321,9 @@ update_ferrousx_from_github() {
             mv "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
       fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs" ] && grep -q 'let mut saw_end_request = false;' "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs"; then
+        sed -i 's/let mut saw_end_request = false;/let saw_end_request: bool;/' "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs"
+      fi
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
@@ -366,7 +372,13 @@ update_ferrousx_from_github() {
   fi
 
   if systemctl is-active --quiet ferrousx.service 2>/dev/null; then
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+      ufw allow 443/udp comment 'HTTP3-QUIC' >/dev/null 2>&1 || true
+    fi
     systemctl restart ferrousx.service
+    if [ -x "${BIN_FERROUSX_CTL}" ]; then
+      "${BIN_FERROUSX_CTL}" sync >/dev/null 2>&1 || true
+    fi
     echo -e "${GREEN}[+] Restarted ferrousx.service with updated binary & ferrousx.env.${NC}"
   else
     echo -e "${CYAN}[*] ferrousx.service is installed (inactive — switch active engine via 'sudo fp webserver ferrousx').${NC}"
@@ -378,6 +390,19 @@ if [ "$UPDATE_PANEL" = true ]; then
     echo -e "${BLUE}${BOLD}[*] Pulling latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH}) & rebuilding with Cargo...${NC}"
     git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
     git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+
+    # Refresh embedded static frontend bundle (dist/) directly on the VPS before compiling
+    mkdir -p "${TMP_DIR}/dist_new"
+    if curl -fsSL --retry 2 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
+      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
+      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
+      rm -rf "${SRC_DIR}/dist"
+      mv "${TMP_DIR}/dist_new" "${SRC_DIR}/dist"
+      echo -e "${GREEN}[+] Synced latest static UI bundle into ${SRC_DIR}/dist.${NC}"
+    elif command -v npm >/dev/null 2>&1 && [ -f "${SRC_DIR}/package.json" ]; then
+      echo -e "${CYAN}[*] Building updated frontend UI locally via npm...${NC}"
+      (cd "${SRC_DIR}" && npm install --no-audit --no-fund && npm run build) || true
+    fi
 
     (
       cd "${SRC_DIR}"

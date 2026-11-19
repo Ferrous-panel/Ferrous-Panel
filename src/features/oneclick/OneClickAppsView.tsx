@@ -511,7 +511,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                       setDeployError(null);
                       setSelectedTpl(tpl);
                       setDomainInput(
-                        `${tpl.id.replace('tpl-', '').split('-')[0]}.ferroushub.vn`
+                        `${tpl.id.replace('tpl-', '').split('-')[0]}.example.com`
                       );
                       setCreateDb(tpl.requiresDb !== 'None');
                     }}
@@ -632,7 +632,7 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                   required
                   value={domainInput}
                   onChange={(e) => setDomainInput(e.target.value)}
-                  placeholder="vd: app.ferroushub.vn"
+                  placeholder="vd: app.example.com"
                   className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
                 />
               </div>
