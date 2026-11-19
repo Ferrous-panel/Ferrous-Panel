@@ -4,7 +4,7 @@
 #
 # Automatically:
 #   1. Provisions a 2GB /swapfile if RAM < 4GB and no swap is active (OOM guard)
-#   2. Installs system packages + Rust 1.85 toolchain (rustup + cargo)
+#   2. Installs system packages + Rust stable (1.89+) toolchain (rustup + cargo)
 #   3. Fetches prebuilt static UI (dist/) & compiles ferrous-panel via Cargo
 #      (zero Node.js or npm needed on the VPS; embeds dist/ via rust-embed)
 #   4. Configures Nginx or FerrousX, Argon2id 0600 credentials, systemd & UFW
@@ -30,7 +30,7 @@ GIT_BRANCH="${FERROUS_BRANCH:-main}"
 FERROUSX_REPO="${FERROUSX_REPO:-Ferrous-panel/FerrousX}"
 FERROUSX_BRANCH="${FERROUSX_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
-RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-1.85.0}"
+RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-stable}"
 PANEL_BIND="${FERROUS_BIND:-127.0.0.1}"
 PANEL_PORT="${FERROUS_PORT:-8443}"
 SECURITY_ENTRANCE="${FERROUS_SECURITY_ENTRANCE:-/panel}"
@@ -189,7 +189,7 @@ else
 fi
 
 # ==============================================================================
-# [2/7] System Dependencies & Automated Rust / Cargo 1.85 Installation
+# [2/7] System Dependencies & Automated Rust / Cargo (1.89+ / stable) Installation
 # ==============================================================================
 echo -e "${BLUE}[2/7] Installing system packages & build utilities (zero Node.js on VPS)...${NC}"
 export DEBIAN_FRONTEND=noninteractive
@@ -209,21 +209,29 @@ export PATH="${CARGO_HOME}/bin:${PATH}"
 
 ensure_cargo_installed() {
   local need_install=false
+  local min_ver_code=189
   if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
     need_install=true
   else
-    local ver_minor
-    ver_minor="$(rustc --version | awk '{print $2}' | awk -F'.' '{print ($1 * 100) + $2}' 2>/dev/null || echo 0)"
-    if [ "${ver_minor:-0}" -lt 185 ]; then
+    local ver_code
+    ver_code="$(rustc --version | awk '{print $2}' | awk -F'.' '{print ($1 * 100) + $2}' 2>/dev/null || echo 0)"
+    if [ "${ver_code:-0}" -lt "${min_ver_code}" ]; then
+      echo -e "${YELLOW}[!] Existing $(rustc --version) is older than required Rust 1.89+; upgrading to ${RUST_TOOLCHAIN}...${NC}"
       need_install=true
     fi
   fi
 
   if [ "$need_install" = true ]; then
-    echo -e "${BLUE}[*] Installing Rust toolchain (${RUST_TOOLCHAIN}) & Cargo automatically via rustup...${NC}"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+    if command -v rustup >/dev/null 2>&1; then
+      echo -e "${BLUE}[*] Upgrading Rust toolchain to ${RUST_TOOLCHAIN} via rustup...${NC}"
+      rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+      rustup default "${RUST_TOOLCHAIN}"
+    else
+      echo -e "${BLUE}[*] Installing Rust toolchain (${RUST_TOOLCHAIN}) & Cargo automatically via rustup...${NC}"
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+    fi
   else
-    echo -e "${CYAN}[*] Found existing Rust toolchain: $(rustc --version) / $(cargo --version)${NC}"
+    echo -e "${CYAN}[*] Found compatible Rust toolchain: $(rustc --version) / $(cargo --version)${NC}"
   fi
 
   if [ -x "${CARGO_HOME}/bin/cargo" ]; then
@@ -231,6 +239,9 @@ ensure_cargo_installed() {
   fi
   if [ -x "${CARGO_HOME}/bin/rustc" ]; then
     ln -sf "${CARGO_HOME}/bin/rustc" /usr/local/bin/rustc
+  fi
+  if [ -x "${CARGO_HOME}/bin/rustup" ]; then
+    ln -sf "${CARGO_HOME}/bin/rustup" /usr/local/bin/rustup
   fi
 }
 
@@ -558,7 +569,7 @@ ufw --force enable >/dev/null 2>&1 || true
 
 echo ""
 echo -e "${GREEN}==============================================================================${NC}"
-echo -e "${GREEN}${BOLD}  FerrousPanel Installed Cleanly (100% Pure-Rust + Cargo 1.85)${NC}"
+echo -e "${GREEN}${BOLD}  FerrousPanel Installed Cleanly (100% Pure-Rust + Cargo stable)${NC}"
 echo -e "${GREEN}==============================================================================${NC}"
 echo -e "  Binary            : ${BIN_PANEL} (embedded dist/ SPA)"
 echo -e "  CLI Symlinks      : fp / ferrous -> ${BIN_PANEL}"

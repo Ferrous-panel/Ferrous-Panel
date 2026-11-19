@@ -32,6 +32,7 @@ GIT_BRANCH="${FERROUS_BRANCH:-main}"
 FERROUSX_REPO="${FERROUSX_REPO:-Ferrous-panel/FerrousX}"
 FERROUSX_BRANCH="${FERROUSX_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
+RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-stable}"
 SRC_DIR="/usr/local/src/ferrous-panel"
 FERROUSX_SRC_DIR="/usr/local/src/ferrousx"
 BIN_PANEL="/usr/local/bin/ferrous-panel"
@@ -127,6 +128,39 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+ensure_rust_toolchain() {
+  local min_ver_code=189
+  if command -v rustc >/dev/null 2>&1; then
+    local ver_code
+    ver_code="$(rustc --version | awk '{print $2}' | awk -F'.' '{print ($1 * 100) + $2}' 2>/dev/null || echo 0)"
+    if [ "${ver_code:-0}" -ge "${min_ver_code}" ]; then
+      return 0
+    fi
+    echo -e "${YELLOW}[!] Existing $(rustc --version) is older than Rust 1.89+ required by crates; upgrading to ${RUST_TOOLCHAIN}...${NC}"
+  else
+    return 0
+  fi
+
+  if command -v rustup >/dev/null 2>&1; then
+    rustup toolchain install "${RUST_TOOLCHAIN}" --profile minimal
+    rustup default "${RUST_TOOLCHAIN}"
+  else
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}"
+  fi
+
+  if [ -x "${CARGO_HOME}/bin/cargo" ]; then
+    ln -sf "${CARGO_HOME}/bin/cargo" /usr/local/bin/cargo
+  fi
+  if [ -x "${CARGO_HOME}/bin/rustc" ]; then
+    ln -sf "${CARGO_HOME}/bin/rustc" /usr/local/bin/rustc
+  fi
+  if [ -x "${CARGO_HOME}/bin/rustup" ]; then
+    ln -sf "${CARGO_HOME}/bin/rustup" /usr/local/bin/rustup
+  fi
+}
+
+ensure_rust_toolchain
 
 ensure_ferrousx_runtime_files() {
   mkdir -p /etc/ferrousx/sites /etc/ferrousx/ssl /run/ferrousx /var/log/ferrousx /var/cache/ferrousx

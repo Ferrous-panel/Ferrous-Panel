@@ -35,8 +35,8 @@ jobs:
           npm run build
           npx tsc --noEmit
 
-      - name: Setup Rust 1.85+ toolchain
-        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Setup Rust stable (1.89+) toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
