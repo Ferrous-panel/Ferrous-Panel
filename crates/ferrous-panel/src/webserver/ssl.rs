@@ -260,6 +260,37 @@ impl SslManager {
         })
     }
 
+    /// Runs `certbot renew --non-interactive --deploy-hook "<hook> --reload-webserver"`.
+    pub fn renew_all(&self) -> BoxFuture<'_, Result<(), PanelError>> {
+        Box::pin(async move {
+            if !self.executor.is_binary_available(AllowedBinary::Certbot) {
+                return Err(PanelError::Conflict(
+                    "certbot is not installed on this server".to_string(),
+                ));
+            }
+            let hook_cmd = format!("{} --reload-webserver", self.paths.reload_hook_path.display());
+            if hook_cmd.contains('\0') {
+                return Err(PanelError::Forbidden("invalid deploy-hook path".to_string()));
+            }
+            let out = self
+                .executor
+                .run(
+                    AllowedBinary::Certbot,
+                    &["renew", "--non-interactive", "--deploy-hook", &hook_cmd],
+                    CMD_TIMEOUT,
+                )
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Certbot.label(),
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
+            Ok(())
+        })
+    }
+
     #[must_use]
     pub fn render_renewal_systemd_service(&self) -> String {
         let hook_cmd = format!("{} --reload-webserver", self.paths.reload_hook_path.display());

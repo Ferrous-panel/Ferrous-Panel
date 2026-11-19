@@ -207,6 +207,10 @@ pub struct PhpSettingsPayload {
     pub opcache_jit_buffer: Option<String>,
     #[serde(default)]
     pub disable_functions: Option<Vec<String>>,
+    #[serde(default)]
+    pub raw_php_ini: Option<String>,
+    #[serde(default)]
+    pub raw_fpm_pool_conf: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -294,6 +298,8 @@ pub async fn put_php_settings(
             opcache_enabled: body.opcache_enabled,
             opcache_jit_buffer: body.opcache_jit_buffer,
             disable_functions: body.disable_functions,
+            raw_php_ini: body.raw_php_ini,
+            raw_fpm_pool_conf: body.raw_fpm_pool_conf,
         },
     )?;
 
@@ -944,6 +950,10 @@ pub struct SshConfigPayload {
     pub allow_tcp_forwarding: Option<bool>,
     #[serde(default)]
     pub sftp_chroot_enabled: Option<bool>,
+    #[serde(default)]
+    pub allow_users: Option<Vec<String>>,
+    #[serde(default)]
+    pub kex_algorithms: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1039,6 +1049,8 @@ pub async fn put_ssh_config(
             client_alive_count_max: body.client_alive_count_max,
             allow_tcp_forwarding: body.allow_tcp_forwarding,
             sftp_chroot_enabled: body.sftp_chroot_enabled,
+            allow_users: body.allow_users,
+            kex_algorithms: body.kex_algorithms,
         },
     )?;
 
@@ -1047,7 +1059,7 @@ pub async fn put_ssh_config(
         Some(&actor),
         &ip,
         "ssh.config.update",
-        &format!("port={}", data.daemon_config.port),
+        &format!("port={}", data.config.port),
     )?;
     Ok(HttpResponse::Ok().json(data))
 }
@@ -1215,6 +1227,14 @@ pub async fn put_panel_admin(
             allowed_admin_ips: body.allowed_admin_ips,
         },
     )?;
+    if let Ok((fresh_creds, _)) = crate::auth::password::load_or_init_credentials(
+        &state.config.credentials_path(),
+        &state.config.admin_username,
+    ) {
+        if let Ok(mut guard) = state.credentials.write() {
+            *guard = fresh_creds;
+        }
+    }
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1244,6 +1264,16 @@ pub async fn post_panel_cli_action(
         option,
         body.value.as_deref(),
     )?;
+    if matches!(option, 5 | 6) {
+        if let Ok((fresh_creds, _)) = crate::auth::password::load_or_init_credentials(
+            &state.config.credentials_path(),
+            &state.config.admin_username,
+        ) {
+            if let Ok(mut guard) = state.credentials.write() {
+                *guard = fresh_creds;
+            }
+        }
+    }
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1290,9 +1320,13 @@ pub async fn post_polyglot_compile(
     let body = payload
         .map(web::Json::into_inner)
         .unwrap_or(PolyglotCompileRequest {
-            language: "Python (PyO3 / FastAPI)".to_string(),
+            target_language: "Python (PyO3 / FastAPI)".to_string(),
             module_name: "ferrous_bridge".to_string(),
             optimization_level: "release-lto".to_string(),
+            enable_zero_copy_ipc: true,
+            expose_sys_metrics: true,
+            expose_sql_bridge: false,
+            custom_functions: Vec::new(),
         });
     let result = ext::compile_polyglot_bridge(&state.config, &body)?;
 
@@ -1301,7 +1335,10 @@ pub async fn post_polyglot_compile(
         Some(&actor),
         &ip,
         "polyglot.compile",
-        &format!("lang={} artifact={}", result.language, result.artifact_path),
+        &format!(
+            "lang={} artifact={}",
+            result.target_language, result.binary_artifact_path
+        ),
     )?;
     Ok(HttpResponse::Ok().json(result))
 }

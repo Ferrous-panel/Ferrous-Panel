@@ -11,7 +11,7 @@ use crate::system::validate::{Domain, Port, ServiceName};
 use crate::webserver::ssl::SslCertState;
 use crate::webserver::{
     atomic_write_file, CommandExecutor, EngineKind, PhpFpmVersion, SafeFilename, SiteMode,
-    SiteSpec, UpstreamHost, UpstreamTarget, WebServerManager, WwwRootPath,
+    SiteSpec, UpstreamHost, UpstreamTarget, WebServerEngine, WebServerManager, WwwRootPath,
 };
 use chrono::Utc;
 use std::collections::BTreeMap;

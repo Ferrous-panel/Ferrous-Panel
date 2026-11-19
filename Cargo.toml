@@ -12,11 +12,6 @@ edition = "2021"
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/Ferrous-panel/Ferrous-Panel"
-homepage = "https://github.com/Ferrous-panel/Ferrous-Panel"
-documentation = "https://github.com/Ferrous-panel/Ferrous-Panel#readme"
-readme = "README.md"
-keywords = ["vps", "control-panel", "ubuntu", "actix-web", "rustls"]
-categories = ["command-line-utilities", "network-programming", "web-programming::http-server"]
 
 [workspace.dependencies]
 # Core Control Plane & HTTP Server (ferrous-panel)

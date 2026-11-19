@@ -8,7 +8,10 @@ use crate::api::contract::{
     PolyglotCompileResult, PolyglotToolchainSpec, RustModuleConversionItem, RustSourceFile,
     ServerPackageItem, SshActiveSession, SshAuthorizedKey, SshDaemonConfig, SshGeneratedKeypair,
     SshPanelData, SystemOptimizerData, WasiEdgeWorker, WasiWorkerInvokeResult, WatchdogEventItem,
-    WebServerEngineType, WebSshCommandOutput, WebsiteRuntimeType, WireGuardPeerNode,
+    WebSshCommandOutput, WebsiteRuntimeType, WireGuardPeerNode,
+};
+use crate::auth::password::{
+    load_or_init_credentials, update_admin_password, update_admin_username,
 };
 use crate::auth::store::AuthStore;
 use crate::cli::upsert_env_var;
@@ -18,10 +21,14 @@ use crate::modules::ModuleStore;
 use crate::system::cmd::AllowedBinary;
 use crate::system::paths::SafePath;
 use crate::system::validate::Domain;
-use crate::webserver::{atomic_write_file, CommandExecutor, PhpFpmVersion, WebServerManager};
+use crate::webserver::{
+    atomic_write_file, CommandExecutor, PhpFpmVersion, SafeFilename, WebServerEngine,
+    WebServerManager,
+};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(15);
@@ -976,15 +983,14 @@ pub async fn switch_site_php_version(
         for a in &app.aliases {
             aliases.push(Domain::parse(a)?);
         }
-        let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
-        let root = crate::webserver::WwwRootPath::under_wwwroot(&config.wwwroot, working.as_path())?;
+        let root = crate::webserver::WwwRootPath::under_root(&config.wwwroot, &app.working_dir)?;
         let spec = crate::webserver::SiteSpec {
             domain,
             aliases,
             root,
             mode: crate::webserver::SiteMode::PhpFpm {
                 php_version: fpm_ver,
-                index_file: crate::system::validate::SafeFilename::parse("index.php")?,
+                index_file: SafeFilename::parse("index.php")?,
             },
             ssl_enabled: app.ssl_enabled,
             redirect_https: app.ssl_enabled && app.force_https,
@@ -1973,13 +1979,15 @@ fn default_panel_admin(config: &Config) -> PanelAdminAccount {
 pub fn load_panel_admin(
     store: &ModuleStore,
     config: &Config,
-    auth_store: &AuthStore,
+    _auth_store: &AuthStore,
 ) -> Result<PanelAdminAccount, PanelError> {
     let mut admin = store
         .get_json::<PanelAdminAccount>(KV_PANEL_ADMIN)?
         .unwrap_or_else(|| default_panel_admin(config));
-    if let Ok(username) = auth_store.current_username() {
-        admin.admin_username = username;
+    if let Ok((creds, _)) =
+        load_or_init_credentials(&config.credentials_path(), &config.admin_username)
+    {
+        admin.admin_username = creds.username;
     }
     admin.panel_port = config.port;
     Ok(admin)
@@ -2356,14 +2364,16 @@ pub fn update_panel_admin(
     if let Some(ref user) = patch.admin_username {
         let u = user.trim();
         if !u.is_empty() {
-            auth_store.change_username(u)?;
-            admin.admin_username = u.to_string();
+            let updated =
+                update_admin_username(&config.credentials_path(), &config.admin_username, u)?;
+            admin.admin_username = updated.username;
         }
     }
     if let Some(ref pw) = patch.admin_password {
         let p = pw.trim();
         if !p.is_empty() && !p.contains('•') {
-            auth_store.change_password(p)?;
+            update_admin_password(&config.credentials_path(), &config.admin_username, p)?;
+            let _ = auth_store.revoke_all_sessions();
         }
     }
     if let Some(port) = patch.panel_port {
@@ -2409,7 +2419,8 @@ pub fn run_panel_cli_action(
     let output = match option {
         5 => {
             if let Some(pw) = value.map(str::trim).filter(|s| !s.is_empty()) {
-                auth_store.change_password(pw)?;
+                update_admin_password(&config.credentials_path(), &config.admin_username, pw)?;
+                let _ = auth_store.revoke_all_sessions();
                 "Updated Admin password hash (Argon2id 0600) and revoked old sessions.".to_string()
             } else {
                 "Password prompt requires a non-empty value (>= 10 chars).".to_string()
@@ -2417,10 +2428,11 @@ pub fn run_panel_cli_action(
         }
         6 => {
             if let Some(user) = value.map(str::trim).filter(|s| !s.is_empty()) {
-                auth_store.change_username(user)?;
-                admin.admin_username = user.to_string();
-                let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", user);
-                format!("Updated Admin username to '{user}'.")
+                let updated =
+                    update_admin_username(&config.credentials_path(), &config.admin_username, user)?;
+                admin.admin_username = updated.username.clone();
+                let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username);
+                format!("Updated Admin username to '{}'.", updated.username)
             } else {
                 "Username update requires a valid username.".to_string()
             }

@@ -933,7 +933,7 @@ pub fn add_sftp_account(
     auth_method: &str,
     quota_mb: u64,
 ) -> Result<Vec<SftpAccountItem>, PanelError> {
-    let clean_user = LinuxUser::parse(username)?;
+    let clean_user = SafeLinuxUser::parse(username)?;
     let target_trimmed = target_app.trim();
     let rel_target = if target_trimmed.is_empty() {
         clean_user.as_str()

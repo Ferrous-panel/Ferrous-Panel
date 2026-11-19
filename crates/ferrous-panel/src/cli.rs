@@ -321,7 +321,7 @@ pub fn ensure_default_env_file(env_path: &Path, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<()> {
+pub fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<()> {
     if value.contains('\n') || value.contains('\r') || value.contains('\0') {
         bail!("invalid control character in environment value");
     }

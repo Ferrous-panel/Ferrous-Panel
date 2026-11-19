@@ -160,7 +160,7 @@ impl<'de> Deserialize<'de> for ServiceName {
 pub struct Port(u16);
 
 impl Port {
-    pub const fn new(value: u16) -> Result<Self, PanelError> {
+    pub fn new(value: u16) -> Result<Self, PanelError> {
         if value == 0 {
             return Err(PanelError::Validation(
                 "port 0 is not allowed; must be 1..=65535".to_string(),
