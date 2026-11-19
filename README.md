@@ -1,13 +1,13 @@
 # FerrousPanel
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-orange.svg)](LICENSE)
-[![Rust: 1.85+](https://img.shields.io/badge/Rust-1.85%2B-dea584.svg)](Cargo.toml)
+[![Rust: 1.89+](https://img.shields.io/badge/Rust-1.89%2B-dea584.svg)](Cargo.toml)
 [![OS: Ubuntu 22.04 / 24.04 LTS](https://img.shields.io/badge/Ubuntu-22.04%20%7C%2024.04%20LTS-E95420.svg)](install.sh)
 
 Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous-panel` + optional `ferrousx-bin`).
 
 - **100% Pure-Rust Backend on VPS**: Frontend React assets (`dist/`) are prebuilt (`vite build`) and embedded directly inside the `ferrous-panel` binary via `rust-embed` (zero Node.js runtime on the VPS).
-- **Automated 1-Command Installer (`install.sh`)**: Automatically creates a 2GB `/swapfile` on low-RAM VPS (`< 4GB RAM`) to prevent OOM, installs `rustup` / `cargo` `1.85.0` (`--profile minimal`), embeds the prebuilt `dist/` UI, compiles `ferrous-panel` with `cargo build --release`, and configures `systemd` + `UFW`.
+- **Automated 1-Command Installer (`install.sh`)**: Automatically creates a 2GB `/swapfile` on low-RAM VPS (`< 4GB RAM`) to prevent OOM, installs/upgrades `rustup` / `cargo` `stable` (`1.89+`, `--profile minimal`), embeds the prebuilt `dist/` UI, compiles `ferrous-panel` with `cargo build --release`, and configures `systemd` + `UFW`.
 - **Zero fabricated metrics & zero hidden shells**: System metrics come from `/proc` + `sysinfo`; all privileged host operations run via allowlisted argv execution (`execve`, no `sh -c`) and strict validated newtypes (`Domain`, `ServiceName`, `Port`, `SafePath`, `SqlIdentifier`, `PortOrRange`, `CronSchedule`, `SafeLinuxUser`, `OctalMode`).
 - **Fail-closed HTTP 501**: Unimplemented subsystems return `HTTP 501 Not Implemented` and display `"Chưa hỗ trợ"` in the UI rather than returning mock data.
 
@@ -15,7 +15,7 @@ Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous
 
 ## 1-Command Installation (Ubuntu 22.04 / 24.04 LTS)
 
-Run **one single command** on a fresh Ubuntu 22.04 / 24.04 VPS. The installer automatically provisions a 2GB swap file (if RAM < 4GB), installs `cargo` 1.85.0 via `rustup`, embeds the prebuilt `dist/` frontend without needing Node.js on the VPS, compiles the release binary, and starts `ferrous-panel.service`:
+Run **one single command** on a fresh Ubuntu 22.04 / 24.04 VPS. The installer automatically provisions a 2GB swap file (if RAM < 4GB), installs/upgrades `cargo` (`stable`, `1.89+`) via `rustup`, embeds the prebuilt `dist/` frontend without needing Node.js on the VPS, compiles the release binary, and starts `ferrous-panel.service`:
 
 ### Option A — Default 1-Command Install (with Nginx Engine)
 ```bash
@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/un
 
 ### What `install.sh` Does Automatically
 1. **OOM Memory Guard**: Checks `/proc/meminfo`; if RAM `< 4GB` and no swap is active, creates and enables a `2GB /swapfile` (`chmod 0600`) so `cargo build --release` (with LTO) never runs out of memory on 1GB–2GB VPS instances.
-2. **Auto-Install Rust & Cargo 1.85.0 + Environment Variables**: Installs `build-essential`, `pkg-config`, `libssl-dev`, runs `rustup-init -y --profile minimal --default-toolchain 1.85.0`, links `cargo` and `rustc` into `/usr/local/bin`, and automatically registers `/etc/profile.d/ferrous-panel.sh` + `/etc/ferrous-panel/panel.env` (`FERROUS_*`, `CARGO_HOME`, `RUSTUP_HOME`, `PATH`) across login and interactive shells (`/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`).
+2. **Auto-Install/Upgrade Rust & Cargo (`stable` / 1.89+) + Environment Variables**: Installs `build-essential`, `pkg-config`, `libssl-dev`, runs `rustup` (`--profile minimal --default-toolchain stable`, automatically upgrading any older `rustc < 1.89`), links `cargo`, `rustc`, and `rustup` into `/usr/local/bin`, and automatically registers `/etc/profile.d/ferrous-panel.sh` + `/etc/ferrous-panel/panel.env` (`FERROUS_*`, `CARGO_HOME`, `RUSTUP_HOME`, `PATH`) across login and interactive shells (`/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`).
 3. **Prebuilt Static UI (`dist/`) + Cargo Compilation**: Uses the prebuilt `dist/` directory (or downloads `ferrous-dist.tar.gz` from GitHub Releases) so **Node.js is never needed on the VPS**, then compiles `ferrous-panel` (and `ferrousx-bin` when `--engine ferrousx` is selected) with `cargo build --release`.
 4. **First-Run Argon2id Credentials & Systemd Hardening**: Generates a 24-character one-time admin password from kernel `OsRng`, stores only its Argon2id hash (`0600`), configures `ferrous-panel.service` (`NoNewPrivileges=true`, `PrivateTmp=true`), verifies `GET /api/health == 200`, and enables `UFW`.
 
@@ -181,7 +181,7 @@ All Rust dependencies are centrally version-pinned in the root `Cargo.toml` and 
 
 ### 3. Ubuntu 22.04 / 24.04 LTS System Packages (`install.sh`)
 Automatically installed via `apt-get` during 1-command installation:
-- **Compiler & Build**: `build-essential`, `pkg-config`, `libssl-dev`, `ca-certificates`, `curl`, `git` + `rustup` (`1.85.0` minimal profile).
+- **Compiler & Build**: `build-essential`, `pkg-config`, `libssl-dev`, `ca-certificates`, `curl`, `git` + `rustup` (`stable` / `1.89+` minimal profile).
 - **Archive & Crypto**: `tar`, `zstd`, `zip`, `unzip`, `openssl`.
 - **Network & Security**: `ufw`, `fail2ban`, `certbot`, `nginx` (when `--engine nginx`).
 
@@ -190,7 +190,7 @@ Automatically installed via `apt-get` during 1-command installation:
 ## Repository Structure
 
 ```text
-├── Cargo.toml                         # Rust 1.85 Workspace (ferrous-panel + ferrousx; excludes _archive/)
+├── Cargo.toml                         # Rust 1.89+ Workspace (ferrous-panel + ferrousx; excludes _archive/)
 ├── PROGRESS.md                        # Phase tracker (P1–P7), assumptions & root-cause log
 ├── crates/
 │   ├── ferrous-panel/                 # Control plane daemon, API, auth, modules, fp CLI & embedded dist/
