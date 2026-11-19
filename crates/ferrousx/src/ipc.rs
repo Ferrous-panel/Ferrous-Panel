@@ -138,11 +138,18 @@ impl EngineRuntimeMetrics {
     }
 
     pub fn conn_close(&self) {
-        let _ = self
-            .active_connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.saturating_sub(1))
-            });
+        let mut cur = self.active_connections.load(Ordering::Relaxed);
+        while cur > 0 {
+            match self.active_connections.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => cur = next,
+            }
+        }
     }
 }
 
