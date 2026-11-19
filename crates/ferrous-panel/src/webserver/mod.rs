@@ -277,6 +277,8 @@ impl fmt::Display for UpstreamTarget {
 /// Supported PHP-FPM major/minor pools on Ubuntu 22.04/24.04.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PhpFpmVersion {
+    #[serde(rename = "7.4")]
+    V74,
     #[serde(rename = "8.1")]
     V81,
     #[serde(rename = "8.2")]
@@ -291,6 +293,7 @@ impl PhpFpmVersion {
     #[must_use]
     pub const fn version_str(self) -> &'static str {
         match self {
+            Self::V74 => "7.4",
             Self::V81 => "8.1",
             Self::V82 => "8.2",
             Self::V83 => "8.3",
@@ -301,6 +304,7 @@ impl PhpFpmVersion {
     #[must_use]
     pub const fn socket_path(self) -> &'static str {
         match self {
+            Self::V74 => "/run/php/php7.4-fpm.sock",
             Self::V81 => "/run/php/php8.1-fpm.sock",
             Self::V82 => "/run/php/php8.2-fpm.sock",
             Self::V83 => "/run/php/php8.3-fpm.sock",

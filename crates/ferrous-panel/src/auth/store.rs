@@ -166,6 +166,13 @@ impl AuthStore {
         Ok(affected > 0)
     }
 
+    /// Revokes all persisted sessions (used after administrator password rotation).
+    pub fn revoke_all_sessions(&self) -> Result<usize, PanelError> {
+        let conn = self.lock_conn()?;
+        let affected = conn.execute("DELETE FROM sessions", [])?;
+        Ok(affected)
+    }
+
     /// Appends an immutable audit log entry (user, client IP, action, detail).
     pub fn append_audit_log(
         &self,

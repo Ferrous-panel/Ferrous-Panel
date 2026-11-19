@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 description = "Pure Rust single-binary control panel server (Actix-Web + SQLite + Argon2id + sysinfo + embedded SPA)."
 
 [lints]
