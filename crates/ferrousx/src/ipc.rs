@@ -627,7 +627,10 @@ async fn handle_ipc_connection(
             write_ipc_response(&mut stream, &resp).await;
             return;
         }
-        Err(IpcReadError::Io(_)) => return,
+        Err(IpcReadError::Io(err)) => {
+            tracing::debug!(peer_uid, error = %err, "IPC connection closed during read");
+            return;
+        }
     };
 
     if buffer.is_empty() {

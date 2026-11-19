@@ -11,6 +11,10 @@ description = "FerrousX MVP — pure Rust HTTP/1.1 + HTTP/2 + TLS (SNI/ALPN) web
 name = "ferrousx-bin"
 path = "src/main.rs"
 
+[[bin]]
+name = "ferrousx-ctl"
+path = "src/bin/ferrousx_ctl.rs"
+
 [lints]
 workspace = true
 

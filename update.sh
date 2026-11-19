@@ -287,6 +287,10 @@ update_ferrousx_from_github() {
       install -m 0755 "${SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
       fx_installed=true
     fi
+    if [ -x "${SRC_DIR}/target/release/ferrousx-ctl" ]; then
+      install -m 0755 "${SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}"
+      ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
+    fi
   fi
 
   if [ "$fx_installed" = false ]; then
