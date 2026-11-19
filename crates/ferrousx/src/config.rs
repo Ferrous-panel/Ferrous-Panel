@@ -11,10 +11,82 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const DEFAULT_MASTER_CONFIG: &str = "/etc/ferrousx/ferrousx.toml";
+pub const DEFAULT_FERROUSX_ENV: &str = "/etc/ferrousx/ferrousx.env";
 pub const DEFAULT_SITES_DIR: &str = "/etc/ferrousx/sites";
 pub const DEFAULT_ACME_WEBROOT: &str = "/www/acme";
 
-/// CLI flags for `ferrousx-bin`.
+/// Loads key/value pairs from a `.env` / `ferrousx.env` file safely without shell evaluation.
+#[must_use]
+pub fn load_env_file_map(path: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let cleaned = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+        if let Some((k, v)) = cleaned.split_once('=') {
+            let key = k.trim();
+            if key.is_empty() {
+                continue;
+            }
+            let val = v
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .to_string();
+            map.insert(key.to_string(), val);
+        }
+    }
+    map
+}
+
+/// Loads merged environment variables following upstream FerrousX precedence:
+/// `Process ENV > $FERROUSX_ENV_FILE > ./.env > /etc/ferrousx/ferrousx.env > ferrousx.toml`.
+#[must_use]
+pub fn load_default_env_map() -> HashMap<String, String> {
+    let mut merged = load_env_file_map(Path::new(DEFAULT_FERROUSX_ENV));
+    let local_env = Path::new(".env");
+    if local_env.is_file() {
+        merged.extend(load_env_file_map(local_env));
+    }
+    if let Ok(custom_path) = std::env::var("FERROUSX_ENV_FILE") {
+        let trimmed = custom_path.trim();
+        if !trimmed.is_empty() {
+            merged.extend(load_env_file_map(Path::new(trimmed)));
+        }
+    }
+    merged
+}
+
+/// Safely resolves an environment variable (process env takes priority over `ferrousx.env`).
+#[must_use]
+pub fn resolve_env_var(key: &str, file_env: &HashMap<String, String>) -> Option<String> {
+    if let Ok(val) = std::env::var(key) {
+        let trimmed = val.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    file_env
+        .get(key)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_env_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// CLI flags for `ferrousx-bin` (compatible with upstream Ferrous-panel/FerrousX).
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "ferrousx-bin",
@@ -23,11 +95,11 @@ pub const DEFAULT_ACME_WEBROOT: &str = "/www/acme";
 )]
 pub struct CliArgs {
     /// Path to master ferrousx.toml configuration.
-    #[arg(long, env = "FERROUSX_CONFIG", default_value = DEFAULT_MASTER_CONFIG)]
+    #[arg(short = 'c', long, env = "FERROUSX_CONFIG", default_value = DEFAULT_MASTER_CONFIG)]
     pub config: PathBuf,
 
     /// Validate master config, sites/*.toml, and TLS certificates then exit (0 = valid, 1 = invalid).
-    #[arg(long, default_value_t = false)]
+    #[arg(short = 't', long = "check-config", alias = "test", default_value_t = false)]
     pub check_config: bool,
 }
 
@@ -38,17 +110,24 @@ pub struct CliArgs {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MasterConfigToml {
+    #[serde(alias = "workers")]
     pub worker_threads: usize,
+    #[serde(alias = "bind_http_addr")]
     pub bind_http: String,
+    #[serde(alias = "bind_https_addr")]
     pub bind_https: String,
     pub sites_dir: PathBuf,
     pub acme_webroot: PathBuf,
     pub acme_challenge_prefix: String,
     pub server_tokens: bool,
+    #[serde(alias = "client_header_timeout_ms")]
     pub header_read_timeout_ms: u64,
+    #[serde(alias = "proxy_read_timeout_ms")]
     pub request_timeout_ms: u64,
+    #[serde(alias = "proxy_connect_timeout_ms")]
     pub upstream_connect_timeout_ms: u64,
     pub max_header_bytes: usize,
+    #[serde(alias = "client_max_body_size")]
     pub max_body_bytes: usize,
 }
 
@@ -82,6 +161,8 @@ pub struct SiteConfigToml {
     #[serde(default)]
     pub ssl: SslSectionToml,
     pub handler: HandlerSectionToml,
+    #[serde(default)]
+    pub waf_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -390,7 +471,28 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
             master_path.display()
         ))
     })?;
-    let parsed_master: MasterConfigToml = toml::from_str(&raw_master)?;
+    let mut parsed_master: MasterConfigToml = toml::from_str(&raw_master)?;
+    let env_map = load_default_env_map();
+    if let Some(v) = resolve_env_var("FERROUSX_BIND_HTTP", &env_map) {
+        parsed_master.bind_http = v;
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_BIND_HTTPS", &env_map) {
+        parsed_master.bind_https = v;
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_WORKERS", &env_map) {
+        if let Ok(parsed) = v.parse::<usize>() {
+            parsed_master.worker_threads = parsed;
+        }
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_SITES_DIR", &env_map) {
+        parsed_master.sites_dir = PathBuf::from(v);
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_ACME_WEBROOT", &env_map) {
+        parsed_master.acme_webroot = PathBuf::from(v);
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_SERVER_TOKENS", &env_map).and_then(|s| parse_env_bool(&s)) {
+        parsed_master.server_tokens = v;
+    }
 
     let bind_http: SocketAddr = parsed_master.bind_http.trim().parse().map_err(|err| {
         ServerError::Config(format!(
