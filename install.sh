@@ -457,6 +457,22 @@ else
           "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml" > "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml"
       fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml" ]; then
+        for _dep in tokio-rustls toml; do
+          if ! grep -Eq "^[[:space:]]*${_dep}[[:space:]]*[.=]" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml"; then
+            echo -e "${CYAN}[*] Applying compatibility patch: adding ${_dep}.workspace = true to upstream ferrousx-bin/Cargo.toml...${NC}"
+            awk -v dep="${_dep}.workspace = true" '/^\[dependencies\]$/ { print; print dep; next } { print }' \
+              "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml.tmp" && \
+              mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/Cargo.toml"
+          fi
+        done
+      fi
+      if [ -f "${FERROUSX_SRC_DIR}/Cargo.toml" ] && grep -q 'h3-quinn = "0\.0\.7"' "${FERROUSX_SRC_DIR}/Cargo.toml" && grep -q 'quinn = { version = "0\.11\.6"' "${FERROUSX_SRC_DIR}/Cargo.toml"; then
+        echo -e "${CYAN}[*] Applying compatibility patch: pinning quinn = 0.11.6 & quinn-proto = 0.11.9 for h3-quinn 0.0.7...${NC}"
+        sed -i 's/quinn = { version = "0\.11\.6"/quinn = { version = "=0.11.6"/' "${FERROUSX_SRC_DIR}/Cargo.toml"
+        git -C "${FERROUSX_SRC_DIR}" ls-files --error-unmatch Cargo.lock >/dev/null 2>&1 || rm -f "${FERROUSX_SRC_DIR}/Cargo.lock"
+        (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
+      fi
       echo -e "${CYAN}[*] Building upstream FerrousX (${FX_COMMIT}) binaries (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
