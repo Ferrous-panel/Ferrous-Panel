@@ -669,24 +669,97 @@ update_ferrousx_from_github() {
   fi
 }
 
+ensure_frontend_dist() {
+  local work_dir="$1"
+  local dist_ready=false
+
+  # 1) Use repo-tracked dist/index.html if present (fresh from git reset --hard)
+  if [ -d "${work_dir}/.git" ] \
+    && git -C "${work_dir}" ls-files --error-unmatch dist/index.html >/dev/null 2>&1 \
+    && [ -f "${work_dir}/dist/index.html" ]; then
+    echo -e "${GREEN}[+] Using repository-tracked static UI bundle (${work_dir}/dist).${NC}"
+    dist_ready=true
+  fi
+
+  # 2) Otherwise try prebuilt release tarball (ferrous-dist.tar.gz)
+  if [ "$dist_ready" = false ]; then
+    rm -rf "${TMP_DIR}/dist_new"
+    mkdir -p "${TMP_DIR}/dist_new"
+    if curl -fsSL --retry 2 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
+      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
+      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
+      rm -rf "${work_dir}/dist"
+      mv "${TMP_DIR}/dist_new" "${work_dir}/dist"
+      echo -e "${GREEN}[+] Synced prebuilt static UI bundle into ${work_dir}/dist.${NC}"
+      dist_ready=true
+    fi
+  fi
+
+  # 3) Otherwise build fresh dist/ locally using Node 20+ (or temporary portable Node 22 in TMP_DIR)
+  if [ "$dist_ready" = false ] && [ -f "${work_dir}/package.json" ]; then
+    local node_bin_dir=""
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+      local node_major
+      node_major="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
+      if [ "${node_major:-0}" -ge 20 ]; then
+        node_bin_dir="$(dirname "$(command -v node)")"
+      fi
+    fi
+
+    if [ -z "$node_bin_dir" ]; then
+      local node_arch="x64"
+      if [ "${ARCH}" = "aarch64" ]; then
+        node_arch="arm64"
+      fi
+      local node_ver="v22.15.0"
+      local node_url="https://nodejs.org/dist/${node_ver}/node-${node_ver}-linux-${node_arch}.tar.gz"
+      echo -e "${CYAN}[*] Prebuilt UI bundle not found; downloading temporary portable Node.js ${node_ver} to build dist/...${NC}"
+      mkdir -p "${TMP_DIR}/portable-node"
+      if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/node.tar.gz" "${node_url}" \
+        && tar -xzf "${TMP_DIR}/node.tar.gz" -C "${TMP_DIR}/portable-node" --strip-components=1; then
+        node_bin_dir="${TMP_DIR}/portable-node/bin"
+      fi
+    fi
+
+    if [ -n "$node_bin_dir" ] && [ -x "${node_bin_dir}/npm" ]; then
+      echo -e "${CYAN}[*] Building static frontend UI (${work_dir}/dist) via Vite...${NC}"
+      if (
+        export PATH="${node_bin_dir}:${PATH}"
+        cd "${work_dir}"
+        npm install --no-audit --no-fund
+        npm run build
+      ); then
+        rm -rf "${work_dir}/node_modules"
+        if [ -f "${work_dir}/dist/index.html" ]; then
+          echo -e "${GREEN}[+] Built fresh static UI bundle into ${work_dir}/dist (zero Node.js left on VPS).${NC}"
+          dist_ready=true
+        fi
+      fi
+    fi
+  fi
+
+  if [ ! -f "${work_dir}/dist/index.html" ]; then
+    echo -e "${RED}[ERROR] Frontend assets (${work_dir}/dist/index.html) could not be prepared.${NC}" >&2
+    echo -e "${YELLOW}[!] Aborting Cargo build to avoid installing a panel binary without Web UI.${NC}" >&2
+    return 1
+  fi
+
+  # Keep disk fallback copy in sync and force rust-embed to re-embed fresh dist/
+  mkdir -p /var/lib/ferrous-panel/dist
+  rm -rf /var/lib/ferrous-panel/dist/*
+  cp -a "${work_dir}/dist/." /var/lib/ferrous-panel/dist/
+  if [ -f "${work_dir}/crates/ferrous-panel/src/web.rs" ]; then
+    touch "${work_dir}/crates/ferrous-panel/src/web.rs"
+  fi
+}
+
 if [ "$UPDATE_PANEL" = true ]; then
   if [ -d "${SRC_DIR}/.git" ] && command -v cargo >/dev/null 2>&1; then
     echo -e "${BLUE}${BOLD}[*] Pulling latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH}) & rebuilding with Cargo...${NC}"
     git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
     git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
 
-    # Refresh embedded static frontend bundle (dist/) directly on the VPS before compiling
-    mkdir -p "${TMP_DIR}/dist_new"
-    if curl -fsSL --retry 2 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
-      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
-      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
-      rm -rf "${SRC_DIR}/dist"
-      mv "${TMP_DIR}/dist_new" "${SRC_DIR}/dist"
-      echo -e "${GREEN}[+] Synced latest static UI bundle into ${SRC_DIR}/dist.${NC}"
-    elif command -v npm >/dev/null 2>&1 && [ -f "${SRC_DIR}/package.json" ]; then
-      echo -e "${CYAN}[*] Building updated frontend UI locally via npm...${NC}"
-      (cd "${SRC_DIR}" && npm install --no-audit --no-fund && npm run build) || true
-    fi
+    ensure_frontend_dist "${SRC_DIR}"
 
     (
       cd "${SRC_DIR}"

@@ -11,14 +11,48 @@ use std::path::Path;
 #[allow_missing = true]
 struct DistAssets;
 
+fn disk_fallback_response(path: &str) -> Option<HttpResponse> {
+    let clean = path.trim_start_matches('/');
+    if clean.is_empty() || clean.contains("..") || clean.contains('\0') {
+        return None;
+    }
+    for base_str in ["/var/lib/ferrous-panel/dist", "/usr/local/src/ferrous-panel/dist"] {
+        let base = Path::new(base_str);
+        if !base.is_dir() {
+            continue;
+        }
+        let Ok(canon_base) = std::fs::canonicalize(base) else {
+            continue;
+        };
+        let candidate = base.join(clean);
+        let Ok(canon_target) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if !canon_target.starts_with(&canon_base) || !canon_target.is_file() {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&canon_target) {
+            let mime = mime_guess::from_path(&canon_target).first_or_octet_stream();
+            return Some(
+                HttpResponse::Ok()
+                    .content_type(mime.as_ref())
+                    .body(bytes),
+            );
+        }
+    }
+    None
+}
+
 fn embedded_response(path: &str) -> Option<HttpResponse> {
-    let asset = DistAssets::get(path)?;
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
-    Some(
-        HttpResponse::Ok()
-            .content_type(mime.as_ref())
-            .body(asset.data.into_owned()),
-    )
+    if let Some(asset) = DistAssets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return Some(
+            HttpResponse::Ok()
+                .content_type(mime.as_ref())
+                .body(asset.data.into_owned()),
+        );
+    }
+    disk_fallback_response(path)
 }
 
 async fn serve_index() -> HttpResponse {

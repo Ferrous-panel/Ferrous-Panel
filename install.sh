@@ -423,17 +423,59 @@ else
     BUILD_WORKSPACE="${SRC_DIR}"
   fi
 
-  # Ensure prebuilt dist/ static UI exists (download ferrous-dist.tar.gz if dist/index.html is missing,
-  # or build locally if npm is available on a self-hosted open-source fork)
+  # Ensure prebuilt dist/ static UI exists (tracked dist/, ferrous-dist.tar.gz release,
+  # or build cleanly using a temporary portable Node.js 22 tarball inside TMP_DIR)
   if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
     echo -e "${CYAN}[*] Downloading prebuilt static frontend bundle (ferrous-dist.tar.gz)...${NC}"
-    mkdir -p "${BUILD_WORKSPACE}/dist"
-    if curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null; then
-      tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${BUILD_WORKSPACE}/dist"
-    elif command -v npm >/dev/null 2>&1 && [ -f "${BUILD_WORKSPACE}/package.json" ]; then
-      echo -e "${CYAN}[*] Prebuilt bundle unavailable; building frontend locally via npm...${NC}"
-      (cd "${BUILD_WORKSPACE}" && npm install --no-audit --no-fund && npm run build) || true
+    mkdir -p "${TMP_DIR}/dist_new"
+    if curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
+      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
+      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
+      rm -rf "${BUILD_WORKSPACE}/dist"
+      mv "${TMP_DIR}/dist_new" "${BUILD_WORKSPACE}/dist"
+      echo -e "${GREEN}[+] Synced prebuilt static UI bundle into ${BUILD_WORKSPACE}/dist.${NC}"
+    elif [ -f "${BUILD_WORKSPACE}/package.json" ]; then
+      NODE_BIN_DIR=""
+      if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
+        if [ "${NODE_MAJOR:-0}" -ge 20 ]; then
+          NODE_BIN_DIR="$(dirname "$(command -v node)")"
+        fi
+      fi
+      if [ -z "${NODE_BIN_DIR}" ]; then
+        NODE_ARCH="x64"
+        [ "${ARCH}" = "aarch64" ] && NODE_ARCH="arm64"
+        NODE_VER="v22.15.0"
+        echo -e "${CYAN}[*] Prebuilt bundle unavailable; downloading temporary portable Node.js ${NODE_VER} to build dist/...${NC}"
+        mkdir -p "${TMP_DIR}/portable-node"
+        if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/node.tar.gz" "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${NODE_ARCH}.tar.gz" \
+          && tar -xzf "${TMP_DIR}/node.tar.gz" -C "${TMP_DIR}/portable-node" --strip-components=1; then
+          NODE_BIN_DIR="${TMP_DIR}/portable-node/bin"
+        fi
+      fi
+      if [ -n "${NODE_BIN_DIR}" ] && [ -x "${NODE_BIN_DIR}/npm" ]; then
+        echo -e "${CYAN}[*] Building static frontend UI (${BUILD_WORKSPACE}/dist) via Vite...${NC}"
+        (
+          export PATH="${NODE_BIN_DIR}:${PATH}"
+          cd "${BUILD_WORKSPACE}"
+          npm install --no-audit --no-fund
+          npm run build
+        )
+        rm -rf "${BUILD_WORKSPACE}/node_modules"
+      fi
     fi
+  fi
+
+  if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
+    echo -e "${RED}[ERROR] Frontend assets (${BUILD_WORKSPACE}/dist/index.html) are missing; cannot embed UI into ferrous-panel.${NC}" >&2
+    exit 1
+  fi
+
+  mkdir -p "${DATA_DIR}/dist"
+  rm -rf "${DATA_DIR}/dist/"*
+  cp -a "${BUILD_WORKSPACE}/dist/." "${DATA_DIR}/dist/"
+  if [ -f "${BUILD_WORKSPACE}/crates/ferrous-panel/src/web.rs" ]; then
+    touch "${BUILD_WORKSPACE}/crates/ferrous-panel/src/web.rs"
   fi
 
   echo -e "${CYAN}[*] Running: cargo build --release -p ferrous-panel ...${NC}"
