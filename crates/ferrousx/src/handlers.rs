@@ -544,7 +544,7 @@ async fn handle_websocket_upgrade(
     let client_up = hyper::upgrade::on(client_req);
     let upstream_up = hyper::upgrade::on(up_res);
     tokio::spawn(async move {
-        if let (Ok(client_upgraded), Ok(upstream_upgraded)) =
+        if let Ok((client_upgraded, upstream_upgraded)) =
             tokio::try_join!(client_up, upstream_up)
         {
             let mut c_io = hyper_util::rt::TokioIo::new(client_upgraded);
