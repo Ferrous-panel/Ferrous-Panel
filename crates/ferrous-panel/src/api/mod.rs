@@ -128,6 +128,14 @@ fn register_extended_routes(cfg: &mut web::ServiceConfig) {
             "/ferrousx/sync-status",
             web::post().to(extended::post_ferrousx_sync),
         )
+        .route(
+            "/ferrousx/ipc/status",
+            web::get().to(extended::get_ferrousx_ipc_status),
+        )
+        .route(
+            "/ferrousx/ipc/command",
+            web::post().to(extended::post_ferrousx_ipc_command),
+        )
         // 1-Click Templates
         .route(
             "/oneclick/templates",

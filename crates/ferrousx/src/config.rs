@@ -14,6 +14,8 @@ pub const DEFAULT_MASTER_CONFIG: &str = "/etc/ferrousx/ferrousx.toml";
 pub const DEFAULT_FERROUSX_ENV: &str = "/etc/ferrousx/ferrousx.env";
 pub const DEFAULT_SITES_DIR: &str = "/etc/ferrousx/sites";
 pub const DEFAULT_ACME_WEBROOT: &str = "/www/acme";
+pub const DEFAULT_CONTROL_SOCKET: &str = "/run/ferrousx/panel-admin.sock";
+pub const DEFAULT_ADMIN_TOKEN_FILE: &str = "/etc/ferrousx/admin.token";
 
 /// Loads key/value pairs from a `.env` / `ferrousx.env` file safely without shell evaluation.
 #[must_use]
@@ -129,6 +131,14 @@ pub struct MasterConfigToml {
     pub max_header_bytes: usize,
     #[serde(alias = "client_max_body_size")]
     pub max_body_bytes: usize,
+    #[serde(alias = "panel_uds")]
+    pub control_socket: Option<PathBuf>,
+    pub admin_token_file: PathBuf,
+    pub allow_read_group_gid: Option<u32>,
+    pub require_peer_uid_auth: bool,
+    pub max_failed_attempts: u32,
+    pub brute_force_lockout_secs: u64,
+    pub waf_mode: String,
 }
 
 impl Default for MasterConfigToml {
@@ -146,6 +156,13 @@ impl Default for MasterConfigToml {
             upstream_connect_timeout_ms: 5_000,
             max_header_bytes: 16 * 1024,
             max_body_bytes: 10 * 1024 * 1024,
+            control_socket: None,
+            admin_token_file: PathBuf::from(DEFAULT_ADMIN_TOKEN_FILE),
+            allow_read_group_gid: None,
+            require_peer_uid_auth: true,
+            max_failed_attempts: 5,
+            brute_force_lockout_secs: 60,
+            waf_mode: "block".to_string(),
         }
     }
 }
@@ -423,6 +440,13 @@ pub struct ValidatedMasterConfig {
     pub upstream_connect_timeout: Duration,
     pub max_header_bytes: usize,
     pub max_body_bytes: usize,
+    pub control_socket: Option<PathBuf>,
+    pub admin_token_file: PathBuf,
+    pub allow_read_group_gid: Option<u32>,
+    pub require_peer_uid_auth: bool,
+    pub max_failed_attempts: u32,
+    pub brute_force_lockout_secs: u64,
+    pub waf_mode: String,
 }
 
 #[derive(Debug)]
@@ -493,6 +517,17 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
     if let Some(v) = resolve_env_var("FERROUSX_SERVER_TOKENS", &env_map).and_then(|s| parse_env_bool(&s)) {
         parsed_master.server_tokens = v;
     }
+    if let Some(v) = resolve_env_var("FERROUSX_CONTROL_SOCKET", &env_map)
+        .or_else(|| resolve_env_var("FERROUSX_PANEL_UDS", &env_map))
+    {
+        parsed_master.control_socket = Some(PathBuf::from(v));
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_ADMIN_TOKEN_FILE", &env_map) {
+        parsed_master.admin_token_file = PathBuf::from(v);
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_WAF_MODE", &env_map) {
+        parsed_master.waf_mode = v;
+    }
 
     let bind_http: SocketAddr = parsed_master.bind_http.trim().parse().map_err(|err| {
         ServerError::Config(format!(
@@ -529,6 +564,12 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
             "acme_challenge_prefix must start with '/'".to_string(),
         ));
     }
+    let control_socket = match parsed_master.control_socket {
+        Some(ref sock) => Some(validate_absolute_clean_path(sock, "control_socket")?),
+        None => None,
+    };
+    let admin_token_file =
+        validate_absolute_clean_path(&parsed_master.admin_token_file, "admin_token_file")?;
 
     let master = ValidatedMasterConfig {
         worker_threads: parsed_master.worker_threads,
@@ -543,6 +584,13 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
         upstream_connect_timeout: Duration::from_millis(parsed_master.upstream_connect_timeout_ms),
         max_header_bytes: parsed_master.max_header_bytes,
         max_body_bytes: parsed_master.max_body_bytes,
+        control_socket,
+        admin_token_file,
+        allow_read_group_gid: parsed_master.allow_read_group_gid,
+        require_peer_uid_auth: parsed_master.require_peer_uid_auth,
+        max_failed_attempts: parsed_master.max_failed_attempts.max(3),
+        brute_force_lockout_secs: parsed_master.brute_force_lockout_secs.max(30),
+        waf_mode: parsed_master.waf_mode,
     };
 
     let mut site_files: Vec<PathBuf> = Vec::new();

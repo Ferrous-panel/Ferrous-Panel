@@ -143,6 +143,7 @@ ensure_ferrousx_runtime_files() {
 FERROUSX_CONFIG=/etc/ferrousx/ferrousx.toml
 FERROUSX_SITES_DIR=/etc/ferrousx/sites
 FERROUSX_ENV_FILE=/etc/ferrousx/ferrousx.env
+FERROUSX_CONTROL_SOCKET=/run/ferrousx/panel-admin.sock
 FERROUSX_PANEL_UDS=/run/ferrousx/panel-admin.sock
 FERROUSX_ADMIN_TOKEN_FILE=/etc/ferrousx/admin.token
 FERROUSX_WORKERS=4

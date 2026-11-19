@@ -1,4 +1,5 @@
 pub mod ferrousx;
+pub mod ferrousx_ipc;
 pub mod nginx;
 pub mod ssl;
 
@@ -1172,7 +1173,7 @@ impl WebServerManager {
                     .map(|s| s.active)
                     .unwrap_or(false)
                 {
-                    self.ferrousx.reload().await?;
+                    self.ferrousx.notify_vhost_add(spec.domain.as_str()).await?;
                 }
                 r
             }
@@ -1202,7 +1203,7 @@ impl WebServerManager {
                     .map(|s| s.active)
                     .unwrap_or(false)
             {
-                let _ = self.ferrousx.reload().await;
+                let _ = self.ferrousx.notify_vhost_del(domain.as_str()).await;
             }
         }
         let _ = self.store.remove_site(domain)?;
@@ -1256,7 +1257,10 @@ impl WebServerManager {
             }
             self.store.replace_all_sites(sites)?;
             if self.engine_is_active(target_engine).await? {
-                self.reload_engine(target_engine).await?;
+                match target_engine {
+                    EngineKind::Nginx => self.nginx.reload().await?,
+                    EngineKind::Ferrousx => self.ferrousx.notify_panel_sync().await?,
+                }
             }
         }
 

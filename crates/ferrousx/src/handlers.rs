@@ -1,4 +1,5 @@
 use crate::config::{LoadedBundle, SiteHandler, UpstreamOrigin, ValidatedSite};
+use crate::ipc::EngineRuntimeMetrics;
 use crate::router::{match_site_for_request, resolve_safe_path, PathError};
 use fastcgi_client::{Client as FastcgiClient, Params as FastcgiParams, Request as FastcgiRequest};
 use http_body_util::combinators::BoxBody;
@@ -28,6 +29,7 @@ const FILE_CHUNK_SIZE: usize = 64 * 1024;
 pub struct AppRuntime {
     pub bundle: Arc<RwLock<Arc<LoadedBundle>>>,
     pub http_client: HttpLegacyClient,
+    pub metrics: Arc<EngineRuntimeMetrics>,
 }
 
 impl AppRuntime {
@@ -39,6 +41,7 @@ impl AppRuntime {
         Self {
             bundle: Arc::new(RwLock::new(Arc::new(initial))),
             http_client,
+            metrics: Arc::new(EngineRuntimeMetrics::new()),
         }
     }
 
@@ -63,6 +66,7 @@ pub async fn dispatch_request(
     is_tls: bool,
     runtime: Arc<AppRuntime>,
 ) -> Result<Response<RespBody>, std::convert::Infallible> {
+    runtime.metrics.record_request();
     let Some(bundle) = runtime.current_bundle() else {
         return Ok(text_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -149,6 +153,7 @@ pub async fn dispatch_request(
             index_file,
             spa_fallback,
         } => {
+            runtime.metrics.record_static();
             if !matches!(*req.method(), Method::GET | Method::HEAD) {
                 text_response(
                     StatusCode::METHOD_NOT_ALLOWED,
@@ -173,7 +178,7 @@ pub async fn dispatch_request(
             pass_host_header,
             forwarded_headers,
         } => {
-            handle_reverse_proxy(
+            let res = handle_reverse_proxy(
                 req,
                 peer_addr,
                 is_tls,
@@ -184,13 +189,18 @@ pub async fn dispatch_request(
                 &bundle,
                 &runtime.http_client,
             )
-            .await
+            .await;
+            if res.status().is_server_error() {
+                runtime.metrics.record_upstream_error();
+            }
+            res
         }
         SiteHandler::PhpFpm {
             fastcgi_socket,
             index_file,
         } => {
-            handle_php_fpm(
+            runtime.metrics.record_php_fpm();
+            let res = handle_php_fpm(
                 req,
                 peer_addr,
                 is_tls,
@@ -200,7 +210,11 @@ pub async fn dispatch_request(
                 index_file.as_str(),
                 &bundle,
             )
-            .await
+            .await;
+            if res.status().is_server_error() {
+                runtime.metrics.record_upstream_error();
+            }
+            res
         }
         SiteHandler::RedirectHttps { .. } => text_response(
             StatusCode::NOT_FOUND,
@@ -208,6 +222,15 @@ pub async fn dispatch_request(
             server_tokens,
         ),
     };
+
+    if let Some(len_bytes) = response
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        runtime.metrics.record_bytes_sent(len_bytes);
+    }
 
     Ok(response)
 }

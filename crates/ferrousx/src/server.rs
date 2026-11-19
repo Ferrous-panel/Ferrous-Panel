@@ -1,6 +1,10 @@
 use crate::config::load_bundle;
 use crate::error::ServerError;
 use crate::handlers::{dispatch_request, AppRuntime};
+use crate::ipc::{
+    bind_secure_unix_listener, load_or_init_admin_token, run_admin_ipc_loop, BruteForceGuard,
+    ReloadFn,
+};
 use crate::tls::{build_tls_server_config, DynamicSniResolver};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -14,24 +18,60 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-/// Running FerrousX HTTP/1.1 + HTTP/2 + TLS (SNI/ALPN) server instance with hot-reload support.
+/// Running FerrousX HTTP/1.1 + HTTP/2 + TLS (SNI/ALPN) + Admin UDS IPC server instance.
 #[derive(Debug)]
 pub struct FerrousxServer {
     master_config_path: PathBuf,
     http_addr: SocketAddr,
     https_addr: SocketAddr,
+    ipc_socket_path: Option<PathBuf>,
     runtime: Arc<AppRuntime>,
     sni_resolver: Arc<DynamicSniResolver>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
+fn perform_hot_reload(
+    master_config_path: &Path,
+    runtime: &AppRuntime,
+    sni_resolver: &DynamicSniResolver,
+) -> Result<(u64, usize), ServerError> {
+    let next = load_bundle(master_config_path)?;
+    let count = next.sites.len();
+    sni_resolver.swap(next.sni_certs.clone())?;
+    runtime
+        .swap_bundle(next)
+        .map_err(|msg| ServerError::Config(msg.to_string()))?;
+    let epoch = runtime.metrics.bump_epoch();
+    tracing::info!(
+        epoch,
+        sites = count,
+        "ferrousx configuration hot-reloaded (Zero-Downtime RCU)"
+    );
+    Ok((epoch, count))
+}
+
 impl FerrousxServer {
-    /// Loads and validates config, builds TLS SNI/ALPN acceptor, and binds `:http` + `:https` sockets.
+    /// Loads and validates config, builds TLS SNI/ALPN acceptor, binds HTTP+HTTPS sockets,
+    /// and starts the Admin UDS IPC listener when `control_socket` is configured.
     pub async fn start(master_config_path: &Path) -> Result<Self, ServerError> {
+        Self::start_with_ipc(master_config_path, None).await
+    }
+
+    /// Starts FerrousX with an optional explicit UDS Admin IPC socket path override
+    /// (for example `/run/ferrousx/panel-admin.sock` in production daemon mode or a temp socket in tests).
+    pub async fn start_with_ipc(
+        master_config_path: &Path,
+        ipc_socket_override: Option<PathBuf>,
+    ) -> Result<Self, ServerError> {
         let initial = load_bundle(master_config_path)?;
         let bind_http = initial.master.bind_http;
         let bind_https = initial.master.bind_https;
+        let effective_ipc_socket = ipc_socket_override.or_else(|| initial.master.control_socket.clone());
+        let token_file = initial.master.admin_token_file.clone();
+        let allow_read_gid = initial.master.allow_read_group_gid;
+        let max_failed_attempts = initial.master.max_failed_attempts;
+        let brute_force_lockout_secs = initial.master.brute_force_lockout_secs;
 
         let sni_resolver = Arc::new(DynamicSniResolver::new(initial.sni_certs.clone()));
         let tls_cfg = build_tls_server_config(Arc::clone(&sni_resolver))?;
@@ -46,17 +86,58 @@ impl FerrousxServer {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        let http_task = tokio::spawn(run_http_accept_loop(
+        let mut tasks = Vec::with_capacity(3);
+        tasks.push(tokio::spawn(run_http_accept_loop(
             http_listener,
             Arc::clone(&runtime),
             shutdown_rx.clone(),
-        ));
-        let https_task = tokio::spawn(run_https_accept_loop(
+        )));
+        tasks.push(tokio::spawn(run_https_accept_loop(
             https_listener,
             tls_acceptor,
             Arc::clone(&runtime),
-            shutdown_rx,
-        ));
+            shutdown_rx.clone(),
+        )));
+
+        let mut active_ipc_socket = None;
+        if let Some(socket_path) = effective_ipc_socket {
+            let sock_mode = if allow_read_gid.is_some() {
+                0o660
+            } else {
+                0o600
+            };
+            let listener = bind_secure_unix_listener(&socket_path, sock_mode)?;
+            let fallback_token = Arc::new(
+                load_or_init_admin_token(&token_file).unwrap_or_default(),
+            );
+            let brute_guard = Arc::new(BruteForceGuard::new(
+                max_failed_attempts,
+                brute_force_lockout_secs,
+            ));
+
+            let cfg_path_owned = master_config_path.to_path_buf();
+            let rt_reload = Arc::clone(&runtime);
+            let sni_reload = Arc::clone(&sni_resolver);
+            let reload_fn: ReloadFn = Arc::new(move || {
+                perform_hot_reload(&cfg_path_owned, &rt_reload, &sni_reload)
+            });
+
+            tracing::info!(
+                socket = %socket_path.display(),
+                mode = format!("{sock_mode:#o}"),
+                "ferrousx admin IPC control socket ready (SO_PEERCRED + 256-bit token)"
+            );
+            tasks.push(tokio::spawn(run_admin_ipc_loop(
+                listener,
+                socket_path.clone(),
+                Arc::clone(&runtime),
+                fallback_token,
+                brute_guard,
+                reload_fn,
+                shutdown_rx,
+            )));
+            active_ipc_socket = Some(socket_path);
+        }
 
         tracing::info!(
             http = %http_addr,
@@ -68,10 +149,11 @@ impl FerrousxServer {
             master_config_path: master_config_path.to_path_buf(),
             http_addr,
             https_addr,
+            ipc_socket_path: active_ipc_socket,
             runtime,
             sni_resolver,
             shutdown_tx,
-            tasks: vec![http_task, https_task],
+            tasks,
         })
     }
 
@@ -86,6 +168,16 @@ impl FerrousxServer {
     }
 
     #[must_use]
+    pub fn ipc_socket_path(&self) -> Option<&Path> {
+        self.ipc_socket_path.as_deref()
+    }
+
+    #[must_use]
+    pub fn config_epoch(&self) -> u64 {
+        self.runtime.metrics.epoch()
+    }
+
+    #[must_use]
     pub fn site_count(&self) -> usize {
         self.runtime
             .current_bundle()
@@ -97,22 +189,37 @@ impl FerrousxServer {
     ///
     /// If validation of the new config fails, keeps the previous valid config live.
     pub fn reload(&self) -> Result<usize, ServerError> {
-        let next = load_bundle(&self.master_config_path)?;
-        let count = next.sites.len();
-        self.sni_resolver.swap(next.sni_certs.clone())?;
-        self.runtime
-            .swap_bundle(next)
-            .map_err(|msg| ServerError::Config(msg.to_string()))?;
-        tracing::info!(sites = count, "ferrousx configuration hot-reloaded");
+        let (_epoch, count) =
+            perform_hot_reload(&self.master_config_path, &self.runtime, &self.sni_resolver)?;
         Ok(count)
     }
 
-    /// Signals listener accept loops to stop cleanly.
+    /// Signals listener accept loops (HTTP, HTTPS, and Admin IPC UDS) to stop cleanly.
     pub async fn shutdown(self) {
         let _ = self.shutdown_tx.send(true);
         for task in self.tasks {
             let _ = task.await;
         }
+        if let Some(sock) = self.ipc_socket_path {
+            let _ = std::fs::remove_file(sock);
+        }
+    }
+}
+
+struct ActiveConnGuard {
+    runtime: Arc<AppRuntime>,
+}
+
+impl ActiveConnGuard {
+    fn new(runtime: Arc<AppRuntime>) -> Self {
+        runtime.metrics.conn_open();
+        Self { runtime }
+    }
+}
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        self.runtime.metrics.conn_close();
     }
 }
 
@@ -135,6 +242,7 @@ async fn run_http_accept_loop(
                 let _ = stream.set_nodelay(true);
                 let rt = Arc::clone(&runtime);
                 tokio::spawn(async move {
+                    let _conn = ActiveConnGuard::new(Arc::clone(&rt));
                     serve_plain_connection(stream, peer_addr, rt).await;
                 });
             }
@@ -163,6 +271,7 @@ async fn run_https_accept_loop(
                 let acceptor = tls_acceptor.clone();
                 let rt = Arc::clone(&runtime);
                 tokio::spawn(async move {
+                    let _conn = ActiveConnGuard::new(Arc::clone(&rt));
                     serve_tls_connection(stream, peer_addr, acceptor, rt).await;
                 });
             }

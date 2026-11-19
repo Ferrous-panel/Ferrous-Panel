@@ -2,6 +2,9 @@ use crate::error::PanelError;
 use crate::system::cmd::AllowedBinary;
 use crate::system::paths::SafePath;
 use crate::system::validate::{Domain, ServiceName};
+use crate::webserver::ferrousx_ipc::{
+    FerrousxIpcClient, DEFAULT_FERROUSX_ADMIN_TOKEN_FILE, DEFAULT_FERROUSX_CONTROL_SOCKET,
+};
 use crate::webserver::{
     atomic_write_file, parse_systemctl_status, BoxFuture, CommandExecutor, EngineKind,
     EngineStatus, FileSnapshot, RenderedSite, SiteMode, SiteSpec, ValidationReport,
@@ -21,6 +24,9 @@ pub struct FerrousxPaths {
     pub acme_webroot: SafePath,
     pub letsencrypt_live: SafePath,
     pub service_name: ServiceName,
+    pub control_socket: PathBuf,
+    pub admin_token_file: PathBuf,
+    use_system_ipc_env: bool,
 }
 
 impl FerrousxPaths {
@@ -31,6 +37,9 @@ impl FerrousxPaths {
             acme_webroot: SafePath::under_root(Path::new("/www"), "acme")?,
             letsencrypt_live: SafePath::under_root(Path::new("/etc/letsencrypt"), "live")?,
             service_name: ServiceName::parse("ferrousx")?,
+            control_socket: PathBuf::from(DEFAULT_FERROUSX_CONTROL_SOCKET),
+            admin_token_file: PathBuf::from(DEFAULT_FERROUSX_ADMIN_TOKEN_FILE),
+            use_system_ipc_env: true,
         })
     }
 
@@ -40,13 +49,28 @@ impl FerrousxPaths {
         acme_webroot: SafePath,
         letsencrypt_live: SafePath,
     ) -> Result<Self, PanelError> {
+        let base_dir = master_config
+            .parent()
+            .unwrap_or_else(|| Path::new("/tmp"))
+            .to_path_buf();
         Ok(Self {
             master_config,
             sites_dir,
             acme_webroot,
             letsencrypt_live,
             service_name: ServiceName::parse("ferrousx")?,
+            control_socket: base_dir.join("panel-admin.sock"),
+            admin_token_file: base_dir.join("admin.token"),
+            use_system_ipc_env: false,
         })
+    }
+
+    #[must_use]
+    pub fn with_ipc_paths(mut self, control_socket: PathBuf, admin_token_file: PathBuf) -> Self {
+        self.control_socket = control_socket;
+        self.admin_token_file = admin_token_file;
+        self.use_system_ipc_env = false;
+        self
     }
 }
 
@@ -65,6 +89,106 @@ impl FerrousxEngine {
     #[must_use]
     pub fn paths(&self) -> &FerrousxPaths {
         &self.paths
+    }
+
+    #[must_use]
+    pub fn ipc_client(&self) -> FerrousxIpcClient {
+        if self.paths.use_system_ipc_env {
+            FerrousxIpcClient::system_default()
+        } else {
+            FerrousxIpcClient::for_paths(
+                self.paths.control_socket.clone(),
+                self.paths.admin_token_file.clone(),
+            )
+        }
+    }
+
+    async fn reload_via_sighup(&self) -> Result<(), PanelError> {
+        let unit = self.paths.service_name.as_str();
+        let pid_out = self
+            .executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["show", "--property=MainPID", "--value", unit],
+                CMD_TIMEOUT,
+            )
+            .await?;
+        if !pid_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: AllowedBinary::Systemctl.label(),
+                exit_code: pid_out.exit_code,
+                stderr: pid_out.stderr,
+            });
+        }
+
+        let pid: u32 = pid_out.stdout.trim().parse().map_err(|_| {
+            PanelError::Conflict(format!(
+                "invalid MainPID returned by systemctl show for {unit}: '{}'",
+                pid_out.stdout.trim()
+            ))
+        })?;
+
+        if pid == 0 {
+            return Err(PanelError::Conflict(format!(
+                "{unit} service is not running (MainPID=0); cannot send SIGHUP"
+            )));
+        }
+
+        let pid_str = pid.to_string();
+        let kill_out = self
+            .executor
+            .run(AllowedBinary::Kill, &["-HUP", &pid_str], CMD_TIMEOUT)
+            .await?;
+        if !kill_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: AllowedBinary::Kill.label(),
+                exit_code: kill_out.exit_code,
+                stderr: kill_out.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    /// Sends an authenticated UDS IPC reload action (`reload` / `panel_sync` / `vhost_add` / `vhost_del`)
+    /// over `/run/ferrousx/panel-admin.sock` when available, falling back cleanly to `SIGHUP`.
+    pub async fn notify_ipc_reload(
+        &self,
+        action: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), PanelError> {
+        self.ensure_installed()?;
+        let client = self.ipc_client();
+        if client.socket_available() {
+            let resp = client.send_command(action, payload).await?;
+            if resp.success {
+                tracing::info!(
+                    action = %action,
+                    latency_us = resp.latency_us,
+                    "ferrousx UDS IPC action completed"
+                );
+                return Ok(());
+            }
+            return Err(PanelError::Validation(format!(
+                "ferrousx IPC '{action}' failed: {}",
+                resp.message
+            )));
+        }
+        self.reload_via_sighup().await
+    }
+
+    pub async fn notify_panel_sync(&self) -> Result<(), PanelError> {
+        self.notify_ipc_reload("panel_sync", serde_json::json!({ "source": "ferrous-panel" }))
+            .await
+    }
+
+    pub async fn notify_vhost_add(&self, domain: &str) -> Result<(), PanelError> {
+        self.notify_ipc_reload("vhost_add", serde_json::json!({ "domain": domain }))
+            .await
+    }
+
+    pub async fn notify_vhost_del(&self, domain: &str) -> Result<(), PanelError> {
+        self.notify_ipc_reload("vhost_del", serde_json::json!({ "domain": domain }))
+            .await
     }
 
     fn site_config_path(&self, domain: &Domain) -> PathBuf {
@@ -364,50 +488,7 @@ key_path = \"{key_path}\"\n\
 
     fn reload(&self) -> BoxFuture<'_, Result<(), PanelError>> {
         Box::pin(async move {
-            self.ensure_installed()?;
-            let unit = self.paths.service_name.as_str();
-            let pid_out = self
-                .executor
-                .run(
-                    AllowedBinary::Systemctl,
-                    &["show", "--property=MainPID", "--value", unit],
-                    CMD_TIMEOUT,
-                )
-                .await?;
-            if !pid_out.success {
-                return Err(PanelError::CommandFailed {
-                    binary: AllowedBinary::Systemctl.label(),
-                    exit_code: pid_out.exit_code,
-                    stderr: pid_out.stderr,
-                });
-            }
-
-            let pid: u32 = pid_out.stdout.trim().parse().map_err(|_| {
-                PanelError::Conflict(format!(
-                    "invalid MainPID returned by systemctl show for {unit}: '{}'",
-                    pid_out.stdout.trim()
-                ))
-            })?;
-
-            if pid == 0 {
-                return Err(PanelError::Conflict(format!(
-                    "{unit} service is not running (MainPID=0); cannot send SIGHUP"
-                )));
-            }
-
-            let pid_str = pid.to_string();
-            let kill_out = self
-                .executor
-                .run(AllowedBinary::Kill, &["-HUP", &pid_str], CMD_TIMEOUT)
-                .await?;
-            if !kill_out.success {
-                return Err(PanelError::CommandFailed {
-                    binary: AllowedBinary::Kill.label(),
-                    exit_code: kill_out.exit_code,
-                    stderr: kill_out.stderr,
-                });
-            }
-            Ok(())
+            self.notify_ipc_reload("reload", serde_json::json!({})).await
         })
     }
 
