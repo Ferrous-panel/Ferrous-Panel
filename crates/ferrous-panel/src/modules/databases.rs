@@ -570,8 +570,36 @@ pub async fn get_mysql_config(
         }
     }
 
+    let pma_version = std::fs::read_to_string("/usr/share/phpmyadmin/package.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|ver| ver.as_str())
+                .map(|ver| ver.to_string())
+        })
+        .unwrap_or_default();
+
+    let pma_running = if Path::new("/usr/share/phpmyadmin").is_dir() {
+        if executor.is_binary_available(AllowedBinary::Systemctl) {
+            executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["is-active", "--quiet", "ferrous-pma.service"],
+                    Duration::from_secs(5),
+                )
+                .await
+                .map(|o| o.success)
+                .unwrap_or(false)
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+
     Ok(MysqlPhpMyAdminConfig {
-        mysql_version: ver_out.stdout,
+        mysql_version: ver_out.stdout.trim().to_string(),
         socket_path: "/run/mysqld/mysqld.sock".to_string(),
         bind_address,
         port,
@@ -582,17 +610,17 @@ pub async fn get_mysql_config(
         long_query_time_sec,
         default_charset: "utf8mb4".to_string(),
         my_cnf_raw: raw,
-        pma_version: String::new(),
-        pma_path: "/usr/share/phpmyadmin".to_string(),
+        pma_version,
+        pma_path: "/phpadmin".to_string(),
         pma_port: 888,
         pma_ssl_only: false,
         pma_basic_auth: true,
         pma_max_upload_mb: 64,
-        pma_allowed_ips: "127.0.0.1".to_string(),
-        pma_status: if Path::new("/usr/share/phpmyadmin").is_dir() {
-            "installed".to_string()
+        pma_allowed_ips: "0.0.0.0/0 (Protected by Panel Reverse Proxy)".to_string(),
+        pma_status: if pma_running {
+            "running".to_string()
         } else {
-            "not_installed".to_string()
+            "stopped".to_string()
         },
     })
 }

@@ -352,6 +352,11 @@ export default function App() {
                   databases={controller.databases}
                   apps={controller.apps}
                   mysqlConfig={controller.mysqlConfig}
+                  serverHost={
+                    controller.sshData?.panelAdmin?.customDomain ||
+                    controller.telemetry?.publicIp ||
+                    ''
+                  }
                   onCreateDatabase={controller.handleCreateDatabase}
                   onChangeDatabasePassword={
                     controller.handleChangeDatabasePassword

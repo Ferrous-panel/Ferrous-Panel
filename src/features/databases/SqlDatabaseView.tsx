@@ -31,6 +31,7 @@ interface SqlDatabaseViewProps {
   databases: SqlDatabase[];
   apps: ManagedApp[];
   mysqlConfig: MysqlPhpMyAdminConfig | null;
+  serverHost?: string;
   onCreateDatabase: (payload: {
     name: string;
     engine: SqlDatabase['engine'];
@@ -47,6 +48,32 @@ interface SqlDatabaseViewProps {
   ) => Promise<void>;
 }
 
+function normalizePmaPath(raw?: string | null): string {
+  const trimmed = (raw || '').trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith('/usr/') ||
+    trimmed.startsWith('/var/') ||
+    trimmed.startsWith('/etc/')
+  ) {
+    return '/phpadmin';
+  }
+  const withSlash = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return withSlash.replace(/\/+$/, '') || '/phpadmin';
+}
+
+function isLoopbackOrEmptyHost(host?: string | null): boolean {
+  const h = (host || '').trim().toLowerCase();
+  return (
+    !h ||
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '::1' ||
+    h === '0.0.0.0' ||
+    h === 'your_server_ip'
+  );
+}
+
 function generateStrongSqlPassword(): string {
   const chars =
     'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*';
@@ -61,6 +88,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   databases,
   apps,
   mysqlConfig,
+  serverHost,
   onCreateDatabase,
   onChangeDatabasePassword,
   onDeleteDatabase,
@@ -98,14 +126,18 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   const [runningQuery, setRunningQuery] = useState<boolean>(false);
   const [copiedConn, setCopiedConn] = useState<boolean>(false);
 
-  // Dynamic Server Host detection (auto-resolves VPS IP or domain)
-  const liveServerHost =
-    typeof window !== 'undefined' &&
-    window.location.hostname &&
-    window.location.hostname !== 'localhost' &&
-    window.location.hostname !== '127.0.0.1'
-      ? window.location.hostname
-      : '127.0.0.1';
+  // Dynamic Server Host detection (auto-resolves VPS IP or custom domain)
+  const browserHost =
+    typeof window !== 'undefined' ? window.location.hostname : '';
+  const liveServerHost = !isLoopbackOrEmptyHost(browserHost)
+    ? browserHost
+    : !isLoopbackOrEmptyHost(serverHost)
+      ? (serverHost || '').trim()
+      : browserHost || '127.0.0.1';
+  const liveProtocol =
+    typeof window !== 'undefined' && window.location.protocol === 'https:'
+      ? 'https:'
+      : 'http:';
 
   // Create New DB Form State (with Custom SQL Password)
   const [newDbName, setNewDbName] = useState('');
@@ -148,7 +180,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   // phpMyAdmin Config State
   const [pmaPort, setPmaPort] = useState(mysqlConfig?.pmaPort ?? 888);
   const [pmaPath, setPmaPath] = useState(
-    mysqlConfig?.pmaPath ?? '/phpadmin'
+    normalizePmaPath(mysqlConfig?.pmaPath)
   );
   const [pmaBasicAuth, setPmaBasicAuth] = useState(
     mysqlConfig?.pmaBasicAuth ?? true
@@ -160,7 +192,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
     mysqlConfig?.pmaMaxUploadMb ?? 256
   );
   const [pmaAllowedIps, setPmaAllowedIps] = useState(
-    mysqlConfig?.pmaAllowedIps ?? '0.0.0.0/0 (Protected by Panel SSO)'
+    mysqlConfig?.pmaAllowedIps ?? '0.0.0.0/0 (Protected by Panel Reverse Proxy)'
   );
   const [savingConfig, setSavingConfig] = useState(false);
   const [configSavedBanner, setConfigSavedBanner] = useState<string | null>(
@@ -172,6 +204,10 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
     null
   );
 
+  const safePmaPath = normalizePmaPath(pmaPath);
+  const pmaProxyUrl = `${liveProtocol}//${liveServerHost}${safePmaPath}/`;
+  const pmaDirectUrl = `http://${liveServerHost}:${pmaPort}${safePmaPath}/`;
+
   useEffect(() => {
     if (mysqlConfig) {
       setInnodbBufferPoolMb(mysqlConfig.innodbBufferPoolMb);
@@ -182,7 +218,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
       setBindAddress(mysqlConfig.bindAddress);
       setRawMyCnf(mysqlConfig.myCnfRaw);
       setPmaPort(mysqlConfig.pmaPort);
-      setPmaPath(mysqlConfig.pmaPath);
+      setPmaPath(normalizePmaPath(mysqlConfig.pmaPath));
       setPmaBasicAuth(mysqlConfig.pmaBasicAuth);
       setPmaSslOnly(mysqlConfig.pmaSslOnly);
       setPmaUploadMaxMb(mysqlConfig.pmaMaxUploadMb);
@@ -639,14 +675,14 @@ ${
               <div className="flex justify-between">
                 <span>phpMyAdmin Endpoint:</span>
                 <span className="text-orange-600 dark:text-orange-400">
-                  :{pmaPort}
-                  {pmaPath}
+                  {liveServerHost}
+                  {safePmaPath}/
                 </span>
               </div>
               <div className="flex justify-between">
-                <span>FastCGI Upstream:</span>
+                <span>Loopback Backend:</span>
                 <span className="text-slate-900 dark:text-slate-200">
-                  unix:/run/php/php8.3-fpm.sock
+                  127.0.0.1:{pmaPort} (Reverse Proxy)
                 </span>
               </div>
             </div>
@@ -663,26 +699,26 @@ ${
                   Giao diện Panel
                 </button>
                 <a
-                  href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                  href={pmaProxyUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="flex-1 py-1.5 px-2.5 text-center text-xs rounded-lg bg-orange-600 text-white font-semibold hover:bg-orange-500 transition-colors inline-flex items-center justify-center gap-1 cursor-pointer"
-                  title="Mở phpMyAdmin giao diện web gốc trên cổng 888"
+                  title="Mở phpMyAdmin qua Reverse Proxy trên cổng 80/443 (tương thích FerrousX, Nginx & Cloudflare)"
                 >
                   <ExternalLink className="w-3 h-3" />
-                  Mở Tab Mới (:888)
+                  Mở phpMyAdmin
                 </a>
               </div>
               <div className="flex gap-2">
                 <a
-                  href={`http://${liveServerHost}${pmaPath}`}
+                  href={pmaDirectUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="flex-1 py-1 px-2 text-center text-[11px] rounded bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors inline-flex items-center justify-center gap-1 cursor-pointer"
-                  title="Mở phpMyAdmin qua đường dẫn /phpadmin (Cổng 80/443 tương thích Cloudflare)"
+                  title="Mở trực tiếp qua cổng tùy chỉnh nếu đã mở firewall"
                 >
                   <ExternalLink className="w-2.5 h-2.5" />
-                  Mở qua /phpadmin
+                  Cổng :{pmaPort}
                 </a>
                 <button
                   type="button"
@@ -857,47 +893,39 @@ ${
                     <span>Đường dẫn truy cập phpMyAdmin 5.2.1 trực tiếp:</span>
                   </div>
                   <div className="font-mono text-[11px] text-slate-600 dark:text-slate-300 flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <span>IP Trực tiếp:</span>
+                    <span>Reverse Proxy (Khuyến nghị):</span>
                     <a
-                      href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                      href={pmaProxyUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="font-bold text-orange-600 dark:text-orange-400 underline"
                     >
-                      http://{liveServerHost}:{pmaPort}{pmaPath}
+                      {pmaProxyUrl}
                     </a>
                     <span>·</span>
-                    <span>Tên miền (Cloudflare):</span>
-                    <a
-                      href={`http://${liveServerHost}${pmaPath}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-bold text-orange-600 dark:text-orange-400 underline"
-                    >
-                      http://{liveServerHost}{pmaPath}
-                    </a>
+                    <span>Backend nội bộ: <strong className="text-slate-900 dark:text-slate-100">127.0.0.1:{pmaPort}</strong></span>
                     <span>·</span>
                     <span>User: <strong className="text-slate-900 dark:text-slate-100">root</strong></span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <a
-                    href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                    href={pmaProxyUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="px-3 py-1.5 rounded-lg bg-orange-600 text-white font-semibold text-xs hover:bg-orange-500 transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    Mở phpMyAdmin (:888)
+                    Mở phpMyAdmin ({safePmaPath}/)
                   </a>
                   <a
-                    href={`http://${liveServerHost}${pmaPath}`}
+                    href={pmaDirectUrl}
                     target="_blank"
                     rel="noreferrer"
                     className="px-3 py-1.5 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-semibold text-xs hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors inline-flex items-center gap-1.5 cursor-pointer"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    Qua /phpadmin
+                    Cổng :{pmaPort}
                   </a>
                 </div>
               </div>
@@ -908,27 +936,31 @@ ${
                 <div className="px-4 py-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2 text-xs border-b border-slate-800">
                   <div className="flex flex-wrap items-center gap-2 font-mono">
                     <span className="px-2 py-0.5 rounded bg-amber-500 text-slate-950 font-bold">
-                      phpMyAdmin 5.2.1
+                      phpMyAdmin {mysqlConfig?.pmaVersion || '5.2'}
                     </span>
                     <span className="text-slate-400">·</span>
                     <span className="inline-flex items-center gap-1 text-slate-200">
                       <Server className="w-3.5 h-3.5 text-orange-400" />
-                      127.0.0.1:3306 (MariaDB 11.4.4-LTS)
+                      {liveServerHost}:{mysqlConfig?.port || 3306} (
+                      {mysqlConfig?.mysqlVersion
+                        ? mysqlConfig.mysqlVersion.split('\n')[0].trim()
+                        : 'MariaDB'}
+                      )
                     </span>
                     <span className="text-slate-400">·</span>
                     <span className="text-emerald-400 font-semibold">
-                      {activeDb ? `DB: ${activeDb.name}` : 'Server: root@localhost (SSO Active)'}
+                      {activeDb ? `DB: ${activeDb.name}` : `Server: ${liveServerHost}`}
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
                     <a
-                      href={`http://${liveServerHost}:${pmaPort}${pmaPath}`}
+                      href={pmaProxyUrl}
                       target="_blank"
                       rel="noreferrer"
                       className="px-2 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded text-[11px] inline-flex items-center gap-1 cursor-pointer"
                     >
                       <ExternalLink className="w-3 h-3" />
-                      Mở Tab Mới (:888)
+                      Mở Tab Mới ({safePmaPath}/)
                     </a>
                     {activeDb && (
                       <button
