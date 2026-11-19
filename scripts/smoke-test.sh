@@ -149,7 +149,7 @@ for route in "${PROTECTED_ROUTES[@]}"; do
     -H "Authorization: Bearer ${FORGED_TOKEN}" \
     "${PANEL_URL}${route}" || echo "000")"
   code_cookie="$(curl -s -o /dev/null -w '%{http_code}' \
-    -H "Cookie: ferrous_session=${FORGED_TOKEN}" \
+    -H "Cookie: fp_admin_token=${FORGED_TOKEN}" \
     "${PANEL_URL}${route}" || echo "000")"
   if [ "${code_bearer}" != "401" ] || [ "${code_cookie}" != "401" ]; then
     CHECK2_OK=false

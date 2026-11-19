@@ -162,11 +162,11 @@ fn main() -> ExitCode {
                     bundle.sites.len(),
                     bundle.sni_certs.len()
                 );
-                return ExitCode::SUCCESS;
+                ExitCode::SUCCESS
             }
             Err(err) => {
                 eprintln!("ferrousx: config check failed: {err}");
-                return ExitCode::FAILURE;
+                ExitCode::FAILURE
             }
         },
         FxCommand::Token { rotate } => {
@@ -187,11 +187,11 @@ fn main() -> ExitCode {
                     if rotate {
                         println!("Rotated 256-bit admin IPC token cleanly (live-reloaded per request).");
                     }
-                    return ExitCode::SUCCESS;
+                    ExitCode::SUCCESS
                 }
                 Err(err) => {
                     eprintln!("ferrousx-ctl: token error: {err}");
-                    return ExitCode::FAILURE;
+                    ExitCode::FAILURE
                 }
             }
         }

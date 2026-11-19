@@ -400,6 +400,9 @@ if [ "$PREBUILT_BINARY_ONLY" = true ]; then
   download_release_binary "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
   if [ "$WEB_ENGINE" = "ferrousx" ]; then
     download_release_binary "ferrousx-bin-linux-${ARCH}" "${BIN_FERROUSX}"
+    if download_release_binary "ferrousx-ctl-linux-${ARCH}" "${BIN_FERROUSX_CTL}" 2>/dev/null; then
+      ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
+    fi
   fi
 else
   # Determine source workspace directory (current directory if inside repo, otherwise clone to /usr/local/src/ferrous-panel)
@@ -713,6 +716,9 @@ ACTIVE_SSH_PORT="${ACTIVE_SSH_PORT:-22}"
 ufw allow "${ACTIVE_SSH_PORT}/tcp" comment 'SSH' >/dev/null 2>&1 || true
 ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
 ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
+if [ "$WEB_ENGINE" = "ferrousx" ]; then
+  ufw allow 443/udp comment 'HTTP3-QUIC' >/dev/null 2>&1 || true
+fi
 if [ "${PANEL_BIND}" != "127.0.0.1" ] && [ "${PANEL_BIND}" != "::1" ]; then
   ufw allow "${PANEL_PORT}/tcp" comment 'FerrousPanel' >/dev/null 2>&1 || true
 fi

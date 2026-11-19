@@ -27,11 +27,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: "npm"
 
       - name: Install frontend dependencies & build dist/
         run: |
-          npm ci --legacy-peer-deps
+          if [ -f package-lock.json ]; then
+            npm ci --legacy-peer-deps
+          else
+            npm install --no-audit --no-fund --legacy-peer-deps
+          fi
           npm run build
           npx tsc --noEmit
 
@@ -75,10 +78,12 @@ jobs:
           tar -czf release-artifacts/ferrous-dist.tar.gz -C dist .
           cp target/x86_64-unknown-linux-gnu/release/ferrous-panel release-artifacts/ferrous-panel-linux-x86_64
           cp target/x86_64-unknown-linux-gnu/release/ferrousx-bin release-artifacts/ferrousx-bin-linux-x86_64
+          cp target/x86_64-unknown-linux-gnu/release/ferrousx-ctl release-artifacts/ferrousx-ctl-linux-x86_64
           cp target/aarch64-unknown-linux-gnu/release/ferrous-panel release-artifacts/ferrous-panel-linux-aarch64
           cp target/aarch64-unknown-linux-gnu/release/ferrousx-bin release-artifacts/ferrousx-bin-linux-aarch64
+          cp target/aarch64-unknown-linux-gnu/release/ferrousx-ctl release-artifacts/ferrousx-ctl-linux-aarch64
           cp install.sh update.sh uninstall.sh release-artifacts/
-          (cd release-artifacts && sha256sum ferrous-dist.tar.gz ferrous-panel-linux-* ferrousx-bin-linux-* > SHA256SUMS.txt)
+          (cd release-artifacts && sha256sum ferrous-dist.tar.gz ferrous-panel-linux-* ferrousx-bin-linux-* ferrousx-ctl-linux-* > SHA256SUMS.txt)
 
       - name: Publish GitHub Release (powers 1-command install.sh)
         if: github.event_name == 'push'
@@ -91,8 +96,10 @@ jobs:
             release-artifacts/ferrous-dist.tar.gz
             release-artifacts/ferrous-panel-linux-x86_64
             release-artifacts/ferrousx-bin-linux-x86_64
+            release-artifacts/ferrousx-ctl-linux-x86_64
             release-artifacts/ferrous-panel-linux-aarch64
             release-artifacts/ferrousx-bin-linux-aarch64
+            release-artifacts/ferrousx-ctl-linux-aarch64
             release-artifacts/SHA256SUMS.txt
             release-artifacts/install.sh
             release-artifacts/update.sh

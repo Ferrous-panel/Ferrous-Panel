@@ -45,7 +45,7 @@ rm -f /etc/systemd/system/ferrous-certbot-renew.service
 rm -f /etc/systemd/system/ferrous-certbot-renew.timer
 systemctl daemon-reload
 
-rm -f /usr/local/bin/ferrous-panel /usr/local/bin/ferrousx-bin /usr/local/bin/fp /usr/local/bin/ferrous
+rm -f /usr/local/bin/ferrous-panel /usr/local/bin/ferrousx-bin /usr/local/bin/ferrousx-ctl /usr/local/bin/fp /usr/local/bin/ferrous /usr/local/bin/fx
 rm -f /etc/profile.d/ferrous-panel.sh
 
 echo -e "${GREEN}FerrousPanel binaries and systemd services removed.${NC}"

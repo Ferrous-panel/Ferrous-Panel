@@ -39,7 +39,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
   onToggleLang,
   onSelectLang
 }) => {
-  const panelPort = panelAdminConfig?.panelPort || 3000;
+  const browserPort =
+    typeof window !== 'undefined' && window.location.port
+      ? Number(window.location.port)
+      : typeof window !== 'undefined' && window.location.protocol === 'https:'
+        ? 443
+        : 8443;
+  const panelPort = panelAdminConfig?.panelPort || browserPort;
   const isEn = lang === 'en';
 
   const handleChooseLang = (target: PanelLanguage) => {
@@ -73,19 +79,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
         })
       });
 
-      const data = await res.json();
+      const data = await res.json().catch(() => ({} as Record<string, unknown>));
 
       if (!res.ok || !data.success) {
+        const serverMsg =
+          typeof data.error === 'string' && data.error.trim().length > 0
+            ? data.error
+            : null;
         setErrorMessage(
           isEn
-            ? 'Invalid username or password. Please verify your credentials.'
-            : data.error ||
+            ? serverMsg ||
+                'Invalid username or password. Please verify your credentials.'
+            : serverMsg ||
                 'Tên tài khoản hoặc mật khẩu không chính xác. Vui lòng kiểm tra lại.'
         );
         return;
       }
 
-      onLoginSuccess(data.token, data.user);
+      onLoginSuccess(data.token as string, data.user as { username: string });
     } catch {
       setErrorMessage(
         isEn
