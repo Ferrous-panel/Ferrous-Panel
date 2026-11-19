@@ -184,7 +184,13 @@ async fn run_systemctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn cli_flag_provided(flag: &str) -> bool {
+    let prefix = format!("{flag}=");
+    std::env::args().skip(1).any(|arg| arg == flag || arg.starts_with(&prefix))
+}
+
 /// Populates `Config` fields from a systemd `EnvironmentFile` (`panel.env` or `.env`) when present.
+/// Explicit CLI flags always take precedence over values in the environment file.
 pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
     let Ok(raw) = std::fs::read_to_string(env_path) else {
         return;
@@ -200,29 +206,46 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
         let key = k.trim().trim_start_matches("export ").trim();
         let val = v.trim().trim_matches('"').trim_matches('\'').trim();
         match key {
-            "FERROUS_BIND" if !val.is_empty() => cfg.bind = val.to_string(),
-            "FERROUS_PORT" => {
+            "FERROUS_BIND" if !val.is_empty() && !cli_flag_provided("--bind") => {
+                cfg.bind = val.to_string();
+            }
+            "FERROUS_PORT" if !cli_flag_provided("--port") => {
                 if let Ok(p) = val.parse::<u16>() {
                     cfg.port = p;
                 }
             }
-            "FERROUS_DATA_DIR" if !val.is_empty() => cfg.data_dir = PathBuf::from(val),
-            "FERROUS_WWWROOT" if !val.is_empty() => cfg.wwwroot = PathBuf::from(val),
-            "FERROUS_BACKUPS_DIR" if !val.is_empty() => cfg.backups_dir = PathBuf::from(val),
-            "FERROUS_SYSTEMD_DIR" if !val.is_empty() => cfg.systemd_unit_dir = PathBuf::from(val),
-            "FERROUS_ADMIN_USER" if !val.is_empty() => cfg.admin_username = val.to_string(),
-            "FERROUS_SECURITY_ENTRANCE" if !val.is_empty() => {
+            "FERROUS_DATA_DIR" if !val.is_empty() && !cli_flag_provided("--data-dir") => {
+                cfg.data_dir = PathBuf::from(val);
+            }
+            "FERROUS_WWWROOT" if !val.is_empty() && !cli_flag_provided("--wwwroot") => {
+                cfg.wwwroot = PathBuf::from(val);
+            }
+            "FERROUS_BACKUPS_DIR" if !val.is_empty() && !cli_flag_provided("--backups-dir") => {
+                cfg.backups_dir = PathBuf::from(val);
+            }
+            "FERROUS_SYSTEMD_DIR"
+                if !val.is_empty() && !cli_flag_provided("--systemd-unit-dir") =>
+            {
+                cfg.systemd_unit_dir = PathBuf::from(val);
+            }
+            "FERROUS_ADMIN_USER" if !val.is_empty() && !cli_flag_provided("--admin-username") => {
+                cfg.admin_username = val.to_string();
+            }
+            "FERROUS_SECURITY_ENTRANCE"
+                if !val.is_empty() && !cli_flag_provided("--security-entrance") =>
+            {
                 cfg.security_entrance = val.to_string();
             }
-            "FERROUS_CUSTOM_DOMAIN" => {
+            "FERROUS_CUSTOM_DOMAIN" if !cli_flag_provided("--custom-domain") => {
                 cfg.custom_domain = if val.is_empty() {
                     None
                 } else {
                     Some(val.to_string())
                 };
             }
-            "FERROUS_SECURE_COOKIE" => {
-                cfg.secure_cookie = matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+            "FERROUS_SECURE_COOKIE" if !cli_flag_provided("--secure-cookie") => {
+                cfg.secure_cookie =
+                    matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
             }
             _ => {}
         }
@@ -230,7 +253,7 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
 }
 
 /// Automatically loads `/etc/ferrous-panel/panel.env` (or `$FERROUS_ENV_FILE`) and local `.env`
-/// for any `FERROUS_*` keys not already set in the process environment.
+/// for any `FERROUS_*` keys not already set via explicit CLI flags or the process environment.
 pub fn apply_default_env_files(cfg: &mut Config) {
     let primary = std::env::var_os("FERROUS_ENV_FILE")
         .map(PathBuf::from)
@@ -253,30 +276,48 @@ pub fn apply_default_env_files(cfg: &mut Config) {
             }
             let val = v.trim().trim_matches('"').trim_matches('\'').trim();
             match key {
-                "FERROUS_BIND" if !val.is_empty() => cfg.bind = val.to_string(),
-                "FERROUS_PORT" => {
+                "FERROUS_BIND" if !val.is_empty() && !cli_flag_provided("--bind") => {
+                    cfg.bind = val.to_string();
+                }
+                "FERROUS_PORT" if !cli_flag_provided("--port") => {
                     if let Ok(p) = val.parse::<u16>() {
                         cfg.port = p;
                     }
                 }
-                "FERROUS_DATA_DIR" if !val.is_empty() => cfg.data_dir = PathBuf::from(val),
-                "FERROUS_WWWROOT" if !val.is_empty() => cfg.wwwroot = PathBuf::from(val),
-                "FERROUS_BACKUPS_DIR" if !val.is_empty() => cfg.backups_dir = PathBuf::from(val),
-                "FERROUS_SYSTEMD_DIR" if !val.is_empty() => {
+                "FERROUS_DATA_DIR" if !val.is_empty() && !cli_flag_provided("--data-dir") => {
+                    cfg.data_dir = PathBuf::from(val);
+                }
+                "FERROUS_WWWROOT" if !val.is_empty() && !cli_flag_provided("--wwwroot") => {
+                    cfg.wwwroot = PathBuf::from(val);
+                }
+                "FERROUS_BACKUPS_DIR"
+                    if !val.is_empty() && !cli_flag_provided("--backups-dir") =>
+                {
+                    cfg.backups_dir = PathBuf::from(val);
+                }
+                "FERROUS_SYSTEMD_DIR"
+                    if !val.is_empty() && !cli_flag_provided("--systemd-unit-dir") =>
+                {
                     cfg.systemd_unit_dir = PathBuf::from(val);
                 }
-                "FERROUS_ADMIN_USER" if !val.is_empty() => cfg.admin_username = val.to_string(),
-                "FERROUS_SECURITY_ENTRANCE" if !val.is_empty() => {
+                "FERROUS_ADMIN_USER"
+                    if !val.is_empty() && !cli_flag_provided("--admin-username") =>
+                {
+                    cfg.admin_username = val.to_string();
+                }
+                "FERROUS_SECURITY_ENTRANCE"
+                    if !val.is_empty() && !cli_flag_provided("--security-entrance") =>
+                {
                     cfg.security_entrance = val.to_string();
                 }
-                "FERROUS_CUSTOM_DOMAIN" => {
+                "FERROUS_CUSTOM_DOMAIN" if !cli_flag_provided("--custom-domain") => {
                     cfg.custom_domain = if val.is_empty() {
                         None
                     } else {
                         Some(val.to_string())
                     };
                 }
-                "FERROUS_SECURE_COOKIE" => {
+                "FERROUS_SECURE_COOKIE" if !cli_flag_provided("--secure-cookie") => {
                     cfg.secure_cookie =
                         matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
                 }
@@ -586,6 +627,9 @@ pub async fn run_fp_command(
                 update_admin_username(&creds_path, &config.admin_username, &new_user)
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             let _ = upsert_env_var(env_file, "FERROUS_ADMIN_USER", &updated.username);
+            if let Ok(auth_store) = crate::auth::store::AuthStore::open(&config.db_path()) {
+                let _ = auth_store.revoke_all_sessions();
+            }
             if AllowedBinary::Systemctl.is_available() {
                 let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
             }

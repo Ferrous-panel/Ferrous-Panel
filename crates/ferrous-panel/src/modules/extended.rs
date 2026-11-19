@@ -28,7 +28,7 @@ use crate::webserver::{
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(15);
@@ -2354,6 +2354,20 @@ pub struct PanelAdminPatch {
     pub allowed_admin_ips: Option<String>,
 }
 
+fn resolve_panel_env_path(config: &Config) -> PathBuf {
+    if let Ok(explicit) = std::env::var("FERROUS_ENV_FILE") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    if config.data_dir == Path::new("/var/lib/ferrous-panel") {
+        PathBuf::from("/etc/ferrous-panel/panel.env")
+    } else {
+        config.data_dir.join("panel.env")
+    }
+}
+
 pub fn update_panel_admin(
     store: &ModuleStore,
     config: &Config,
@@ -2361,12 +2375,15 @@ pub fn update_panel_admin(
     patch: PanelAdminPatch,
 ) -> Result<PanelAdminAccount, PanelError> {
     let mut admin = load_panel_admin(store, config, auth_store)?;
+    let env_file = resolve_panel_env_path(config);
     if let Some(ref user) = patch.admin_username {
         let u = user.trim();
         if !u.is_empty() {
             let updated =
                 update_admin_username(&config.credentials_path(), &config.admin_username, u)?;
-            admin.admin_username = updated.username;
+            admin.admin_username = updated.username.clone();
+            let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username);
+            let _ = auth_store.revoke_all_sessions();
         }
     }
     if let Some(ref pw) = patch.admin_password {
@@ -2379,19 +2396,26 @@ pub fn update_panel_admin(
     if let Some(port) = patch.panel_port {
         if port > 0 {
             admin.panel_port = port;
+            let _ = upsert_env_var(&env_file, "FERROUS_PORT", &port.to_string());
         }
     }
     if let Some(ent) = patch.security_entrance {
-        if ent.starts_with('/') {
-            admin.security_entrance = ent;
+        let trimmed = ent.trim();
+        if trimmed.starts_with('/') {
+            admin.security_entrance = trimmed.to_string();
+            let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", trimmed);
         }
     }
     if let Some(dom) = patch.custom_domain {
-        admin.custom_domain = if dom.trim().is_empty() {
-            None
+        let trimmed = dom.trim();
+        if trimmed.is_empty() {
+            admin.custom_domain = None;
+            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
         } else {
-            Some(dom.trim().to_string())
-        };
+            let valid = Domain::parse(trimmed)?;
+            admin.custom_domain = Some(valid.as_str().to_string());
+            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
+        }
     }
     if let Some(ssl) = patch.ssl_enabled {
         admin.ssl_enabled = Some(ssl);
@@ -2415,7 +2439,7 @@ pub fn run_panel_cli_action(
     value: Option<&str>,
 ) -> Result<(String, PanelAdminAccount), PanelError> {
     let mut admin = load_panel_admin(store, config, auth_store)?;
-    let env_file = config.data_dir.join("panel.env");
+    let env_file = resolve_panel_env_path(config);
     let output = match option {
         5 => {
             if let Some(pw) = value.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2423,7 +2447,7 @@ pub fn run_panel_cli_action(
                 let _ = auth_store.revoke_all_sessions();
                 "Updated Admin password hash (Argon2id 0600) and revoked old sessions.".to_string()
             } else {
-                "Password prompt requires a non-empty value (>= 10 chars).".to_string()
+                "Password prompt requires a non-empty value (8..=256 chars).".to_string()
             }
         }
         6 => {
@@ -2432,6 +2456,7 @@ pub fn run_panel_cli_action(
                     update_admin_username(&config.credentials_path(), &config.admin_username, user)?;
                 admin.admin_username = updated.username.clone();
                 let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username);
+                let _ = auth_store.revoke_all_sessions();
                 format!("Updated Admin username to '{}'.", updated.username)
             } else {
                 "Username update requires a valid username.".to_string()
@@ -2461,9 +2486,41 @@ pub fn run_panel_cli_action(
             let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", "/");
             "Reset security entrance back to '/'.".to_string()
         }
+        10 => {
+            let raw = value.unwrap_or("").trim();
+            if raw.is_empty() || raw.eq_ignore_ascii_case("clear") || raw.eq_ignore_ascii_case("none") {
+                admin.custom_domain = None;
+                let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
+                "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
+            } else {
+                let valid = Domain::parse(raw)?;
+                admin.custom_domain = Some(valid.as_str().to_string());
+                let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
+                format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env.", valid.as_str())
+            }
+        }
+        12 => {
+            admin.custom_domain = None;
+            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
+            "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
+        }
+        13 => {
+            let raw = value.unwrap_or("").trim();
+            if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+                let ip_str = ip.to_string();
+                let _ = upsert_env_var(&env_file, "FERROUS_BIND", &ip_str);
+                format!("Updated FERROUS_BIND={ip_str} in panel.env.")
+            } else {
+                "Invalid bind IP address (use 0.0.0.0 or 127.0.0.1).".to_string()
+            }
+        }
         14 => format!(
-            "FerrousPanel Status: bind={}:{} admin={} entrance={}",
-            config.bind, admin.panel_port, admin.admin_username, admin.security_entrance
+            "FerrousPanel Status: bind={}:{} admin={} entrance={} domain={}",
+            config.bind,
+            admin.panel_port,
+            admin.admin_username,
+            admin.security_entrance,
+            admin.custom_domain.as_deref().unwrap_or("(none)")
         ),
         other => format!("Executed fp CLI action ({other}) successfully."),
     };
