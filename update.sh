@@ -705,6 +705,14 @@ if [ "$UPDATE_PANEL" = true ]; then
     install -m 0755 "${TMP_DIR}/ferrous-panel" "${BIN_PANEL}"
   fi
 
+  if [ -f /etc/ferrous-panel/panel.env ] && [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
+    if ! grep -q '^FERROUS_PUBLIC_IP=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      echo "FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}" >> /etc/ferrous-panel/panel.env
+    else
+      sed -i "s|^FERROUS_PUBLIC_IP=.*|FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}|" /etc/ferrous-panel/panel.env
+    fi
+  fi
+
   ln -sf "${BIN_PANEL}" /usr/local/bin/fp
   ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
   systemctl restart ferrous-panel.service 2>/dev/null || true

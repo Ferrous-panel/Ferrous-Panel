@@ -43,6 +43,13 @@ pub enum AllowedBinary {
     Mysqldump,
     PgDump,
     Journalctl,
+    SshKeygen,
+    Sshd,
+    Who,
+    Free,
+    Ip,
+    Phpenmod,
+    Phpdismod,
 }
 
 impl AllowedBinary {
@@ -82,6 +89,13 @@ impl AllowedBinary {
             Self::Mysqldump => "mysqldump",
             Self::PgDump => "pg_dump",
             Self::Journalctl => "journalctl",
+            Self::SshKeygen => "ssh-keygen",
+            Self::Sshd => "sshd",
+            Self::Who => "who",
+            Self::Free => "free",
+            Self::Ip => "ip",
+            Self::Phpenmod => "phpenmod",
+            Self::Phpdismod => "phpdismod",
         }
     }
 
@@ -97,7 +111,7 @@ impl AllowedBinary {
             "systemctl" => Some(Self::Systemctl),
             "nginx" => Some(Self::Nginx),
             "ferrousx-bin" | "ferrousx" => Some(Self::Ferrousx),
-            "ferrousx-ctl" => Some(Self::FerrousxCtl),
+            "ferrousx-ctl" | "fx" => Some(Self::FerrousxCtl),
             "php-fpm8.3" => Some(Self::PhpFpm83),
             "php8.3" | "php" => Some(Self::Php83),
             "ufw" => Some(Self::Ufw),
@@ -127,6 +141,13 @@ impl AllowedBinary {
             "mysqldump" | "mariadb-dump" => Some(Self::Mysqldump),
             "pg_dump" => Some(Self::PgDump),
             "journalctl" => Some(Self::Journalctl),
+            "ssh-keygen" => Some(Self::SshKeygen),
+            "sshd" => Some(Self::Sshd),
+            "who" => Some(Self::Who),
+            "free" => Some(Self::Free),
+            "ip" => Some(Self::Ip),
+            "phpenmod" => Some(Self::Phpenmod),
+            "phpdismod" => Some(Self::Phpdismod),
             _ => None,
         }
     }
@@ -137,7 +158,7 @@ impl AllowedBinary {
             Self::Systemctl => &["/usr/bin/systemctl", "/bin/systemctl"],
             Self::Nginx => &["/usr/sbin/nginx", "/usr/bin/nginx"],
             Self::Ferrousx => &["/usr/local/bin/ferrousx-bin", "/usr/local/bin/ferrousx"],
-            Self::FerrousxCtl => &["/usr/local/bin/ferrousx-ctl"],
+            Self::FerrousxCtl => &["/usr/local/bin/ferrousx-ctl", "/usr/local/bin/fx"],
             Self::PhpFpm83 => &["/usr/sbin/php-fpm8.3"],
             Self::Php83 => &["/usr/bin/php8.3", "/usr/bin/php"],
             Self::Ufw => &["/usr/sbin/ufw", "/sbin/ufw"],
@@ -167,6 +188,13 @@ impl AllowedBinary {
             Self::Mysqldump => &["/usr/bin/mysqldump", "/usr/bin/mariadb-dump"],
             Self::PgDump => &["/usr/bin/pg_dump"],
             Self::Journalctl => &["/usr/bin/journalctl", "/bin/journalctl"],
+            Self::SshKeygen => &["/usr/bin/ssh-keygen"],
+            Self::Sshd => &["/usr/sbin/sshd", "/usr/bin/sshd"],
+            Self::Who => &["/usr/bin/who", "/bin/who"],
+            Self::Free => &["/usr/bin/free", "/bin/free"],
+            Self::Ip => &["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"],
+            Self::Phpenmod => &["/usr/sbin/phpenmod"],
+            Self::Phpdismod => &["/usr/sbin/phpdismod"],
         }
     }
 

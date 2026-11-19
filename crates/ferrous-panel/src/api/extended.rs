@@ -234,7 +234,12 @@ pub async fn get_php_versions(state: web::Data<AppState>) -> Result<HttpResponse
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let list = ext::list_php_versions(&state.modules)?;
+    let list = ext::list_php_versions(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(list))
 }
 
@@ -255,6 +260,7 @@ pub async fn post_php_action(
         .unwrap_or_else(|| "restart".to_string());
     let list = ext::php_action(
         &state.modules,
+        &state.config,
         state.webserver.executor().as_ref(),
         &version,
         &action,
@@ -286,6 +292,7 @@ pub async fn put_php_settings(
     let list = ext::update_php_settings(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         &version,
         ext::PhpSettingsPatch {
             max_children: body.max_children,
@@ -301,7 +308,8 @@ pub async fn put_php_settings(
             raw_php_ini: body.raw_php_ini,
             raw_fpm_pool_conf: body.raw_fpm_pool_conf,
         },
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -328,7 +336,14 @@ pub async fn post_php_extension_toggle(
         .map(|p| p.into_inner().ext_name)
         .filter(|e| !e.trim().is_empty())
         .unwrap_or_else(|| "opcache".to_string());
-    let list = ext::toggle_php_extension(&state.modules, &version, &ext_name)?;
+    let list = ext::toggle_php_extension(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &version,
+        &ext_name,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -350,13 +365,23 @@ pub async fn post_switch_site_php(
     let _conn_guard = state.telemetry.connection_guard();
 
     let Some(body) = payload.map(web::Json::into_inner) else {
-        let php_versions = ext::list_php_versions(&state.modules)?;
+        let php_versions = ext::list_php_versions(
+            &state.modules,
+            &state.config,
+            state.webserver.executor().as_ref(),
+        )
+        .await?;
         return Ok(HttpResponse::Ok().json(serde_json::json!({
             "phpVersions": php_versions,
         })));
     };
     if body.app_id.trim().is_empty() {
-        let php_versions = ext::list_php_versions(&state.modules)?;
+        let php_versions = ext::list_php_versions(
+            &state.modules,
+            &state.config,
+            state.webserver.executor().as_ref(),
+        )
+        .await?;
         return Ok(HttpResponse::Ok().json(serde_json::json!({
             "phpVersions": php_versions,
         })));
@@ -407,7 +432,12 @@ pub async fn get_software_packages(state: web::Data<AppState>) -> Result<HttpRes
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let list = ext::list_software_packages(&state.modules, state.webserver.executor().as_ref())?;
+    let list = ext::list_software_packages(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(list))
 }
 
@@ -428,6 +458,7 @@ pub async fn post_software_action(
         .unwrap_or_else(|| "restart".to_string());
     let list = ext::software_package_action(
         &state.modules,
+        &state.config,
         state.webserver.executor().as_ref(),
         &id,
         &action,
@@ -464,7 +495,8 @@ pub async fn put_software_config(
         state.webserver.executor().as_ref(),
         &id,
         &content,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -766,7 +798,7 @@ pub async fn get_optimizer(state: web::Data<AppState>) -> Result<HttpResponse, P
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = ext::load_optimizer(&state.modules)?;
+    let data = ext::load_optimizer(&state.modules, &state.config)?;
     Ok(HttpResponse::Ok().json(data))
 }
 
@@ -783,7 +815,13 @@ pub async fn post_optimizer_apply_profile(
         .map(|p| p.into_inner().profile_id)
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| "rust-actix-max-throughput".to_string());
-    let data = ext::apply_optimizer_profile(&state.modules, &state.config, &profile_id)?;
+    let data = ext::apply_optimizer_profile(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &profile_id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -805,7 +843,13 @@ pub async fn put_optimizer_sysctl(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::toggle_optimizer_sysctl(&state.modules, &state.config, &id)?;
+    let data = ext::toggle_optimizer_sysctl(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -825,7 +869,7 @@ pub async fn post_optimizer_reclaim_memory(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let (freed_mb, message, optimizer) = ext::reclaim_memory(&state.modules)?;
+    let (freed_mb, message, optimizer) = ext::reclaim_memory(&state.modules, &state.config)?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -849,7 +893,12 @@ pub async fn post_optimizer_watchdog_heal(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = ext::watchdog_heal(&state.modules)?;
+    let data = ext::watchdog_heal(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -873,6 +922,7 @@ pub async fn put_optimizer_anti_crash(
     let body = payload.map(web::Json::into_inner).unwrap_or_default();
     let data = ext::update_anti_crash(
         &state.modules,
+        &state.config,
         ext::AntiCrashPatch {
             load_shedding_enabled: body.load_shedding_enabled,
             cpu_shed_threshold_percent: body.cpu_shed_threshold_percent,
@@ -908,7 +958,13 @@ pub async fn post_optimizer_emergency_mitigate(
         .map(|p| p.into_inner().action)
         .filter(|a| !a.trim().is_empty())
         .unwrap_or_else(|| "purge_syn_backlog".to_string());
-    let (message, optimizer) = ext::emergency_mitigate(&state.modules, &action)?;
+    let (message, optimizer) = ext::emergency_mitigate(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &action,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1020,7 +1076,13 @@ pub async fn get_ssh_panel(state: web::Data<AppState>) -> Result<HttpResponse, P
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = ext::load_ssh_panel(&state.modules, &state.config, &state.auth_store)?;
+    let data = ext::load_ssh_panel(
+        &state.modules,
+        &state.config,
+        &state.auth_store,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(data))
 }
 
@@ -1038,6 +1100,7 @@ pub async fn put_ssh_config(
         &state.modules,
         &state.config,
         &state.auth_store,
+        state.webserver.executor().as_ref(),
         ext::SshConfigPatch {
             port: body.port,
             listen_address: body.listen_address,
@@ -1052,7 +1115,8 @@ pub async fn put_ssh_config(
             allow_users: body.allow_users,
             kex_algorithms: body.kex_algorithms,
         },
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1084,10 +1148,12 @@ pub async fn post_ssh_key(
         &state.modules,
         &state.config,
         &state.auth_store,
+        state.webserver.executor().as_ref(),
         &body.label,
         &pubkey,
         &body.client_hint,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1113,9 +1179,11 @@ pub async fn post_ssh_key_generate(
         &state.modules,
         &state.config,
         &state.auth_store,
+        state.webserver.executor().as_ref(),
         &body.label,
         &body.client_hint,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1140,7 +1208,14 @@ pub async fn delete_ssh_key(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::delete_ssh_key(&state.modules, &state.config, &state.auth_store, &id)?;
+    let data = ext::delete_ssh_key(
+        &state.modules,
+        &state.config,
+        &state.auth_store,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state
@@ -1159,7 +1234,14 @@ pub async fn delete_ssh_session(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::terminate_ssh_session(&state.modules, &state.config, &state.auth_store, &id)?;
+    let data = ext::terminate_ssh_session(
+        &state.modules,
+        &state.config,
+        &state.auth_store,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1181,7 +1263,13 @@ pub async fn post_ssh_exec(
     let _conn_guard = state.telemetry.connection_guard();
 
     let body = payload.map(web::Json::into_inner).unwrap_or_default();
-    let out = ext::exec_web_ssh_command(&state.config, &body.command, &body.cwd);
+    let out = ext::exec_web_ssh_command(
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &body.command,
+        &body.cwd,
+    )
+    .await;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1216,6 +1304,7 @@ pub async fn put_panel_admin(
         &state.modules,
         &state.config,
         &state.auth_store,
+        state.webserver.executor().as_ref(),
         ext::PanelAdminPatch {
             admin_username: body.admin_username,
             admin_password: body.admin_password,
@@ -1226,7 +1315,8 @@ pub async fn put_panel_admin(
             two_factor_enabled: body.two_factor_enabled,
             allowed_admin_ips: body.allowed_admin_ips,
         },
-    )?;
+    )
+    .await?;
     if let Ok((fresh_creds, _)) = crate::auth::password::load_or_init_credentials(
         &state.config.credentials_path(),
         &state.config.admin_username,
@@ -1261,9 +1351,11 @@ pub async fn post_panel_cli_action(
         &state.modules,
         &state.config,
         &state.auth_store,
+        &state.webserver,
         option,
         body.value.as_deref(),
-    )?;
+    )
+    .await?;
     if matches!(option, 5 | 6) {
         if let Ok((fresh_creds, _)) = crate::auth::password::load_or_init_credentials(
             &state.config.credentials_path(),

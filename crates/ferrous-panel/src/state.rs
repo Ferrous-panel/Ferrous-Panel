@@ -159,7 +159,8 @@ impl TelemetryCollector {
 
         let mut rx_bytes: u64 = 0;
         let mut tx_bytes: u64 = 0;
-        let mut detected_ip: Option<String> = None;
+        let mut public_v4: Option<String> = None;
+        let mut fallback_v4: Option<String> = None;
 
         for (iface, data) in &guard.networks {
             if iface == "lo" {
@@ -167,12 +168,22 @@ impl TelemetryCollector {
             }
             rx_bytes = rx_bytes.saturating_add(data.received());
             tx_bytes = tx_bytes.saturating_add(data.transmitted());
-            if detected_ip.is_none() {
+            let is_virtual = iface.starts_with("docker")
+                || iface.starts_with("br-")
+                || iface.starts_with("veth")
+                || iface.starts_with("cni")
+                || iface.starts_with("virbr")
+                || iface.starts_with("wg")
+                || iface.starts_with("tailscale");
+            if !is_virtual {
                 for net in data.ip_networks() {
                     if let IpAddr::V4(v4) = net.addr {
-                        if !v4.is_loopback() && !v4.is_unspecified() {
-                            detected_ip = Some(v4.to_string());
-                            break;
+                        if !v4.is_loopback() && !v4.is_unspecified() && !v4.is_link_local() {
+                            if !v4.is_private() && public_v4.is_none() {
+                                public_v4 = Some(v4.to_string());
+                            } else if fallback_v4.is_none() {
+                                fallback_v4 = Some(v4.to_string());
+                            }
                         }
                     }
                 }
@@ -196,7 +207,28 @@ impl TelemetryCollector {
             delta_reqs
         };
 
-        let public_ip = detected_ip.unwrap_or_else(|| config.bind.clone());
+        let env_public_ip = ["FERROUS_PUBLIC_IP", "FERROUSX_SERVER_IP"]
+            .into_iter()
+            .find_map(|k| std::env::var(k).ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty() && v != "127.0.0.1" && v != "0.0.0.0" && v != "localhost")
+            .or_else(|| {
+                std::fs::read_to_string("/etc/ferrousx/ferrousx.env")
+                    .ok()
+                    .and_then(|raw| {
+                        raw.lines().find_map(|line| {
+                            line.trim()
+                                .strip_prefix("FERROUSX_SERVER_IP=")
+                                .map(|v| v.trim().trim_matches('"').to_string())
+                                .filter(|v| !v.is_empty() && v != "127.0.0.1" && v != "0.0.0.0")
+                        })
+                    })
+            });
+
+        let public_ip = env_public_ip
+            .or(public_v4)
+            .or(fallback_v4)
+            .unwrap_or_else(|| config.bind.clone());
         let nginx_version = detect_nginx_presence();
 
         Ok(TelemetrySnapshot {

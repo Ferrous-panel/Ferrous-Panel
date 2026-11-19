@@ -22,6 +22,7 @@ import {
   X
 } from 'lucide-react';
 import { ManagedApp, WebFileNode } from '../types';
+import { authenticatedFetch } from '../../services/actixGateway';
 
 interface FileManagerViewProps {
   apps: ManagedApp[];
@@ -153,7 +154,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   };
 
   const fetchFilesForApp = useCallback(async (appId: string) => {
-    const res = await fetch(`/api/files/${appId}`);
+    const res = await authenticatedFetch(`/api/files/${appId}`);
     if (res.ok) {
       const data: WebFileNode[] = await res.json();
       setFiles(data);
@@ -193,7 +194,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
     if (!activeApp || !activeFile) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/files/${activeApp.id}/${activeFile.id}`, {
+      const res = await authenticatedFetch(`/api/files/${activeApp.id}/${activeFile.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -215,7 +216,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   const handleCreateItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeApp || !createName.trim()) return;
-    const res = await fetch(`/api/files/${activeApp.id}`, {
+    const res = await authenticatedFetch(`/api/files/${activeApp.id}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -242,7 +243,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
 
   const handleDeleteNode = async (nodeId: string) => {
     if (!activeApp) return;
-    const res = await fetch(`/api/files/${activeApp.id}/${nodeId}`, {
+    const res = await authenticatedFetch(`/api/files/${activeApp.id}/${nodeId}`, {
       method: 'DELETE'
     });
     if (res.ok) {
@@ -272,7 +273,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
         if (lowerName.endsWith('.zip')) {
           const arrayBuf = await fileObj.arrayBuffer();
           const parsedEntries = await parseZipArrayBuffer(arrayBuf);
-          const res = await fetch(`/api/files/${activeApp.id}/upload-zip`, {
+          const res = await authenticatedFetch(`/api/files/${activeApp.id}/upload-zip`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -295,7 +296,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
         } else {
           // Regular source/text file upload
           const textContent = await fileObj.text();
-          const res = await fetch(`/api/files/${activeApp.id}`, {
+          const res = await authenticatedFetch(`/api/files/${activeApp.id}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -325,7 +326,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   // Extract an existing .zip file in the directory tree
   const handleExtractArchiveNode = async (node: WebFileNode) => {
     if (!activeApp) return;
-    const res = await fetch(
+    const res = await authenticatedFetch(
       `/api/files/${activeApp.id}/${node.id}/extract`,
       {
         method: 'POST',
@@ -346,7 +347,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   const handleCompressCurrentDir = async () => {
     if (!activeApp) return;
     const defaultArchiveName = `${activeApp.domain.split('.')[0]}_${currentDir === '/' ? 'wwwroot' : currentDir.replace(/\//g, '_')}_${new Date().toISOString().slice(0, 10)}.zip`;
-    const res = await fetch(`/api/files/${activeApp.id}/compress`, {
+    const res = await authenticatedFetch(`/api/files/${activeApp.id}/compress`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -369,7 +370,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
     if (!activeApp || !remoteUrl.trim()) return;
     setDownloadingRemote(true);
     try {
-      const res = await fetch(`/api/files/${activeApp.id}/remote-download`, {
+      const res = await authenticatedFetch(`/api/files/${activeApp.id}/remote-download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -395,7 +396,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   const handleConfirmRename = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeApp || !renamingNode || !renameValue.trim()) return;
-    const res = await fetch(
+    const res = await authenticatedFetch(
       `/api/files/${activeApp.id}/${renamingNode.id}/rename`,
       {
         method: 'POST',
@@ -414,7 +415,7 @@ export const FileManagerView: React.FC<FileManagerViewProps> = ({
   // Fix Permissions (0755 folders / 0644 files)
   const handleBatchFixPermissions = async () => {
     if (!activeApp) return;
-    const res = await fetch(`/api/files/${activeApp.id}/batch-chmod`, {
+    const res = await authenticatedFetch(`/api/files/${activeApp.id}/batch-chmod`, {
       method: 'POST'
     });
     if (res.ok) {

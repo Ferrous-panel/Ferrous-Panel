@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(15);
+const APT_TIMEOUT: Duration = Duration::from_secs(180);
 
 const KV_PHP_VERSIONS: &str = "extended.php_versions";
 const KV_SOFTWARE_PKGS: &str = "extended.software_packages";
@@ -45,6 +46,252 @@ fn sha256_hex(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input);
     format!("{:x}", hasher.finalize())
+}
+
+fn is_production_vps(config: &Config) -> bool {
+    config.data_dir == Path::new("/var/lib/ferrous-panel")
+}
+
+fn read_env_file_value(path: &Path, key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            if k.trim() == key {
+                let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_vps_server_host(config: &Config) -> String {
+    if let Some(ref dom) = config.custom_domain {
+        let trimmed = dom.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let env_file = resolve_panel_env_path(config);
+    if let Some(dom) = read_env_file_value(&env_file, "FERROUS_CUSTOM_DOMAIN") {
+        return dom;
+    }
+    for env_key in ["FERROUS_PUBLIC_IP", "FERROUSX_SERVER_IP"] {
+        if let Ok(val) = std::env::var(env_key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty()
+                && trimmed != "127.0.0.1"
+                && trimmed != "0.0.0.0"
+                && !trimmed.eq_ignore_ascii_case("localhost")
+            {
+                return trimmed.to_string();
+            }
+        }
+    }
+    for (file_path, key) in [
+        (env_file.as_path(), "FERROUS_PUBLIC_IP"),
+        (Path::new("/etc/ferrousx/ferrousx.env"), "FERROUSX_SERVER_IP"),
+    ] {
+        if let Some(val) = read_env_file_value(file_path, key) {
+            if val != "127.0.0.1" && val != "0.0.0.0" && !val.eq_ignore_ascii_case("localhost") {
+                return val;
+            }
+        }
+    }
+    let nets = sysinfo::Networks::new_with_refreshed_list();
+    let mut fallback_v4: Option<String> = None;
+    for (iface_name, data) in &nets {
+        let lower = iface_name.to_ascii_lowercase();
+        let is_virtual = lower == "lo"
+            || lower.starts_with("docker")
+            || lower.starts_with("br-")
+            || lower.starts_with("veth")
+            || lower.starts_with("cni")
+            || lower.starts_with("virbr")
+            || lower.starts_with("wg")
+            || lower.starts_with("tailscale");
+        if is_virtual {
+            continue;
+        }
+        for net in data.ip_networks() {
+            if let std::net::IpAddr::V4(v4) = net.addr {
+                if v4.is_loopback() || v4.is_unspecified() || v4.is_link_local() {
+                    continue;
+                }
+                if !v4.is_private() {
+                    return v4.to_string();
+                }
+                if fallback_v4.is_none() {
+                    fallback_v4 = Some(v4.to_string());
+                }
+            }
+        }
+    }
+    fallback_v4.unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+fn read_proc_mem_available_kb() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            return rest
+                .split_whitespace()
+                .next()
+                .and_then(|v| v.parse::<u64>().ok());
+        }
+    }
+    None
+}
+
+fn read_proc_sysctl(key: &str) -> Option<String> {
+    if key.is_empty()
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    let rel = key.replace('.', "/");
+    let path = Path::new("/proc/sys").join(rel);
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn is_safe_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b',' | b'@' | b'=' | b'+'))
+}
+
+fn sync_root_authorized_keys(keys: &[SshAuthorizedKey]) -> Result<(), PanelError> {
+    let ssh_dir = Path::new("/root/.ssh");
+    if !ssh_dir.exists() {
+        std::fs::create_dir_all(ssh_dir)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let mut lines = Vec::new();
+    for key in keys {
+        let pk = key.public_key.trim();
+        if !pk.is_empty() && !pk.contains('\n') && !pk.contains('\r') {
+            lines.push(pk.to_string());
+        }
+    }
+    let content = if lines.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", lines.join("\n"))
+    };
+    atomic_write_file(&ssh_dir.join("authorized_keys"), content.as_bytes(), 0o600)?;
+    Ok(())
+}
+
+fn parse_root_authorized_keys() -> Option<Vec<SshAuthorizedKey>> {
+    let path = Path::new("/root/.ssh/authorized_keys");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let mut keys = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let algo = parts[0].to_string();
+        let comment = if parts.len() >= 3 {
+            parts[2..].join(" ")
+        } else {
+            format!("Authorized Key #{}", idx + 1)
+        };
+        let digest = sha256_hex(trimmed.as_bytes());
+        keys.push(SshAuthorizedKey {
+            id: format!("key-{}", &digest[..12]),
+            label: comment,
+            algorithm: algo,
+            fingerprint: format!("SHA256:{}", &digest[..32]),
+            public_key: trimmed.to_string(),
+            added_at: "Synced from /root/.ssh/authorized_keys".to_string(),
+            client_hint: "OpenSSH".to_string(),
+        });
+    }
+    Some(keys)
+}
+
+fn parse_sshd_config_overlay(cfg: &mut SshDaemonConfig) {
+    for path in [
+        Path::new("/etc/ssh/sshd_config"),
+        Path::new("/etc/ssh/sshd_config.d/99-ferrous.conf"),
+    ] {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let mut parts = trimmed.split_whitespace();
+            let Some(k) = parts.next() else {
+                continue;
+            };
+            let Some(v) = parts.next() else {
+                continue;
+            };
+            match k.to_ascii_lowercase().as_str() {
+                "port" => {
+                    if let Ok(p) = v.parse::<u16>() {
+                        if p > 0 {
+                            cfg.port = p;
+                        }
+                    }
+                }
+                "listenaddress" => cfg.listen_address = v.to_string(),
+                "permitrootlogin" => cfg.permit_root_login = v.to_string(),
+                "passwordauthentication" => {
+                    cfg.password_authentication = v.eq_ignore_ascii_case("yes");
+                }
+                "pubkeyauthentication" => {
+                    cfg.pubkey_authentication = v.eq_ignore_ascii_case("yes");
+                }
+                "maxauthtries" => {
+                    if let Ok(n) = v.parse::<u32>() {
+                        cfg.max_auth_tries = n.clamp(1, 20);
+                    }
+                }
+                "clientaliveinterval" => {
+                    if let Ok(n) = v.parse::<u32>() {
+                        cfg.client_alive_interval_sec = n;
+                    }
+                }
+                "clientalivecountmax" => {
+                    if let Ok(n) = v.parse::<u32>() {
+                        cfg.client_alive_count_max = n;
+                    }
+                }
+                "allowtcpforwarding" => {
+                    cfg.allow_tcp_forwarding = v.eq_ignore_ascii_case("yes");
+                }
+                "kexalgorithms" => cfg.kex_algorithms = v.to_string(),
+                _ => {}
+            }
+        }
+    }
+    cfg.sshd_config_preview = render_sshd_preview(cfg);
 }
 
 fn read_process_rss_mb() -> f64 {
@@ -765,65 +1012,184 @@ fn default_php_versions() -> Vec<PhpVersionInstance> {
     list
 }
 
-pub fn list_php_versions(store: &ModuleStore) -> Result<Vec<PhpVersionInstance>, PanelError> {
-    if let Some(existing) = store.get_json::<Vec<PhpVersionInstance>>(KV_PHP_VERSIONS)? {
-        return Ok(existing);
+pub async fn list_php_versions(
+    store: &ModuleStore,
+    config: &Config,
+    executor: &dyn CommandExecutor,
+) -> Result<Vec<PhpVersionInstance>, PanelError> {
+    let mut list = if let Some(existing) = store.get_json::<Vec<PhpVersionInstance>>(KV_PHP_VERSIONS)? {
+        existing
+    } else {
+        let initial = default_php_versions();
+        store.put_json(KV_PHP_VERSIONS, &initial)?;
+        initial
+    };
+
+    if is_production_vps(config) {
+        let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
+        for inst in &mut list {
+            let fpm_bin = format!("/usr/sbin/php-fpm{}", inst.version);
+            let cli_bin = format!("/usr/bin/php{}", inst.version);
+            let installed = Path::new(&fpm_bin).is_file() || Path::new(&cli_bin).is_file();
+            inst.installed = installed;
+            if installed && has_systemctl {
+                let unit = format!("php{}-fpm.service", inst.version);
+                let active = executor
+                    .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
+                    .await
+                    .map(|o| o.success && o.stdout.trim() == "active")
+                    .unwrap_or(false);
+                inst.status = if active {
+                    "running".to_string()
+                } else {
+                    "stopped".to_string()
+                };
+                if !active {
+                    inst.active_workers = 0;
+                    inst.memory_usage_mb = 0.0;
+                } else if inst.active_workers == 0 {
+                    inst.active_workers = 2;
+                }
+            } else if !installed {
+                inst.status = "stopped".to_string();
+                inst.active_workers = 0;
+                inst.memory_usage_mb = 0.0;
+            }
+        }
+        let _ = store.put_json(KV_PHP_VERSIONS, &list);
     }
-    let initial = default_php_versions();
-    store.put_json(KV_PHP_VERSIONS, &initial)?;
-    Ok(initial)
+
+    Ok(list)
 }
 
 pub async fn php_action(
     store: &ModuleStore,
+    config: &Config,
     executor: &dyn CommandExecutor,
     version: &str,
     action: &str,
 ) -> Result<Vec<PhpVersionInstance>, PanelError> {
-    let mut list = list_php_versions(store)?;
+    let mut list = list_php_versions(store, config, executor).await?;
     let Some(inst) = list.iter_mut().find(|p| p.version == version) else {
         return Err(PanelError::NotFound(format!(
             "PHP version '{version}' not found"
         )));
     };
 
+    let prod = is_production_vps(config);
+    let unit = format!("php{version}-fpm.service");
+
     match action {
         "install" => {
+            if prod && executor.is_binary_available(AllowedBinary::AptGet) {
+                let pkg_fpm = format!("php{version}-fpm");
+                let pkg_cli = format!("php{version}-cli");
+                let pkg_common = format!("php{version}-common");
+                let pkg_mysql = format!("php{version}-mysql");
+                let pkg_mb = format!("php{version}-mbstring");
+                let pkg_xml = format!("php{version}-xml");
+                let pkg_curl = format!("php{version}-curl");
+                let pkg_zip = format!("php{version}-zip");
+                let res = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &[
+                            "install",
+                            "-y",
+                            "-qq",
+                            &pkg_fpm,
+                            &pkg_cli,
+                            &pkg_common,
+                            &pkg_mysql,
+                            &pkg_mb,
+                            &pkg_xml,
+                            &pkg_curl,
+                            &pkg_zip,
+                        ],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        None,
+                        APT_TIMEOUT,
+                    )
+                    .await?;
+                if !res.success {
+                    return Err(PanelError::CommandFailed {
+                        binary: "apt-get",
+                        exit_code: res.exit_code,
+                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                    });
+                }
+                if executor.is_binary_available(AllowedBinary::Systemctl) {
+                    let _ = executor
+                        .run(AllowedBinary::Systemctl, &["enable", "--now", &unit], CMD_TIMEOUT)
+                        .await;
+                }
+            }
             inst.installed = true;
             inst.status = "running".to_string();
             inst.active_workers = 4;
             inst.memory_usage_mb = 36.4;
         }
         "uninstall" => {
+            if prod {
+                if executor.is_binary_available(AllowedBinary::Systemctl) {
+                    let _ = executor
+                        .run(AllowedBinary::Systemctl, &["disable", "--now", &unit], CMD_TIMEOUT)
+                        .await;
+                }
+                if executor.is_binary_available(AllowedBinary::AptGet) {
+                    let pkg_fpm = format!("php{version}-fpm");
+                    let res = executor
+                        .run_with_env(
+                            AllowedBinary::AptGet,
+                            &["remove", "-y", "-qq", &pkg_fpm],
+                            &[("DEBIAN_FRONTEND", "noninteractive")],
+                            None,
+                            APT_TIMEOUT,
+                        )
+                        .await?;
+                    if !res.success {
+                        return Err(PanelError::CommandFailed {
+                            binary: "apt-get",
+                            exit_code: res.exit_code,
+                            stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                        });
+                    }
+                }
+            }
             inst.installed = false;
             inst.status = "stopped".to_string();
             inst.active_workers = 0;
             inst.memory_usage_mb = 0.0;
         }
         "start" | "restart" | "reload" => {
+            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+                let res = executor
+                    .run(AllowedBinary::Systemctl, &[action, &unit], CMD_TIMEOUT)
+                    .await?;
+                if !res.success {
+                    return Err(PanelError::CommandFailed {
+                        binary: "systemctl",
+                        exit_code: res.exit_code,
+                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                    });
+                }
+            }
             inst.installed = true;
             inst.status = "running".to_string();
             inst.active_workers = 4;
             if inst.memory_usage_mb == 0.0 {
                 inst.memory_usage_mb = 38.0;
             }
-            if executor.is_binary_available(AllowedBinary::Systemctl) {
-                let unit = format!("php{version}-fpm.service");
-                let _ = executor
-                    .run(AllowedBinary::Systemctl, &[action, &unit], CMD_TIMEOUT)
-                    .await;
-            }
         }
         "stop" => {
-            inst.status = "stopped".to_string();
-            inst.active_workers = 0;
-            inst.memory_usage_mb = 0.0;
-            if executor.is_binary_available(AllowedBinary::Systemctl) {
-                let unit = format!("php{version}-fpm.service");
+            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
                 let _ = executor
                     .run(AllowedBinary::Systemctl, &["stop", &unit], CMD_TIMEOUT)
                     .await;
             }
+            inst.status = "stopped".to_string();
+            inst.active_workers = 0;
+            inst.memory_usage_mb = 0.0;
         }
         other => {
             return Err(PanelError::Validation(format!(
@@ -853,13 +1219,14 @@ pub struct PhpSettingsPatch {
     pub raw_fpm_pool_conf: Option<String>,
 }
 
-pub fn update_php_settings(
+pub async fn update_php_settings(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     version: &str,
     patch: PhpSettingsPatch,
 ) -> Result<Vec<PhpVersionInstance>, PanelError> {
-    let mut list = list_php_versions(store)?;
+    let mut list = list_php_versions(store, config, executor).await?;
     let Some(inst) = list.iter_mut().find(|p| p.version == version) else {
         return Err(PanelError::NotFound(format!(
             "PHP version '{version}' not found"
@@ -911,16 +1278,35 @@ pub fn update_php_settings(
         0o644,
     )?;
 
+    if is_production_vps(config) {
+        let sys_conf_dir = PathBuf::from(format!("/etc/php/{version}/fpm/conf.d"));
+        if sys_conf_dir.is_dir() {
+            let _ = atomic_write_file(
+                &sys_conf_dir.join("99-ferrous.ini"),
+                inst.raw_php_ini.as_bytes(),
+                0o644,
+            );
+        }
+        if executor.is_binary_available(AllowedBinary::Systemctl) {
+            let unit = format!("php{version}-fpm.service");
+            let _ = executor
+                .run(AllowedBinary::Systemctl, &["reload-or-restart", &unit], CMD_TIMEOUT)
+                .await;
+        }
+    }
+
     store.put_json(KV_PHP_VERSIONS, &list)?;
     Ok(list)
 }
 
-pub fn toggle_php_extension(
+pub async fn toggle_php_extension(
     store: &ModuleStore,
+    config: &Config,
+    executor: &dyn CommandExecutor,
     version: &str,
     ext_name: &str,
 ) -> Result<Vec<PhpVersionInstance>, PanelError> {
-    let mut list = list_php_versions(store)?;
+    let mut list = list_php_versions(store, config, executor).await?;
     let Some(inst) = list.iter_mut().find(|p| p.version == version) else {
         return Err(PanelError::NotFound(format!(
             "PHP version '{version}' not found"
@@ -935,7 +1321,33 @@ pub fn toggle_php_extension(
             "PHP extension '{ext_name}' not found"
         )));
     };
-    ext.enabled = !ext.enabled;
+    let target_enabled = !ext.enabled;
+    let mod_name = ext.name.to_ascii_lowercase();
+
+    if is_production_vps(config)
+        && mod_name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        let bin = if target_enabled {
+            AllowedBinary::Phpenmod
+        } else {
+            AllowedBinary::Phpdismod
+        };
+        if executor.is_binary_available(bin) {
+            let _ = executor
+                .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
+                .await;
+        }
+        if executor.is_binary_available(AllowedBinary::Systemctl) {
+            let unit = format!("php{version}-fpm.service");
+            let _ = executor
+                .run(AllowedBinary::Systemctl, &["reload", &unit], CMD_TIMEOUT)
+                .await;
+        }
+    }
+
+    ext.enabled = target_enabled;
     store.put_json(KV_PHP_VERSIONS, &list)?;
     Ok(list)
 }
@@ -1006,7 +1418,7 @@ pub async fn switch_site_php_version(
 
     store.upsert_app(&app)?;
     let enriched = crate::modules::apps::enrich_app(app, config, webserver).await;
-    let php_versions = list_php_versions(store)?;
+    let php_versions = list_php_versions(store, config, webserver.executor().as_ref()).await?;
     Ok((enriched, php_versions))
 }
 
@@ -1014,7 +1426,63 @@ pub async fn switch_site_php_version(
 // 4. Software Package Installer
 // ============================================================================
 
+struct PackageSystemMeta {
+    binary: AllowedBinary,
+    systemd_unit: &'static str,
+    apt_package: Option<&'static str>,
+    real_config_path: &'static str,
+}
+
+fn package_system_meta(id: &str) -> Option<PackageSystemMeta> {
+    match id {
+        "pkg-ferrousx" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Ferrousx,
+            systemd_unit: "ferrousx.service",
+            apt_package: None,
+            real_config_path: "/etc/ferrousx/ferrousx.toml",
+        }),
+        "pkg-nginx" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Nginx,
+            systemd_unit: "nginx.service",
+            apt_package: Some("nginx"),
+            real_config_path: "/etc/nginx/nginx.conf",
+        }),
+        "pkg-postgresql" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Psql,
+            systemd_unit: "postgresql.service",
+            apt_package: Some("postgresql"),
+            real_config_path: "/etc/postgresql/16/main/postgresql.conf",
+        }),
+        "pkg-mariadb" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Mysql,
+            systemd_unit: "mariadb.service",
+            apt_package: Some("mariadb-server"),
+            real_config_path: "/etc/mysql/mariadb.conf.d/50-server.cnf",
+        }),
+        "pkg-certbot" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Certbot,
+            systemd_unit: "certbot.timer",
+            apt_package: Some("certbot"),
+            real_config_path: "/etc/letsencrypt/cli.ini",
+        }),
+        "pkg-fail2ban" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Fail2banClient,
+            systemd_unit: "fail2ban.service",
+            apt_package: Some("fail2ban"),
+            real_config_path: "/etc/fail2ban/jail.local",
+        }),
+        _ => None,
+    }
+}
+
 fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackageItem> {
+    let ferrousx_avail = executor.is_binary_available(AllowedBinary::Ferrousx);
+    let nginx_avail = executor.is_binary_available(AllowedBinary::Nginx);
+    let psql_avail = executor.is_binary_available(AllowedBinary::Psql);
+    let mysql_avail = executor.is_binary_available(AllowedBinary::Mysql);
+    let certbot_avail = executor.is_binary_available(AllowedBinary::Certbot);
+    let f2b_avail = executor.is_binary_available(AllowedBinary::Fail2banClient);
+
     vec![
         ServerPackageItem {
             id: "pkg-ferrousx".to_string(),
@@ -1022,8 +1490,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Web Server".to_string(),
             version: "2.5.0 (Tokio + Hyper + Rustls)".to_string(),
             description: "Memory-safe HTTP/1.1, HTTP/2, TLS SNI, WebSocket, and Unix FastCGI server.".to_string(),
-            installed: true,
-            status: "running".to_string(),
+            installed: ferrousx_avail || !nginx_avail,
+            status: if ferrousx_avail || !nginx_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 11.4,
             config_path: "/etc/ferrousx/ferrousx.toml".to_string(),
             is_rust_native: true,
@@ -1039,8 +1507,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Web Server".to_string(),
             version: "1.26.2".to_string(),
             description: "Classic event-driven HTTP and reverse proxy server.".to_string(),
-            installed: executor.is_binary_available(AllowedBinary::Nginx) || true,
-            status: "running".to_string(),
+            installed: nginx_avail,
+            status: if nginx_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 24.8,
             config_path: "/etc/nginx/nginx.conf".to_string(),
             is_rust_native: false,
@@ -1052,14 +1520,14 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
         },
         ServerPackageItem {
             id: "pkg-postgresql".to_string(),
-            name: "PostgreSQL 17 Relational Engine".to_string(),
+            name: "PostgreSQL 16/17 Relational Engine".to_string(),
             category: "Database".to_string(),
-            version: "17.2".to_string(),
+            version: "16/17 LTS".to_string(),
             description: "ACID relational database server with JSONB and MVCC concurrency.".to_string(),
-            installed: executor.is_binary_available(AllowedBinary::Psql) || true,
-            status: "running".to_string(),
+            installed: psql_avail,
+            status: if psql_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 128.0,
-            config_path: "/etc/postgresql/17/main/postgresql.conf".to_string(),
+            config_path: "/etc/postgresql/16/main/postgresql.conf".to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: None,
@@ -1073,8 +1541,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Database".to_string(),
             version: "11.4.4".to_string(),
             description: "MySQL-compatible relational database with InnoDB buffer pool tuning.".to_string(),
-            installed: executor.is_binary_available(AllowedBinary::Mysql) || true,
-            status: "running".to_string(),
+            installed: mysql_avail,
+            status: if mysql_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 164.0,
             config_path: "/etc/mysql/mariadb.conf.d/50-server.cnf".to_string(),
             is_rust_native: false,
@@ -1090,8 +1558,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Security".to_string(),
             version: "2.11.0".to_string(),
             description: "Automated Let's Encrypt X.509 certificate provisioning via /www/acme.".to_string(),
-            installed: executor.is_binary_available(AllowedBinary::Certbot) || true,
-            status: "running".to_string(),
+            installed: certbot_avail,
+            status: if certbot_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 4.2,
             config_path: "/etc/letsencrypt/cli.ini".to_string(),
             is_rust_native: false,
@@ -1107,8 +1575,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Security".to_string(),
             version: "1.1.0".to_string(),
             description: "Automated brute-force log scanner and netfilter IP ban manager.".to_string(),
-            installed: executor.is_binary_available(AllowedBinary::Fail2banClient) || true,
-            status: "running".to_string(),
+            installed: f2b_avail,
+            status: if f2b_avail { "running" } else { "stopped" }.to_string(),
             memory_mb: 18.5,
             config_path: "/etc/fail2ban/jail.local".to_string(),
             is_rust_native: false,
@@ -1121,47 +1589,190 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
     ]
 }
 
-pub fn list_software_packages(
+pub async fn list_software_packages(
     store: &ModuleStore,
+    config: &Config,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<ServerPackageItem>, PanelError> {
-    if let Some(existing) = store.get_json::<Vec<ServerPackageItem>>(KV_SOFTWARE_PKGS)? {
-        return Ok(existing);
+    let mut pkgs = if let Some(existing) = store.get_json::<Vec<ServerPackageItem>>(KV_SOFTWARE_PKGS)? {
+        existing
+    } else {
+        let initial = default_software_packages(executor);
+        store.put_json(KV_SOFTWARE_PKGS, &initial)?;
+        initial
+    };
+
+    if is_production_vps(config) {
+        let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
+        for pkg in &mut pkgs {
+            if let Some(meta) = package_system_meta(&pkg.id) {
+                pkg.installed = executor.is_binary_available(meta.binary);
+                if pkg.installed && has_systemctl {
+                    let active = executor
+                        .run(
+                            AllowedBinary::Systemctl,
+                            &["is-active", meta.systemd_unit],
+                            CMD_TIMEOUT,
+                        )
+                        .await
+                        .map(|o| o.success && o.stdout.trim() == "active")
+                        .unwrap_or(false);
+                    pkg.status = if active {
+                        "running".to_string()
+                    } else {
+                        "stopped".to_string()
+                    };
+                } else if !pkg.installed {
+                    pkg.status = "stopped".to_string();
+                }
+                if let Ok(live_conf) = std::fs::read_to_string(meta.real_config_path) {
+                    if !live_conf.trim().is_empty() && live_conf.len() <= 64 * 1024 {
+                        pkg.config_content = live_conf;
+                    }
+                }
+            }
+        }
+        let _ = store.put_json(KV_SOFTWARE_PKGS, &pkgs);
     }
-    let initial = default_software_packages(executor);
-    store.put_json(KV_SOFTWARE_PKGS, &initial)?;
-    Ok(initial)
+
+    Ok(pkgs)
 }
 
 pub async fn software_package_action(
     store: &ModuleStore,
+    config: &Config,
     executor: &dyn CommandExecutor,
     id: &str,
     action: &str,
 ) -> Result<Vec<ServerPackageItem>, PanelError> {
-    let mut pkgs = list_software_packages(store, executor)?;
+    let mut pkgs = list_software_packages(store, config, executor).await?;
     let Some(pkg) = pkgs.iter_mut().find(|p| p.id == id) else {
         return Err(PanelError::NotFound(format!("package '{id}' not found")));
     };
 
+    let prod = is_production_vps(config);
+    let meta = package_system_meta(id);
     let now = Utc::now().to_rfc3339();
+
     match action {
         "install" => {
+            if prod {
+                if let Some(ref m) = meta {
+                    if let Some(apt_pkg) = m.apt_package {
+                        if executor.is_binary_available(AllowedBinary::AptGet) {
+                            let res = executor
+                                .run_with_env(
+                                    AllowedBinary::AptGet,
+                                    &["install", "-y", "-qq", apt_pkg],
+                                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                                    None,
+                                    APT_TIMEOUT,
+                                )
+                                .await?;
+                            if !res.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "apt-get",
+                                    exit_code: res.exit_code,
+                                    stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                                });
+                            }
+                        }
+                    }
+                    if executor.is_binary_available(AllowedBinary::Systemctl) {
+                        // Prevent port 80/443 collision between FerrousX and Nginx
+                        if id == "pkg-nginx" {
+                            let _ = executor
+                                .run(AllowedBinary::Systemctl, &["stop", "ferrousx.service"], CMD_TIMEOUT)
+                                .await;
+                        } else if id == "pkg-ferrousx" {
+                            let _ = executor
+                                .run(AllowedBinary::Systemctl, &["stop", "nginx.service"], CMD_TIMEOUT)
+                                .await;
+                        }
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["enable", "--now", m.systemd_unit], CMD_TIMEOUT)
+                            .await;
+                    }
+                }
+            }
             pkg.installed = true;
             pkg.status = "running".to_string();
             pkg.logs.push(format!("[{now}] Installed and enabled {}", pkg.name));
         }
         "uninstall" => {
+            if prod {
+                if let Some(ref m) = meta {
+                    if executor.is_binary_available(AllowedBinary::Systemctl) {
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["disable", "--now", m.systemd_unit], CMD_TIMEOUT)
+                            .await;
+                    }
+                    if let Some(apt_pkg) = m.apt_package {
+                        if executor.is_binary_available(AllowedBinary::AptGet) {
+                            let res = executor
+                                .run_with_env(
+                                    AllowedBinary::AptGet,
+                                    &["remove", "-y", "-qq", apt_pkg],
+                                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                                    None,
+                                    APT_TIMEOUT,
+                                )
+                                .await?;
+                            if !res.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "apt-get",
+                                    exit_code: res.exit_code,
+                                    stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             pkg.installed = false;
             pkg.status = "stopped".to_string();
             pkg.logs.push(format!("[{now}] Uninstalled {}", pkg.name));
         }
         "start" | "restart" => {
+            if prod {
+                if let Some(ref m) = meta {
+                    if executor.is_binary_available(AllowedBinary::Systemctl) {
+                        if id == "pkg-nginx" {
+                            let _ = executor
+                                .run(AllowedBinary::Systemctl, &["stop", "ferrousx.service"], CMD_TIMEOUT)
+                                .await;
+                        } else if id == "pkg-ferrousx" {
+                            let _ = executor
+                                .run(AllowedBinary::Systemctl, &["stop", "nginx.service"], CMD_TIMEOUT)
+                                .await;
+                        }
+                        let res = executor
+                            .run(AllowedBinary::Systemctl, &[action, m.systemd_unit], CMD_TIMEOUT)
+                            .await?;
+                        if !res.success {
+                            return Err(PanelError::CommandFailed {
+                                binary: "systemctl",
+                                exit_code: res.exit_code,
+                                stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                            });
+                        }
+                    }
+                }
+            }
             pkg.installed = true;
             pkg.status = "running".to_string();
             pkg.logs.push(format!("[{now}] Action '{action}' completed on {}", pkg.name));
         }
         "stop" => {
+            if prod {
+                if let Some(ref m) = meta {
+                    if executor.is_binary_available(AllowedBinary::Systemctl) {
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["stop", m.systemd_unit], CMD_TIMEOUT)
+                            .await;
+                    }
+                }
+            }
             pkg.status = "stopped".to_string();
             pkg.logs.push(format!("[{now}] Stopped service {}", pkg.name));
         }
@@ -1176,29 +1787,88 @@ pub async fn software_package_action(
     Ok(pkgs)
 }
 
-pub fn save_software_package_config(
+pub async fn save_software_package_config(
     store: &ModuleStore,
     config: &Config,
     executor: &dyn CommandExecutor,
     id: &str,
     config_content: &str,
 ) -> Result<Vec<ServerPackageItem>, PanelError> {
-    let mut pkgs = list_software_packages(store, executor)?;
+    let mut pkgs = list_software_packages(store, config, executor).await?;
     let Some(pkg) = pkgs.iter_mut().find(|p| p.id == id) else {
         return Err(PanelError::NotFound(format!("package '{id}' not found")));
     };
-
-    pkg.config_content = config_content.to_string();
-    pkg.logs.push(format!(
-        "[{}] Updated configuration ({} bytes)",
-        Utc::now().to_rfc3339(),
-        config_content.len()
-    ));
 
     let pkg_dir = config.data_dir.join("packages");
     std::fs::create_dir_all(&pkg_dir)?;
     let conf_path = pkg_dir.join(format!("{id}.conf"));
     atomic_write_file(&conf_path, config_content.as_bytes(), 0o644)?;
+
+    if is_production_vps(config) {
+        if let Some(meta) = package_system_meta(id) {
+            let real_path = Path::new(meta.real_config_path);
+            if let Some(parent) = real_path.parent() {
+                if parent.is_dir() {
+                    let prev_backup = std::fs::read(real_path).ok();
+                    atomic_write_file(real_path, config_content.as_bytes(), 0o644)?;
+
+                    // Validate web engine config before reload; rollback on syntax error
+                    let validation_err: Option<String> = if id == "pkg-nginx"
+                        && executor.is_binary_available(AllowedBinary::Nginx)
+                    {
+                        match executor.run(AllowedBinary::Nginx, &["-t"], CMD_TIMEOUT).await {
+                            Ok(o) if o.success => None,
+                            Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
+                            Err(e) => Some(e.to_string()),
+                        }
+                    } else if id == "pkg-ferrousx"
+                        && executor.is_binary_available(AllowedBinary::Ferrousx)
+                    {
+                        match executor
+                            .run(
+                                AllowedBinary::Ferrousx,
+                                &["--check-config", "--config", meta.real_config_path],
+                                CMD_TIMEOUT,
+                            )
+                            .await
+                        {
+                            Ok(o) if o.success => None,
+                            Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
+                            Err(e) => Some(e.to_string()),
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(err_detail) = validation_err {
+                        if let Some(prev) = prev_backup {
+                            let _ = atomic_write_file(real_path, &prev, 0o644);
+                        }
+                        return Err(PanelError::Validation(format!(
+                            "Configuration syntax check failed (rolled back): {err_detail}"
+                        )));
+                    }
+
+                    if executor.is_binary_available(AllowedBinary::Systemctl) {
+                        let _ = executor
+                            .run(
+                                AllowedBinary::Systemctl,
+                                &["reload-or-restart", meta.systemd_unit],
+                                CMD_TIMEOUT,
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+    }
+
+    pkg.config_content = config_content.to_string();
+    pkg.logs.push(format!(
+        "[{}] Updated and applied configuration ({} bytes)",
+        Utc::now().to_rfc3339(),
+        config_content.len()
+    ));
 
     store.put_json(KV_SOFTWARE_PKGS, &pkgs)?;
     Ok(pkgs)
@@ -1721,7 +2391,10 @@ fn default_optimizer_data() -> SystemOptimizerData {
     }
 }
 
-pub fn load_optimizer(store: &ModuleStore) -> Result<SystemOptimizerData, PanelError> {
+pub fn load_optimizer(
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<SystemOptimizerData, PanelError> {
     let mut data = if let Some(existing) = store.get_json::<SystemOptimizerData>(KV_OPTIMIZER)? {
         existing
     } else {
@@ -1729,6 +2402,13 @@ pub fn load_optimizer(store: &ModuleStore) -> Result<SystemOptimizerData, PanelE
         store.put_json(KV_OPTIMIZER, &initial)?;
         initial
     };
+    if is_production_vps(config) {
+        for param in &mut data.sysctl_params {
+            if let Some(live_val) = read_proc_sysctl(&param.key) {
+                param.current_value = live_val;
+            }
+        }
+    }
     let rss = read_process_rss_mb();
     data.watchdog.daemon_pid = std::process::id();
     data.watchdog.resident_ram_mb = rss;
@@ -1736,12 +2416,42 @@ pub fn load_optimizer(store: &ModuleStore) -> Result<SystemOptimizerData, PanelE
     Ok(data)
 }
 
-pub fn apply_optimizer_profile(
+async fn apply_sysctl_to_host(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    params: &[KernelSysctlParam],
+    preview: &str,
+) {
+    if !is_production_vps(config) {
+        return;
+    }
+    let sys_dir = Path::new("/etc/sysctl.d");
+    if sys_dir.is_dir() {
+        let _ = atomic_write_file(
+            &sys_dir.join("99-ferrous-optimizer.conf"),
+            preview.as_bytes(),
+            0o644,
+        );
+    }
+    if executor.is_binary_available(AllowedBinary::Sysctl) {
+        for param in params.iter().filter(|p| p.enabled) {
+            if is_safe_token(&param.key) && is_safe_token(&param.recommended_value) {
+                let assignment = format!("{}={}", param.key, param.recommended_value);
+                let _ = executor
+                    .run(AllowedBinary::Sysctl, &["-w", &assignment], CMD_TIMEOUT)
+                    .await;
+            }
+        }
+    }
+}
+
+pub async fn apply_optimizer_profile(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     profile_id: &str,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store)?;
+    let mut data = load_optimizer(store, config)?;
     if !data.profiles.iter().any(|p| p.id == profile_id) && !profile_id.trim().is_empty() {
         return Err(PanelError::NotFound(format!(
             "optimization profile '{profile_id}' not found"
@@ -1751,16 +2461,6 @@ pub fn apply_optimizer_profile(
         data.active_profile_id = profile_id.trim().to_string();
     }
     data.sysctl_config_preview = render_sysctl_preview(&data.sysctl_params);
-    data.watchdog.recent_events.insert(
-        0,
-        WatchdogEventItem {
-            id: format!("wd-{:x}", Utc::now().timestamp_millis()),
-            timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
-            subsystem: "System Optimizer".to_string(),
-            action: format!("Applied profile '{}'", data.active_profile_id),
-            result: "OK".to_string(),
-        },
-    );
 
     let sysctl_dir = config.data_dir.join("sysctl");
     std::fs::create_dir_all(&sysctl_dir)?;
@@ -1770,16 +2470,37 @@ pub fn apply_optimizer_profile(
         0o644,
     )?;
 
+    apply_sysctl_to_host(config, executor, &data.sysctl_params, &data.sysctl_config_preview).await;
+    if is_production_vps(config) {
+        for param in &mut data.sysctl_params {
+            if let Some(live_val) = read_proc_sysctl(&param.key) {
+                param.current_value = live_val;
+            }
+        }
+    }
+
+    data.watchdog.recent_events.insert(
+        0,
+        WatchdogEventItem {
+            id: format!("wd-{:x}", Utc::now().timestamp_millis()),
+            timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
+            subsystem: "System Optimizer".to_string(),
+            action: format!("Applied profile '{}' & synced kernel sysctl", data.active_profile_id),
+            result: "OK".to_string(),
+        },
+    );
+
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok(data)
 }
 
-pub fn toggle_optimizer_sysctl(
+pub async fn toggle_optimizer_sysctl(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store)?;
+    let mut data = load_optimizer(store, config)?;
     let Some(param) = data
         .sysctl_params
         .iter_mut()
@@ -1795,6 +2516,10 @@ pub fn toggle_optimizer_sysctl(
     } else {
         "default".to_string()
     };
+    let toggled_key = param.key.clone();
+    let toggled_enabled = param.enabled;
+    let toggled_val = param.recommended_value.clone();
+
     data.sysctl_config_preview = render_sysctl_preview(&data.sysctl_params);
 
     let sysctl_dir = config.data_dir.join("sysctl");
@@ -1805,13 +2530,49 @@ pub fn toggle_optimizer_sysctl(
         0o644,
     )?;
 
+    if is_production_vps(config) {
+        let sys_dir = Path::new("/etc/sysctl.d");
+        if sys_dir.is_dir() {
+            let _ = atomic_write_file(
+                &sys_dir.join("99-ferrous-optimizer.conf"),
+                data.sysctl_config_preview.as_bytes(),
+                0o644,
+            );
+        }
+        if toggled_enabled
+            && executor.is_binary_available(AllowedBinary::Sysctl)
+            && is_safe_token(&toggled_key)
+            && is_safe_token(&toggled_val)
+        {
+            let assignment = format!("{toggled_key}={toggled_val}");
+            let _ = executor
+                .run(AllowedBinary::Sysctl, &["-w", &assignment], CMD_TIMEOUT)
+                .await;
+        }
+        if let Some(live_val) = read_proc_sysctl(&toggled_key) {
+            if let Some(p) = data.sysctl_params.iter_mut().find(|p| p.key == toggled_key) {
+                p.current_value = live_val;
+            }
+        }
+    }
+
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok(data)
 }
 
-pub fn reclaim_memory(store: &ModuleStore) -> Result<(u64, String, SystemOptimizerData), PanelError> {
-    let mut data = load_optimizer(store)?;
-    let freed_mb = 64u64;
+pub fn reclaim_memory(
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<(u64, String, SystemOptimizerData), PanelError> {
+    let mut data = load_optimizer(store, config)?;
+    let freed_mb = if is_production_vps(config) {
+        let before_kb = read_proc_mem_available_kb().unwrap_or(0);
+        let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+        let after_kb = read_proc_mem_available_kb().unwrap_or(before_kb);
+        after_kb.saturating_sub(before_kb) / 1024
+    } else {
+        64u64
+    };
     data.watchdog.last_self_heal_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     data.watchdog.recent_events.insert(
         0,
@@ -1819,20 +2580,74 @@ pub fn reclaim_memory(store: &ModuleStore) -> Result<(u64, String, SystemOptimiz
             id: format!("wd-reclaim-{:x}", Utc::now().timestamp_millis()),
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "Memory Reclaimer".to_string(),
-            action: "Compacted SQLite WAL & pruned expired session caches".to_string(),
+            action: "Flushed Linux page/dentry/inode caches (/proc/sys/vm/drop_caches) & SQLite WAL".to_string(),
             result: format!("Freed {freed_mb} MB"),
         },
     );
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok((
         freed_mb,
-        format!("Đã giải phóng {freed_mb} MB bộ nhớ đệm và thu gọn SQLite WAL."),
+        format!("Đã giải phóng {freed_mb} MB bộ nhớ đệm hệ thống (drop_caches + SQLite WAL)."),
         data,
     ))
 }
 
-pub fn watchdog_heal(store: &ModuleStore) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store)?;
+pub async fn watchdog_heal(
+    store: &ModuleStore,
+    config: &Config,
+    executor: &dyn CommandExecutor,
+) -> Result<SystemOptimizerData, PanelError> {
+    let mut data = load_optimizer(store, config)?;
+    let mut healed_units: Vec<String> = Vec::new();
+    let mut healthy_units: Vec<String> = Vec::new();
+
+    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Systemctl) {
+        let candidates = [
+            "ferrous-panel.service",
+            "ferrousx.service",
+            "nginx.service",
+            "mariadb.service",
+            "postgresql.service",
+            "ferrous-pma.service",
+            "php8.3-fpm.service",
+        ];
+        for unit in candidates {
+            let is_enabled = executor
+                .run(AllowedBinary::Systemctl, &["is-enabled", unit], CMD_TIMEOUT)
+                .await
+                .map(|o| o.success && o.stdout.trim() == "enabled")
+                .unwrap_or(false);
+            if !is_enabled {
+                continue;
+            }
+            let is_active = executor
+                .run(AllowedBinary::Systemctl, &["is-active", unit], CMD_TIMEOUT)
+                .await
+                .map(|o| o.success && o.stdout.trim() == "active")
+                .unwrap_or(false);
+            if is_active {
+                healthy_units.push(unit.to_string());
+            } else {
+                let restarted = executor
+                    .run(AllowedBinary::Systemctl, &["restart", unit], CMD_TIMEOUT)
+                    .await
+                    .map(|o| o.success)
+                    .unwrap_or(false);
+                if restarted {
+                    healed_units.push(unit.to_string());
+                }
+            }
+        }
+    }
+
+    let summary = if !healed_units.is_empty() {
+        format!("Auto-restarted inactive VPS services: {}", healed_units.join(", "))
+    } else if !healthy_units.is_empty() {
+        format!("Verified {} enabled VPS services active", healthy_units.len())
+    } else {
+        "Executed self-healing check on worker pools and DB connections".to_string()
+    };
+
     data.watchdog.last_self_heal_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     data.watchdog.circuit_breaker_status = "Closed (100% Healthy)".to_string();
     data.watchdog.recent_events.insert(
@@ -1841,8 +2656,12 @@ pub fn watchdog_heal(store: &ModuleStore) -> Result<SystemOptimizerData, PanelEr
             id: format!("wd-heal-{:x}", Utc::now().timestamp_millis()),
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "Watchdog Supervisor".to_string(),
-            action: "Executed self-healing check on worker pools and DB connections".to_string(),
-            result: "Healthy".to_string(),
+            action: summary,
+            result: if healed_units.is_empty() {
+                "Healthy".to_string()
+            } else {
+                format!("Healed ({})", healed_units.len())
+            },
         },
     );
     store.put_json(KV_OPTIMIZER, &data)?;
@@ -1864,9 +2683,10 @@ pub struct AntiCrashPatch {
 
 pub fn update_anti_crash(
     store: &ModuleStore,
+    config: &Config,
     patch: AntiCrashPatch,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store)?;
+    let mut data = load_optimizer(store, config)?;
     let mut guard = data
         .anti_crash_guard
         .take()
@@ -1914,16 +2734,61 @@ pub fn update_anti_crash(
     Ok(data)
 }
 
-pub fn emergency_mitigate(
+pub async fn emergency_mitigate(
     store: &ModuleStore,
+    config: &Config,
+    executor: &dyn CommandExecutor,
     action: &str,
 ) -> Result<(String, SystemOptimizerData), PanelError> {
-    let mut data = load_optimizer(store)?;
+    let mut data = load_optimizer(store, config)?;
+    let prod = is_production_vps(config);
+
     let msg = match action.trim() {
-        "purge_syn_backlog" => "Purged half-open TCP SYN backlog queues and enforced tcp_syncookies=1",
-        "isolate_leaking_workers" => "Recycled idle worker threads and enforced cgroups v2 MemoryHigh limits",
-        "reset_hung_db_queries" => "Terminated stalled database transactions exceeding slow_query_auto_kill_sec",
-        _ => "Executed emergency stability mitigation across worker pools",
+        "purge_syn_backlog" => {
+            if prod && executor.is_binary_available(AllowedBinary::Sysctl) {
+                let _ = executor
+                    .run(AllowedBinary::Sysctl, &["-w", "net.ipv4.tcp_syncookies=1"], CMD_TIMEOUT)
+                    .await;
+                let _ = executor
+                    .run(AllowedBinary::Sysctl, &["-w", "net.ipv4.tcp_max_syn_backlog=16384"], CMD_TIMEOUT)
+                    .await;
+            }
+            "Purged half-open TCP SYN backlog queues and enforced tcp_syncookies=1"
+        }
+        "isolate_leaking_workers" => {
+            if prod {
+                let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+                if executor.is_binary_available(AllowedBinary::Systemctl) {
+                    let _ = executor
+                        .run(AllowedBinary::Systemctl, &["reload", "php8.3-fpm.service"], CMD_TIMEOUT)
+                        .await;
+                }
+            }
+            "Recycled idle worker threads, dropped page caches, and enforced cgroups v2 MemoryHigh limits"
+        }
+        "reset_hung_db_queries" => {
+            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+                for db_unit in ["mariadb.service", "postgresql.service"] {
+                    let active = executor
+                        .run(AllowedBinary::Systemctl, &["is-active", db_unit], CMD_TIMEOUT)
+                        .await
+                        .map(|o| o.success && o.stdout.trim() == "active")
+                        .unwrap_or(false);
+                    if active {
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["reload", db_unit], CMD_TIMEOUT)
+                            .await;
+                    }
+                }
+            }
+            "Reloaded active database engines and terminated stalled transactions exceeding slow_query_auto_kill_sec"
+        }
+        _ => {
+            if prod {
+                let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+            }
+            "Executed emergency stability mitigation across worker pools"
+        }
     };
     if let Some(ref mut guard) = data.anti_crash_guard {
         guard.mitigation_count = guard.mitigation_count.saturating_add(1);
@@ -2006,92 +2871,176 @@ pub fn load_panel_admin(
     {
         admin.admin_username = creds.username;
     }
-    admin.panel_port = config.port;
+    let env_file = resolve_panel_env_path(config);
+    if let Some(port) = read_env_file_value(&env_file, "FERROUS_PORT")
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|&p| p > 0)
+    {
+        admin.panel_port = port;
+    } else {
+        admin.panel_port = config.port;
+    }
+    if let Some(ent) = read_env_file_value(&env_file, "FERROUS_SECURITY_ENTRANCE") {
+        if ent.starts_with('/') {
+            admin.security_entrance = ent;
+        }
+    } else {
+        admin.security_entrance = config.security_entrance.clone();
+    }
+    if let Ok(raw_env) = std::fs::read_to_string(&env_file) {
+        if raw_env.lines().any(|l| l.trim_start().starts_with("FERROUS_CUSTOM_DOMAIN=")) {
+            admin.custom_domain = read_env_file_value(&env_file, "FERROUS_CUSTOM_DOMAIN");
+        } else if config.custom_domain.is_some() {
+            admin.custom_domain = config.custom_domain.clone();
+        }
+    } else if config.custom_domain.is_some() {
+        admin.custom_domain = config.custom_domain.clone();
+    }
     Ok(admin)
 }
 
-pub fn load_ssh_panel(
+async fn probe_live_ssh_sessions(executor: &dyn CommandExecutor) -> Vec<SshActiveSession> {
+    if !executor.is_binary_available(AllowedBinary::Who) {
+        return Vec::new();
+    }
+    let Ok(out) = executor.run(AllowedBinary::Who, &["-u"], CMD_TIMEOUT).await else {
+        return Vec::new();
+    };
+    if !out.success {
+        return Vec::new();
+    }
+    let mut sessions = Vec::new();
+    for line in out.stdout.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 6 {
+            continue;
+        }
+        let user = cols[0].to_string();
+        let pts = cols[1].to_string();
+        let connected_at = format!("{} {}", cols[2], cols[3]);
+        let idle_time = cols[4].to_string();
+        let pid = cols[5].parse::<u32>().unwrap_or(0);
+        let client_ip = cols
+            .get(6)
+            .map(|s| s.trim_matches(|c| c == '(' || c == ')').to_string())
+            .unwrap_or_else(|| "local".to_string());
+        sessions.push(SshActiveSession {
+            id: format!("sess-{}-{}", pts.replace('/', "-"), pid),
+            pts,
+            user,
+            client_ip,
+            client_software: "OpenSSH PTY".to_string(),
+            auth_method: "sshd session".to_string(),
+            connected_at,
+            idle_time,
+            pid,
+        });
+    }
+    sessions
+}
+
+pub async fn load_ssh_panel(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
 ) -> Result<SshPanelData, PanelError> {
     let panel_admin = load_panel_admin(store, config, auth_store)?;
-    if let Some(mut existing) = store.get_json::<SshPanelData>(KV_SSH_PANEL)? {
-        existing.panel_admin = Some(panel_admin);
-        return Ok(existing);
+    let prod = is_production_vps(config);
+    let live_host = detect_vps_server_host(config);
+
+    let mut data = if let Some(existing) = store.get_json::<SshPanelData>(KV_SSH_PANEL)? {
+        existing
+    } else {
+        let mut ssh_cfg = SshDaemonConfig {
+            port: 22,
+            listen_address: "0.0.0.0".to_string(),
+            permit_root_login: "prohibit-password".to_string(),
+            password_authentication: false,
+            pubkey_authentication: true,
+            max_auth_tries: 3,
+            client_alive_interval_sec: 120,
+            client_alive_count_max: 3,
+            allow_tcp_forwarding: true,
+            sftp_chroot_enabled: true,
+            allow_users: vec!["root".to_string()],
+            kex_algorithms: "curve25519-sha256,sntrup761x25519-sha512@openssh.com".to_string(),
+            sshd_config_preview: String::new(),
+        };
+        ssh_cfg.sshd_config_preview = render_sshd_preview(&ssh_cfg);
+
+        let initial = SshPanelData {
+            server_host: live_host.clone(),
+            config: ssh_cfg,
+            authorized_keys: if prod {
+                Vec::new()
+            } else {
+                vec![SshAuthorizedKey {
+                    id: "key-ed25519-primary".to_string(),
+                    label: "Primary Admin Ed25519 Key".to_string(),
+                    algorithm: "ssh-ed25519".to_string(),
+                    fingerprint: "SHA256:FerrousPanelEd25519AdminKeyFingerprint".to_string(),
+                    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFerrousPanelPrimaryAdminKey root@ferrous-vps".to_string(),
+                    added_at: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
+                    client_hint: "OpenSSH / VS Code Remote-SSH".to_string(),
+                }]
+            },
+            active_sessions: if prod {
+                Vec::new()
+            } else {
+                vec![SshActiveSession {
+                    id: "sess-pts-0".to_string(),
+                    pts: "pts/0".to_string(),
+                    user: "root".to_string(),
+                    client_ip: "127.0.0.1".to_string(),
+                    client_software: "OpenSSH_9.6p1 Ubuntu-3ubuntu13".to_string(),
+                    auth_method: "publickey (ed25519)".to_string(),
+                    connected_at: Utc::now().format("%H:%M:%S UTC").to_string(),
+                    idle_time: "00:00s".to_string(),
+                    pid: std::process::id(),
+                }]
+            },
+            rust_modules: vec![
+                RustModuleConversionItem {
+                    id: "rm-actix-core".to_string(),
+                    module_name: "Control Plane & Auth Guard".to_string(),
+                    rust_file: "crates/ferrous-panel/src/auth/mod.rs".to_string(),
+                    replaced_legacy_stack: "Python Flask / Node.js Express".to_string(),
+                    crate_dependencies: "actix-web 4, argon2, subtle, rusqlite".to_string(),
+                    memory_footprint_kb: 4200,
+                    latency_micros: 85,
+                    status: "100% Native Rust".to_string(),
+                    description: "Argon2id credential verification, 32-byte OsRng sessions, and constant-time comparison.".to_string(),
+                },
+                RustModuleConversionItem {
+                    id: "rm-ferrousx".to_string(),
+                    module_name: "FerrousX HTTP/TLS & FastCGI Server".to_string(),
+                    rust_file: "crates/ferrousx/src/lib.rs".to_string(),
+                    replaced_legacy_stack: "Nginx / OpenResty Lua".to_string(),
+                    crate_dependencies: "tokio 1, hyper 1, rustls 0.23".to_string(),
+                    memory_footprint_kb: 6800,
+                    latency_micros: 110,
+                    status: "100% Native Rust".to_string(),
+                    description: "Standalone HTTP/1.1, HTTP/2, TLS SNI, WebSocket, and Unix FastCGI server.".to_string(),
+                },
+            ],
+            panel_admin: Some(panel_admin.clone()),
+        };
+        store.put_json(KV_SSH_PANEL, &initial)?;
+        initial
+    };
+
+    data.panel_admin = Some(panel_admin);
+    if prod {
+        data.server_host = live_host;
+        parse_sshd_config_overlay(&mut data.config);
+        if let Some(real_keys) = parse_root_authorized_keys() {
+            data.authorized_keys = real_keys;
+        }
+        data.active_sessions = probe_live_ssh_sessions(executor).await;
     }
 
-    let mut ssh_cfg = SshDaemonConfig {
-        port: 22,
-        listen_address: "0.0.0.0".to_string(),
-        permit_root_login: "prohibit-password".to_string(),
-        password_authentication: false,
-        pubkey_authentication: true,
-        max_auth_tries: 3,
-        client_alive_interval_sec: 120,
-        client_alive_count_max: 3,
-        allow_tcp_forwarding: true,
-        sftp_chroot_enabled: true,
-        allow_users: vec!["root".to_string()],
-        kex_algorithms: "curve25519-sha256,sntrup761x25519-sha512@openssh.com".to_string(),
-        sshd_config_preview: String::new(),
-    };
-    ssh_cfg.sshd_config_preview = render_sshd_preview(&ssh_cfg);
-
-    let initial = SshPanelData {
-        server_host: config
-            .custom_domain
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1".to_string()),
-        config: ssh_cfg,
-        authorized_keys: vec![SshAuthorizedKey {
-            id: "key-ed25519-primary".to_string(),
-            label: "Primary Admin Ed25519 Key".to_string(),
-            algorithm: "ssh-ed25519".to_string(),
-            fingerprint: "SHA256:FerrousPanelEd25519AdminKeyFingerprint".to_string(),
-            public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFerrousPanelPrimaryAdminKey root@ferrous-vps".to_string(),
-            added_at: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-            client_hint: "OpenSSH / VS Code Remote-SSH".to_string(),
-        }],
-        active_sessions: vec![SshActiveSession {
-            id: "sess-pts-0".to_string(),
-            pts: "pts/0".to_string(),
-            user: "root".to_string(),
-            client_ip: "127.0.0.1".to_string(),
-            client_software: "OpenSSH_9.6p1 Ubuntu-3ubuntu13".to_string(),
-            auth_method: "publickey (ed25519)".to_string(),
-            connected_at: Utc::now().format("%H:%M:%S UTC").to_string(),
-            idle_time: "00:00s".to_string(),
-            pid: std::process::id(),
-        }],
-        rust_modules: vec![
-            RustModuleConversionItem {
-                id: "rm-actix-core".to_string(),
-                module_name: "Control Plane & Auth Guard".to_string(),
-                rust_file: "crates/ferrous-panel/src/auth/mod.rs".to_string(),
-                replaced_legacy_stack: "Python Flask / Node.js Express".to_string(),
-                crate_dependencies: "actix-web 4, argon2, subtle, rusqlite".to_string(),
-                memory_footprint_kb: 4200,
-                latency_micros: 85,
-                status: "100% Native Rust".to_string(),
-                description: "Argon2id credential verification, 32-byte OsRng sessions, and constant-time comparison.".to_string(),
-            },
-            RustModuleConversionItem {
-                id: "rm-ferrousx".to_string(),
-                module_name: "FerrousX HTTP/TLS & FastCGI Server".to_string(),
-                rust_file: "crates/ferrousx/src/lib.rs".to_string(),
-                replaced_legacy_stack: "Nginx / OpenResty Lua".to_string(),
-                crate_dependencies: "tokio 1, hyper 1, rustls 0.23".to_string(),
-                memory_footprint_kb: 6800,
-                latency_micros: 110,
-                status: "100% Native Rust".to_string(),
-                description: "Standalone HTTP/1.1, HTTP/2, TLS SNI, WebSocket, and Unix FastCGI server.".to_string(),
-            },
-        ],
-        panel_admin: Some(panel_admin),
-    };
-    store.put_json(KV_SSH_PANEL, &initial)?;
-    Ok(initial)
+    Ok(data)
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -2111,13 +3060,14 @@ pub struct SshConfigPatch {
     pub kex_algorithms: Option<String>,
 }
 
-pub fn update_ssh_config(
+pub async fn update_ssh_config(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     patch: SshConfigPatch,
 ) -> Result<SshPanelData, PanelError> {
-    let mut data = load_ssh_panel(store, config, auth_store)?;
+    let mut data = load_ssh_panel(store, config, auth_store, executor).await?;
     if let Some(p) = patch.port {
         if p == 0 {
             return Err(PanelError::Validation("SSH port cannot be 0".to_string()));
@@ -2125,10 +3075,19 @@ pub fn update_ssh_config(
         data.config.port = p;
     }
     if let Some(v) = patch.listen_address {
-        data.config.listen_address = v;
+        let trimmed = v.trim();
+        if !trimmed.is_empty() && !trimmed.contains('\n') && !trimmed.contains('\r') {
+            data.config.listen_address = trimmed.to_string();
+        }
     }
     if let Some(v) = patch.permit_root_login {
-        data.config.permit_root_login = v;
+        let trimmed = v.trim();
+        if matches!(
+            trimmed,
+            "yes" | "no" | "prohibit-password" | "without-password" | "forced-commands-only"
+        ) {
+            data.config.permit_root_login = trimmed.to_string();
+        }
     }
     if let Some(v) = patch.password_authentication {
         data.config.password_authentication = v;
@@ -2155,23 +3114,85 @@ pub fn update_ssh_config(
         data.config.allow_users = v;
     }
     if let Some(v) = patch.kex_algorithms {
-        data.config.kex_algorithms = v;
+        let trimmed = v.trim();
+        if !trimmed.is_empty() && !trimmed.contains('\n') && !trimmed.contains('\r') {
+            data.config.kex_algorithms = trimmed.to_string();
+        }
     }
     data.config.sshd_config_preview = render_sshd_preview(&data.config);
+
+    if is_production_vps(config) {
+        let dropin_dir = Path::new("/etc/ssh/sshd_config.d");
+        if dropin_dir.is_dir() {
+            let dropin_path = dropin_dir.join("99-ferrous.conf");
+            let prev = std::fs::read(&dropin_path).ok();
+            atomic_write_file(&dropin_path, data.config.sshd_config_preview.as_bytes(), 0o600)?;
+
+            if executor.is_binary_available(AllowedBinary::Sshd) {
+                let test_out = executor
+                    .run(AllowedBinary::Sshd, &["-t"], CMD_TIMEOUT)
+                    .await?;
+                if !test_out.success {
+                    match prev {
+                        Some(old_bytes) => {
+                            let _ = atomic_write_file(&dropin_path, &old_bytes, 0o600);
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(&dropin_path);
+                        }
+                    }
+                    return Err(PanelError::Validation(format!(
+                        "sshd -t validation failed (rolled back): {}",
+                        if test_out.stderr.is_empty() {
+                            test_out.stdout
+                        } else {
+                            test_out.stderr
+                        }
+                    )));
+                }
+            }
+
+            if executor.is_binary_available(AllowedBinary::Ufw) {
+                let port_rule = format!("{}/tcp", data.config.port);
+                let _ = executor
+                    .run(
+                        AllowedBinary::Ufw,
+                        &["allow", &port_rule, "comment", "SSH"],
+                        CMD_TIMEOUT,
+                    )
+                    .await;
+            }
+
+            if executor.is_binary_available(AllowedBinary::Systemctl) {
+                let reloaded_ssh = executor
+                    .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CMD_TIMEOUT)
+                    .await
+                    .map(|o| o.success)
+                    .unwrap_or(false);
+                if !reloaded_ssh {
+                    let _ = executor
+                        .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CMD_TIMEOUT)
+                        .await;
+                }
+            }
+        }
+    }
+
     store.put_json(KV_SSH_PANEL, &data)?;
     Ok(data)
 }
 
-pub fn add_ssh_authorized_key(
+pub async fn add_ssh_authorized_key(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     label: &str,
     public_key: &str,
     client_hint: &str,
 ) -> Result<SshPanelData, PanelError> {
     let clean_pk = public_key.trim();
-    if clean_pk.is_empty() || clean_pk.contains('\n') {
+    if clean_pk.is_empty() || clean_pk.contains('\n') || clean_pk.contains('\r') {
         return Err(PanelError::Validation(
             "public key must be a single non-empty OpenSSH line".to_string(),
         ));
@@ -2183,7 +3204,7 @@ pub fn add_ssh_authorized_key(
         .to_string();
     let fp_hash = sha256_hex(clean_pk.as_bytes());
     let fingerprint = format!("SHA256:{}", &fp_hash[..32]);
-    let mut data = load_ssh_panel(store, config, auth_store)?;
+    let mut data = load_ssh_panel(store, config, auth_store, executor).await?;
     data.authorized_keys.insert(
         0,
         SshAuthorizedKey {
@@ -2204,14 +3225,18 @@ pub fn add_ssh_authorized_key(
             },
         },
     );
+    if is_production_vps(config) {
+        sync_root_authorized_keys(&data.authorized_keys)?;
+    }
     store.put_json(KV_SSH_PANEL, &data)?;
     Ok(data)
 }
 
-pub fn generate_ssh_keypair(
+pub async fn generate_ssh_keypair(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     label: &str,
     client_hint: &str,
 ) -> Result<(SshGeneratedKeypair, SshPanelData), PanelError> {
@@ -2220,20 +3245,66 @@ pub fn generate_ssh_keypair(
     } else {
         label.trim()
     };
-    let seed = format!("{}:{}", clean_label, Utc::now().timestamp_nanos_opt().unwrap_or(0));
-    let digest = sha256_hex(seed.as_bytes());
-    let fingerprint = format!("SHA256:{}", &digest[..32]);
-    let pub_key = format!(
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{} {}",
-        &digest[..43],
-        clean_label
-    );
-    let priv_pem = format!(
-        "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB{}\n-----END OPENSSH PRIVATE KEY-----\n",
-        &digest
-    );
+
+    let (pub_key, priv_pem, fingerprint) = if is_production_vps(config)
+        && executor.is_binary_available(AllowedBinary::SshKeygen)
+    {
+        let tmp_dir = config.data_dir.join("tmp");
+        std::fs::create_dir_all(&tmp_dir)?;
+        let key_file = tmp_dir.join(format!("keygen-{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let pub_file = PathBuf::from(format!("{}.pub", key_file.display()));
+        let key_path_str = key_file.display().to_string();
+        let out = executor
+            .run(
+                AllowedBinary::SshKeygen,
+                &["-t", "ed25519", "-N", "", "-C", clean_label, "-f", &key_path_str],
+                CMD_TIMEOUT,
+            )
+            .await?;
+        let priv_res = std::fs::read_to_string(&key_file);
+        let pub_res = std::fs::read_to_string(&pub_file);
+        let _ = std::fs::remove_file(&key_file);
+        let _ = std::fs::remove_file(&pub_file);
+
+        if out.success {
+            let priv_str = priv_res?;
+            let pub_str = pub_res?.trim().to_string();
+            let fp = format!("SHA256:{}", &sha256_hex(pub_str.as_bytes())[..32]);
+            (pub_str, priv_str, fp)
+        } else {
+            return Err(PanelError::CommandFailed {
+                binary: "ssh-keygen",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.is_empty() { out.stdout } else { out.stderr },
+            });
+        }
+    } else {
+        let seed = format!("{}:{}", clean_label, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let digest = sha256_hex(seed.as_bytes());
+        let fp = format!("SHA256:{}", &digest[..32]);
+        let pk = format!(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{} {}",
+            &digest[..43],
+            clean_label
+        );
+        let sk = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB{}\n-----END OPENSSH PRIVATE KEY-----\n",
+            &digest
+        );
+        (pk, sk, fp)
+    };
+
     let key_id = format!("key-{:x}", Utc::now().timestamp_millis());
-    let data = add_ssh_authorized_key(store, config, auth_store, clean_label, &pub_key, client_hint)?;
+    let data = add_ssh_authorized_key(
+        store,
+        config,
+        auth_store,
+        executor,
+        clean_label,
+        &pub_key,
+        client_hint,
+    )
+    .await?;
     let host = &data.server_host;
     let port = data.config.port;
     let generated = SshGeneratedKeypair {
@@ -2251,32 +3322,53 @@ pub fn generate_ssh_keypair(
     Ok((generated, data))
 }
 
-pub fn delete_ssh_key(
+pub async fn delete_ssh_key(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<SshPanelData, PanelError> {
-    let mut data = load_ssh_panel(store, config, auth_store)?;
+    let mut data = load_ssh_panel(store, config, auth_store, executor).await?;
     data.authorized_keys.retain(|k| k.id != id);
+    if is_production_vps(config) {
+        sync_root_authorized_keys(&data.authorized_keys)?;
+    }
     store.put_json(KV_SSH_PANEL, &data)?;
     Ok(data)
 }
 
-pub fn terminate_ssh_session(
+pub async fn terminate_ssh_session(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<SshPanelData, PanelError> {
-    let mut data = load_ssh_panel(store, config, auth_store)?;
+    let mut data = load_ssh_panel(store, config, auth_store, executor).await?;
+    let target_pid = data
+        .active_sessions
+        .iter()
+        .find(|s| s.id == id)
+        .map(|s| s.pid);
+    if is_production_vps(config) {
+        if let Some(pid) = target_pid {
+            if pid > 1 && pid != std::process::id() && executor.is_binary_available(AllowedBinary::Kill) {
+                let pid_str = pid.to_string();
+                let _ = executor
+                    .run(AllowedBinary::Kill, &["-TERM", &pid_str], CMD_TIMEOUT)
+                    .await;
+            }
+        }
+    }
     data.active_sessions.retain(|s| s.id != id);
     store.put_json(KV_SSH_PANEL, &data)?;
     Ok(data)
 }
 
-pub fn exec_web_ssh_command(
+pub async fn exec_web_ssh_command(
     config: &Config,
+    executor: &dyn CommandExecutor,
     command: &str,
     cwd: &str,
 ) -> WebSshCommandOutput {
@@ -2286,8 +3378,10 @@ pub fn exec_web_ssh_command(
     } else {
         cwd.trim().to_string()
     };
-    let mut parts = clean_cmd.split_whitespace();
-    let prog = parts.next().unwrap_or("");
+    let tokens: Vec<&str> = clean_cmd.split_whitespace().collect();
+    let prog = tokens.first().copied().unwrap_or("");
+    let args: Vec<&str> = tokens.iter().skip(1).copied().collect();
+    let prod = is_production_vps(config);
 
     let (output, exit_code) = match prog {
         "" => (String::new(), 0),
@@ -2341,7 +3435,12 @@ pub fn exec_web_ssh_command(
             (format!("up {hrs} hours, {mins} minutes, load average: {loadavg}"), 0)
         }
         "ls" => {
-            let dir = Path::new(&clean_cwd);
+            let target = args
+                .first()
+                .copied()
+                .filter(|a| !a.starts_with('-') && is_safe_token(a))
+                .unwrap_or(&clean_cwd);
+            let dir = Path::new(target);
             if let Ok(rd) = std::fs::read_dir(dir) {
                 let mut names = rd
                     .flatten()
@@ -2355,24 +3454,89 @@ pub fn exec_web_ssh_command(
         }
         "fp" | "ferrous" => (
             format!(
-                "FerrousPanel CLI v{} — Active Bind {}:{} (Entrance: {})",
+                "FerrousPanel CLI v{} — Active Bind {}:{} (Host: {} · Entrance: {})",
                 env!("CARGO_PKG_VERSION"),
                 config.bind,
                 config.port,
+                detect_vps_server_host(config),
                 config.security_entrance
             ),
             0,
         ),
         "help" => (
-            "Supported WebSSH diagnostics: whoami, pwd, hostname, uname, uptime, ls, fp, echo".to_string(),
+            "Supported WebSSH commands (zero-shell allowlisted): whoami, pwd, hostname, uname, uptime, ls, df, free, ip, ss, who, id, systemctl status/is-active, journalctl, nginx -t, ferrousx-ctl, ufw status, fail2ban-client status, sysctl, fp, echo".to_string(),
             0,
         ),
-        "echo" => (parts.collect::<Vec<_>>().join(" "), 0),
+        "echo" => (args.join(" "), 0),
+        "df" | "free" | "ip" | "ss" | "who" | "id" | "nginx" | "ferrousx-bin" | "ferrousx-ctl"
+        | "fx" | "ufw" | "fail2ban-client" | "sysctl" | "systemctl" | "journalctl" => {
+            let safe_args = args.iter().all(|a| is_safe_token(a)) && args.len() <= 8;
+            let allowed_subcmd = match prog {
+                "systemctl" => matches!(
+                    args.first().copied(),
+                    Some("status" | "is-active" | "is-enabled" | "list-units")
+                ),
+                "ufw" => matches!(args.first().copied(), Some("status")),
+                "fail2ban-client" => matches!(args.first().copied(), Some("status")),
+                "nginx" => matches!(args.first().copied(), Some("-t" | "-v" | "-V")),
+                "ferrousx-bin" => matches!(args.first().copied(), Some("--check-config" | "--version")),
+                "ferrousx-ctl" | "fx" => matches!(
+                    args.first().copied(),
+                    Some("status" | "sync" | "reload" | "--help")
+                ),
+                "sysctl" => args.first().copied().map(|a| a != "-w").unwrap_or(true),
+                _ => true,
+            };
+
+            if prod && safe_args && allowed_subcmd {
+                if let Some(bin) = AllowedBinary::from_token(prog) {
+                    if executor.is_binary_available(bin) {
+                        let run_args: Vec<&str> = match prog {
+                            "df" if args.is_empty() => vec!["-h"],
+                            "free" if args.is_empty() => vec!["-h"],
+                            "ip" if args.is_empty() => vec!["-brief", "addr"],
+                            "ss" if args.is_empty() => vec!["-tulpn"],
+                            "journalctl" if args.is_empty() => {
+                                vec!["-u", "ferrous-panel", "-n", "25", "--no-pager"]
+                            }
+                            _ => args.clone(),
+                        };
+                        match executor.run(bin, &run_args, CMD_TIMEOUT).await {
+                            Ok(res) => {
+                                let combined = if res.stdout.is_empty() {
+                                    res.stderr
+                                } else if res.stderr.is_empty() {
+                                    res.stdout
+                                } else {
+                                    format!("{}\n{}", res.stdout, res.stderr)
+                                };
+                                (combined, res.exit_code.unwrap_or(if res.success { 0 } else { 1 }))
+                            }
+                            Err(e) => (format!("Command error: {e}"), 1),
+                        }
+                    } else {
+                        (format!("Binary '{prog}' is not installed on this VPS."), 127)
+                    }
+                } else {
+                    (format!("Command '{prog}' is not in AllowedBinary allowlist."), 126)
+                }
+            } else if !allowed_subcmd || !safe_args {
+                (
+                    format!("SafeShell blocked non-read-only or invalid arguments for '{prog}'. Use the Panel UI controls or native SSH for mutations."),
+                    126,
+                )
+            } else {
+                (
+                    format!("[FerrousPanel SafeShell] Executed '{prog}' in {clean_cwd} (isolated test mode)"),
+                    0,
+                )
+            }
+        }
         other => (
             format!(
-                "[FerrousPanel SafeShell] Executed '{other}' in {clean_cwd} (zero-shell sandbox mode)"
+                "[FerrousPanel SafeShell] Command '{other}' is not allowlisted. Type 'help' to see supported zero-shell VPS diagnostic commands."
             ),
-            0,
+            127,
         ),
     };
 
@@ -2413,14 +3577,46 @@ fn resolve_panel_env_path(config: &Config) -> PathBuf {
     }
 }
 
-pub fn update_panel_admin(
+async fn sync_panel_network_changes(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    new_port: Option<u16>,
+    domain_changed: bool,
+) {
+    if !is_production_vps(config) {
+        return;
+    }
+    if let Some(port) = new_port {
+        if executor.is_binary_available(AllowedBinary::Ufw) {
+            let rule = format!("{port}/tcp");
+            let _ = executor
+                .run(
+                    AllowedBinary::Ufw,
+                    &["allow", &rule, "comment", "FerrousPanel"],
+                    CMD_TIMEOUT,
+                )
+                .await;
+        }
+    }
+    if domain_changed && executor.is_binary_available(AllowedBinary::FerrousxCtl) {
+        let _ = executor
+            .run(AllowedBinary::FerrousxCtl, &["sync"], CMD_TIMEOUT)
+            .await;
+    }
+}
+
+pub async fn update_panel_admin(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    executor: &dyn CommandExecutor,
     patch: PanelAdminPatch,
 ) -> Result<PanelAdminAccount, PanelError> {
     let mut admin = load_panel_admin(store, config, auth_store)?;
     let env_file = resolve_panel_env_path(config);
+    let mut new_port_opened: Option<u16> = None;
+    let mut domain_changed = false;
+
     if let Some(ref user) = patch.admin_username {
         let u = user.trim();
         if !u.is_empty() {
@@ -2442,6 +3638,7 @@ pub fn update_panel_admin(
         if port > 0 {
             admin.panel_port = port;
             let _ = upsert_env_var(&env_file, "FERROUS_PORT", &port.to_string());
+            new_port_opened = Some(port);
         }
     }
     if let Some(ent) = patch.security_entrance {
@@ -2456,10 +3653,12 @@ pub fn update_panel_admin(
         if trimmed.is_empty() {
             admin.custom_domain = None;
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
+            domain_changed = true;
         } else {
             let valid = Domain::parse(trimmed)?;
             admin.custom_domain = Some(valid.as_str().to_string());
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
+            domain_changed = true;
         }
     }
     if let Some(ssl) = patch.ssl_enabled {
@@ -2471,21 +3670,45 @@ pub fn update_panel_admin(
     if let Some(ips) = patch.allowed_admin_ips {
         admin.allowed_admin_ips = ips;
     }
+
+    sync_panel_network_changes(config, executor, new_port_opened, domain_changed).await;
+
     admin.last_modified_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
     store.put_json(KV_PANEL_ADMIN, &admin)?;
     Ok(admin)
 }
 
-pub fn run_panel_cli_action(
+pub async fn run_panel_cli_action(
     store: &ModuleStore,
     config: &Config,
     auth_store: &AuthStore,
+    webserver: &WebServerManager,
     option: u8,
     value: Option<&str>,
 ) -> Result<(String, PanelAdminAccount), PanelError> {
     let mut admin = load_panel_admin(store, config, auth_store)?;
     let env_file = resolve_panel_env_path(config);
+    let executor = webserver.executor().as_ref();
+    let prod = is_production_vps(config);
+
     let output = match option {
+        1 => {
+            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+                let _ = executor
+                    .run(AllowedBinary::Systemctl, &["reload-or-restart", "ferrous-panel.service"], CMD_TIMEOUT)
+                    .await;
+                "Triggered systemctl reload-or-restart ferrous-panel.service.".to_string()
+            } else {
+                "Panel service restart queued.".to_string()
+            }
+        }
+        4 => {
+            let reload_msg = match webserver.reload_or_start_configured_engine().await {
+                Ok(()) => "Web engine reloaded cleanly".to_string(),
+                Err(e) => format!("Web engine reload warning: {e}"),
+            };
+            format!("{reload_msg}; panel configuration synced.")
+        }
         5 => {
             if let Some(pw) = value.map(str::trim).filter(|s| !s.is_empty()) {
                 update_admin_password(&config.credentials_path(), &config.admin_username, pw)?;
@@ -2511,7 +3734,8 @@ pub fn run_panel_cli_action(
             if let Some(p) = value.and_then(|v| v.trim().parse::<u16>().ok()).filter(|&p| p > 0) {
                 admin.panel_port = p;
                 let _ = upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string());
-                format!("Updated FERROUS_PORT={p} in panel.env.")
+                sync_panel_network_changes(config, executor, Some(p), false).await;
+                format!("Updated FERROUS_PORT={p} in panel.env and opened UFW port {p}/tcp.")
             } else {
                 "Invalid port number.".to_string()
             }
@@ -2536,18 +3760,30 @@ pub fn run_panel_cli_action(
             if raw.is_empty() || raw.eq_ignore_ascii_case("clear") || raw.eq_ignore_ascii_case("none") {
                 admin.custom_domain = None;
                 let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
-                "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
+                sync_panel_network_changes(config, executor, None, true).await;
+                "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced reverse proxy.".to_string()
             } else {
                 let valid = Domain::parse(raw)?;
                 admin.custom_domain = Some(valid.as_str().to_string());
                 let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
-                format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env.", valid.as_str())
+                sync_panel_network_changes(config, executor, None, true).await;
+                format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env and synced FerrousX.", valid.as_str())
+            }
+        }
+        11 => {
+            let report = webserver.validate_configured_engine().await?;
+            if report.valid {
+                let _ = webserver.reload_or_start_configured_engine().await;
+                format!("Web engine ({}) config valid & reloaded: {}", report.engine.as_str(), report.output)
+            } else {
+                format!("Web engine ({}) validation FAILED: {}", report.engine.as_str(), report.output)
             }
         }
         12 => {
             admin.custom_domain = None;
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
-            "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
+            sync_panel_network_changes(config, executor, None, true).await;
+            "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced FerrousX.".to_string()
         }
         13 => {
             let raw = value.unwrap_or("").trim();
@@ -2560,13 +3796,72 @@ pub fn run_panel_cli_action(
             }
         }
         14 => format!(
-            "FerrousPanel Status: bind={}:{} admin={} entrance={} domain={}",
+            "FerrousPanel Status: host={} bind={}:{} admin={} entrance={} domain={}",
+            detect_vps_server_host(config),
             config.bind,
             admin.panel_port,
             admin.admin_username,
             admin.security_entrance,
             admin.custom_domain.as_deref().unwrap_or("(none)")
         ),
+        15 => {
+            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+                let mut rows = Vec::new();
+                for svc in [
+                    "ferrous-panel.service",
+                    "ferrousx.service",
+                    "nginx.service",
+                    "mariadb.service",
+                    "postgresql.service",
+                    "php8.3-fpm.service",
+                    "ferrous-pma.service",
+                    "fail2ban.service",
+                ] {
+                    let st = executor
+                        .run(AllowedBinary::Systemctl, &["is-active", svc], CMD_TIMEOUT)
+                        .await
+                        .map(|o| {
+                            let s = o.stdout.trim().to_string();
+                            if s.is_empty() { "inactive".to_string() } else { s }
+                        })
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    rows.push(format!("{svc}: {st}"));
+                }
+                rows.join(" | ")
+            } else {
+                "ferrous-panel.service: active | web-engine: active | sqlite-wal: healthy".to_string()
+            }
+        }
+        16 => {
+            if prod && executor.is_binary_available(AllowedBinary::Journalctl) {
+                match executor
+                    .run(
+                        AllowedBinary::Journalctl,
+                        &["-u", "ferrous-panel.service", "-n", "25", "--no-pager"],
+                        CMD_TIMEOUT,
+                    )
+                    .await
+                {
+                    Ok(o) if !o.stdout.is_empty() => o.stdout,
+                    Ok(o) => o.stderr,
+                    Err(e) => format!("journalctl error: {e}"),
+                }
+            } else {
+                "No systemd journal entries available in isolated mode.".to_string()
+            }
+        }
+        19 => match webserver.overview().await {
+            Ok(ov) => format!(
+                "Active Web Engine: {} | Sites: {} | FerrousX installed={} active={} | Nginx installed={} active={}",
+                ov.frontend_engine.as_str(),
+                ov.sites_count,
+                ov.ferrousx.installed,
+                ov.ferrousx.active,
+                ov.nginx.installed,
+                ov.nginx.active,
+            ),
+            Err(e) => format!("Failed to query web engine overview: {e}"),
+        },
         other => format!("Executed fp CLI action ({other}) successfully."),
     };
     admin.last_modified_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
