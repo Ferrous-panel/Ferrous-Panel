@@ -29,7 +29,31 @@ import {
   WebsiteLiveTestResult,
   WebsiteRuntimeType
 } from '../types';
-import { actixGatewayFetch } from '../services/actixGateway';
+import { actixGatewayFetch, authenticatedFetch } from '../services/actixGateway';
+
+function getBrowserClientHost(): string {
+  return typeof window !== 'undefined' &&
+    window.location.hostname &&
+    window.location.hostname !== 'localhost' &&
+    window.location.hostname !== '127.0.0.1'
+    ? window.location.hostname
+    : '';
+}
+
+function normalizeTelemetryPublicIp(data: TelemetryData): TelemetryData {
+  const clientHost = getBrowserClientHost();
+
+  if (
+    clientHost &&
+    (!data.publicIp ||
+      data.publicIp === '127.0.0.1' ||
+      data.publicIp === '0.0.0.0' ||
+      data.publicIp === 'YOUR_SERVER_IP')
+  ) {
+    return { ...data, publicIp: clientHost };
+  }
+  return data;
+}
 
 const PANEL_CACHE_KEY = 'fp_panel_state_cache_v1';
 
@@ -162,10 +186,10 @@ export function usePanelController(
 
   const fetchTelemetry = useCallback(async () => {
     try {
-      const res = await fetch('/api/telemetry');
+      const res = await authenticatedFetch('/api/telemetry');
       if (res.ok) {
         const data = await res.json();
-        setTelemetry(data);
+        setTelemetry(normalizeTelemetryPublicIp(data));
       }
     } catch {
       // ignore transient network errors
@@ -174,7 +198,7 @@ export function usePanelController(
 
   const fetchDiagnostics = useCallback(async () => {
     try {
-      const res = await fetch('/api/system/diagnostics');
+      const res = await authenticatedFetch('/api/system/diagnostics');
       if (res.ok) {
         setDiagnostics(await res.json());
       }
@@ -187,21 +211,21 @@ export function usePanelController(
     setRefreshing(true);
     try {
       const results = await Promise.allSettled([
-        fetch('/api/telemetry'),
+        authenticatedFetch('/api/telemetry'),
         actixGatewayFetch('NGINX', '/api/apps'),
         actixGatewayFetch('SYSTEMD', '/api/php'),
-        fetch('/api/oneclick/templates'),
+        authenticatedFetch('/api/oneclick/templates'),
         actixGatewayFetch('SYSTEMD', '/api/software'),
         actixGatewayFetch('SYSCALL', '/api/ssh'),
-        fetch('/api/databases'),
-        fetch('/api/databases/mysql-config'),
-        fetch('/api/mail'),
+        authenticatedFetch('/api/databases'),
+        authenticatedFetch('/api/databases/mysql-config'),
+        authenticatedFetch('/api/mail'),
         actixGatewayFetch('SYSCTL', '/api/optimizer'),
-        fetch('/api/system/diagnostics'),
-        fetch('/api/cpanel'),
+        authenticatedFetch('/api/system/diagnostics'),
+        authenticatedFetch('/api/cpanel'),
         actixGatewayFetch('UFW', '/api/security'),
-        fetch('/api/rust-source'),
-        fetch('/api/edge-cloud')
+        authenticatedFetch('/api/rust-source'),
+        authenticatedFetch('/api/edge-cloud')
       ]);
 
       const [
@@ -222,27 +246,10 @@ export function usePanelController(
         edgeRes
       ] = results;
 
-      const clientHost =
-        typeof window !== 'undefined' &&
-        window.location.hostname &&
-        window.location.hostname !== 'localhost' &&
-        window.location.hostname !== '127.0.0.1'
-          ? window.location.hostname
-          : '';
-
       if (telRes.status === 'fulfilled' && telRes.value.ok) {
         try {
           const data = await telRes.value.json();
-          if (
-            clientHost &&
-            (!data.publicIp ||
-              data.publicIp === '127.0.0.1' ||
-              data.publicIp === '0.0.0.0' ||
-              data.publicIp === 'YOUR_SERVER_IP')
-          ) {
-            data.publicIp = clientHost;
-          }
-          setTelemetry(data);
+          setTelemetry(normalizeTelemetryPublicIp(data));
         } catch {}
       }
       if (appsRes.status === 'fulfilled' && appsRes.value.ok) {
@@ -272,6 +279,7 @@ export function usePanelController(
       if (sshRes.status === 'fulfilled' && sshRes.value.ok) {
         try {
           const data = await sshRes.value.json();
+          const clientHost = getBrowserClientHost();
           if (
             clientHost &&
             (!data.serverHost ||
@@ -667,7 +675,7 @@ export function usePanelController(
     linkedAppId: string;
   }) => {
     try {
-      const res = await fetch('/api/databases', {
+      const res = await authenticatedFetch('/api/databases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -686,7 +694,7 @@ export function usePanelController(
     newPassword: string
   ) => {
     try {
-      const res = await fetch(`/api/databases/${id}/password`, {
+      const res = await authenticatedFetch(`/api/databases/${id}/password`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: newPassword })
@@ -703,7 +711,7 @@ export function usePanelController(
 
   const handleDeleteDatabase = async (id: string) => {
     try {
-      const res = await fetch(`/api/databases/${id}`, {
+      const res = await authenticatedFetch(`/api/databases/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -720,13 +728,13 @@ export function usePanelController(
     query: string
   ): Promise<SqlQueryResponse> => {
     try {
-      const res = await fetch(`/api/databases/${dbId}/query`, {
+      const res = await authenticatedFetch(`/api/databases/${dbId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query })
       });
       const data: SqlQueryResponse = await res.json();
-      const dbRes = await fetch('/api/databases');
+      const dbRes = await authenticatedFetch('/api/databases');
       if (dbRes.ok) {
         const dbs = await dbRes.json();
         setDatabases(Array.isArray(dbs) ? dbs : []);
@@ -750,7 +758,7 @@ export function usePanelController(
     payload: Partial<MysqlPhpMyAdminConfig>
   ) => {
     try {
-      const res = await fetch('/api/databases/mysql-config', {
+      const res = await authenticatedFetch('/api/databases/mysql-config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -766,7 +774,7 @@ export function usePanelController(
   // Mail Server Handlers
   const handleAddMailDomain = async (domain: string) => {
     try {
-      const res = await fetch('/api/mail/domains', {
+      const res = await authenticatedFetch('/api/mail/domains', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain })
@@ -786,7 +794,7 @@ export function usePanelController(
     quotaMb: number;
   }) => {
     try {
-      const res = await fetch('/api/mail/mailboxes', {
+      const res = await authenticatedFetch('/api/mail/mailboxes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -801,7 +809,7 @@ export function usePanelController(
 
   const handleDeleteMailbox = async (id: string) => {
     try {
-      const res = await fetch(`/api/mail/mailboxes/${id}`, {
+      const res = await authenticatedFetch(`/api/mail/mailboxes/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -818,7 +826,7 @@ export function usePanelController(
     domain: string;
   }) => {
     try {
-      const res = await fetch('/api/mail/forwarders', {
+      const res = await authenticatedFetch('/api/mail/forwarders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -833,7 +841,7 @@ export function usePanelController(
 
   const handleDeleteForwarder = async (id: string) => {
     try {
-      const res = await fetch(`/api/mail/forwarders/${id}`, {
+      const res = await authenticatedFetch(`/api/mail/forwarders/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -851,7 +859,7 @@ export function usePanelController(
     body: string;
   }) => {
     try {
-      const res = await fetch('/api/mail/send', {
+      const res = await authenticatedFetch('/api/mail/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -999,7 +1007,7 @@ export function usePanelController(
     targetApp: string;
   }) => {
     try {
-      const res = await fetch('/api/cpanel/cron', {
+      const res = await authenticatedFetch('/api/cpanel/cron', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1015,7 +1023,7 @@ export function usePanelController(
 
   const handleRunCronNow = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/cron/${id}/run`, {
+      const res = await authenticatedFetch(`/api/cpanel/cron/${id}/run`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -1029,7 +1037,7 @@ export function usePanelController(
 
   const handleToggleCron = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/cron/${id}/toggle`, {
+      const res = await authenticatedFetch(`/api/cpanel/cron/${id}/toggle`, {
         method: 'PUT'
       });
       if (res.ok) {
@@ -1043,7 +1051,7 @@ export function usePanelController(
 
   const handleDeleteCron = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/cron/${id}`, {
+      const res = await authenticatedFetch(`/api/cpanel/cron/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1063,7 +1071,7 @@ export function usePanelController(
     ttl: number;
   }) => {
     try {
-      const res = await fetch('/api/cpanel/dns', {
+      const res = await authenticatedFetch('/api/cpanel/dns', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1079,7 +1087,7 @@ export function usePanelController(
 
   const handleDeleteDns = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/dns/${id}`, {
+      const res = await authenticatedFetch(`/api/cpanel/dns/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1096,7 +1104,7 @@ export function usePanelController(
     databaseIncluded: string;
   }) => {
     try {
-      const res = await fetch('/api/cpanel/backups', {
+      const res = await authenticatedFetch('/api/cpanel/backups', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1112,7 +1120,7 @@ export function usePanelController(
 
   const handleRestoreBackup = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/backups/${id}/restore`, {
+      const res = await authenticatedFetch(`/api/cpanel/backups/${id}/restore`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -1127,7 +1135,7 @@ export function usePanelController(
 
   const handleDeleteBackup = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/backups/${id}`, {
+      const res = await authenticatedFetch(`/api/cpanel/backups/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1146,7 +1154,7 @@ export function usePanelController(
     quotaMb: number;
   }) => {
     try {
-      const res = await fetch('/api/cpanel/sftp', {
+      const res = await authenticatedFetch('/api/cpanel/sftp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1162,7 +1170,7 @@ export function usePanelController(
 
   const handleDeleteSftp = async (id: string) => {
     try {
-      const res = await fetch(`/api/cpanel/sftp/${id}`, {
+      const res = await authenticatedFetch(`/api/cpanel/sftp/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1595,7 +1603,7 @@ export function usePanelController(
     rustSourceSnippet: string;
   }) => {
     try {
-      const res = await fetch('/api/edge-cloud/workers', {
+      const res = await authenticatedFetch('/api/edge-cloud/workers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1612,7 +1620,7 @@ export function usePanelController(
     workerId: string
   ): Promise<WasiWorkerInvokeResult | null> => {
     try {
-      const res = await fetch(`/api/edge-cloud/workers/${workerId}/invoke`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/workers/${workerId}/invoke`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -1628,7 +1636,7 @@ export function usePanelController(
 
   const handleToggleWasiWorker = async (workerId: string) => {
     try {
-      const res = await fetch(`/api/edge-cloud/workers/${workerId}/toggle`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/workers/${workerId}/toggle`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -1641,7 +1649,7 @@ export function usePanelController(
 
   const handleDeleteWasiWorker = async (workerId: string) => {
     try {
-      const res = await fetch(`/api/edge-cloud/workers/${workerId}`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/workers/${workerId}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1662,7 +1670,7 @@ export function usePanelController(
     cpuQuotaPercent: number;
   }) => {
     try {
-      const res = await fetch('/api/edge-cloud/containers', {
+      const res = await authenticatedFetch('/api/edge-cloud/containers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1680,7 +1688,7 @@ export function usePanelController(
     action: 'start' | 'stop' | 'restart' | 'delete'
   ) => {
     try {
-      const res = await fetch(
+      const res = await authenticatedFetch(
         `/api/edge-cloud/containers/${containerId}/action`,
         {
           method: 'POST',
@@ -1703,7 +1711,7 @@ export function usePanelController(
     allowedIps: string;
   }) => {
     try {
-      const res = await fetch('/api/edge-cloud/wireguard', {
+      const res = await authenticatedFetch('/api/edge-cloud/wireguard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1718,7 +1726,7 @@ export function usePanelController(
 
   const handleToggleWireGuardPeer = async (peerId: string) => {
     try {
-      const res = await fetch(`/api/edge-cloud/wireguard/${peerId}/toggle`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/wireguard/${peerId}/toggle`, {
         method: 'POST'
       });
       if (res.ok) {
@@ -1731,7 +1739,7 @@ export function usePanelController(
 
   const handleDeleteWireGuardPeer = async (peerId: string) => {
     try {
-      const res = await fetch(`/api/edge-cloud/wireguard/${peerId}`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/wireguard/${peerId}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1750,7 +1758,7 @@ export function usePanelController(
     immutableLock: boolean;
   }) => {
     try {
-      const res = await fetch('/api/edge-cloud/snapshots', {
+      const res = await authenticatedFetch('/api/edge-cloud/snapshots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
@@ -1765,7 +1773,7 @@ export function usePanelController(
 
   const handleDeleteBlake3Snapshot = async (snapshotId: string) => {
     try {
-      const res = await fetch(`/api/edge-cloud/snapshots/${snapshotId}`, {
+      const res = await authenticatedFetch(`/api/edge-cloud/snapshots/${snapshotId}`, {
         method: 'DELETE'
       });
       if (res.ok) {

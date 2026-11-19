@@ -33,6 +33,7 @@ import {
   WebServerEngineType,
   WebsiteLiveTestResult
 } from '../types';
+import { authenticatedFetch } from '../../services/actixGateway';
 
 interface WebsitesManagerViewProps {
   apps: ManagedApp[];
@@ -463,7 +464,7 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
     if (!selectedApp) return;
     setBusyAction('validate');
     try {
-      const res = await fetch('/api/nginx/validate', {
+      const res = await authenticatedFetch('/api/nginx/validate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

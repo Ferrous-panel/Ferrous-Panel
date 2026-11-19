@@ -40,6 +40,7 @@ import {
   TelemetryData,
   TelemetryHistoryPoint
 } from '../types';
+import { authenticatedFetch } from '../../services/actixGateway';
 
 interface FerrousXSyncCrate {
   name: string;
@@ -125,7 +126,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const [showLibMatrix, setShowLibMatrix] = useState(false);
 
   useEffect(() => {
-    fetch('/api/ferrousx/sync-status')
+    authenticatedFetch('/api/ferrousx/sync-status')
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data && data.commitSha) setFerrousxSync(data);
@@ -136,7 +137,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
   const handleTriggerFerrousxSync = async () => {
     setSyncingFerrousx(true);
     try {
-      const res = await fetch('/api/ferrousx/sync-status', {
+      const res = await authenticatedFetch('/api/ferrousx/sync-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'arcswap_rcu_reload' })

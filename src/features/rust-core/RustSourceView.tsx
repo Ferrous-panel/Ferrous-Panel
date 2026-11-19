@@ -18,6 +18,7 @@ import {
   PolyglotToolchainSpec,
   RustSourceFile
 } from '../types';
+import { authenticatedFetch } from '../../services/actixGateway';
 
 interface RustSourceViewProps {
   files: RustSourceFile[];
@@ -53,7 +54,7 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
     let mounted = true;
     const loadPolyglot = async () => {
       try {
-        const res = await fetch('/api/polyglot/toolchains');
+        const res = await authenticatedFetch('/api/polyglot/toolchains');
         if (res.ok) {
           const data = await res.json();
           if (mounted && Array.isArray(data)) {
@@ -83,7 +84,7 @@ export const RustSourceView: React.FC<RustSourceViewProps> = ({ files }) => {
         .map((s) => s.trim())
         .filter(Boolean);
 
-      const res = await fetch('/api/polyglot/compile', {
+      const res = await authenticatedFetch('/api/polyglot/compile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
