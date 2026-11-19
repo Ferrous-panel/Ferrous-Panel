@@ -728,3 +728,220 @@ fn read_first_cert_der(path: &Path) -> TestResult<CertificateDer<'static>> {
         .ok_or("empty certificate file")??;
     Ok(cert)
 }
+
+async fn send_ipc_json(
+    sock_path: &Path,
+    req: &ferrousx::ipc::IpcRequest,
+) -> TestResult<ferrousx::ipc::IpcResponse> {
+    let mut stream = tokio::net::UnixStream::connect(sock_path).await?;
+    let mut bytes = serde_json::to_vec(req)?;
+    bytes.push(b'\n');
+    stream.write_all(&bytes).await?;
+    stream.flush().await?;
+    stream.shutdown().await?;
+
+    let mut out = Vec::new();
+    stream.read_to_end(&mut out).await?;
+    let resp: ferrousx::ipc::IpcResponse = serde_json::from_slice(&out)?;
+    Ok(resp)
+}
+
+#[test]
+fn admin_uds_ipc_protocol_supports_status_reload_panel_sync_vhost_and_auth() -> TestResult {
+    // 1. Unit-verify constant-time token comparison, RBAC, and brute-force lockout
+    let guard = ferrousx::ipc::BruteForceGuard::new(3, 60);
+    let expected_tok = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    ensure(
+        ferrousx::ipc::constant_time_eq(expected_tok.as_bytes(), expected_tok.as_bytes()),
+        "constant_time_eq must accept identical tokens",
+    )?;
+    ensure(
+        !ferrousx::ipc::constant_time_eq(expected_tok.as_bytes(), b"wrong-token"),
+        "constant_time_eq must reject mismatched tokens",
+    )?;
+    ensure_eq(
+        &ferrousx::ipc::authenticate_ipc_peer(0, 0, 1000, None, expected_tok, None, true, &guard),
+        &Ok(ferrousx::ipc::AdminRole::FullAdmin),
+        "root peer gets FullAdmin",
+    )?;
+    ensure_eq(
+        &ferrousx::ipc::authenticate_ipc_peer(
+            1005,
+            2000,
+            1000,
+            None,
+            expected_tok,
+            Some(2000),
+            true,
+            &guard,
+        ),
+        &Ok(ferrousx::ipc::AdminRole::ReadOnly),
+        "allowed GID peer gets ReadOnly",
+    )?;
+    ensure_eq(
+        &ferrousx::ipc::authenticate_ipc_peer(
+            1005,
+            1005,
+            1000,
+            Some(expected_tok),
+            expected_tok,
+            None,
+            true,
+            &guard,
+        ),
+        &Ok(ferrousx::ipc::AdminRole::FullAdmin),
+        "valid 256-bit token peer gets FullAdmin",
+    )?;
+    for _ in 0..3 {
+        ensure(
+            ferrousx::ipc::authenticate_ipc_peer(
+                1009,
+                1009,
+                1000,
+                Some("bad-token"),
+                expected_tok,
+                None,
+                true,
+                &guard,
+            )
+            .is_err(),
+            "bad token must be rejected",
+        )?;
+    }
+    ensure(
+        guard.is_locked_out(1009),
+        "UID must be locked out after 3 invalid tokens",
+    )?;
+
+    // 2. End-to-end live Unix Domain Socket IPC round-trip against FerrousxServer
+    run_async(async {
+        let ws = TempDir::new("uds-ipc")?;
+        let sites_dir = ws.path().join("sites");
+        let site1_root = ws.path().join("www/site1");
+        let site2_root = ws.path().join("www/site2");
+        fs::create_dir_all(&sites_dir)?;
+        fs::create_dir_all(&site1_root)?;
+        fs::create_dir_all(&site2_root)?;
+        fs::write(site1_root.join("index.html"), "site-one-ok")?;
+        fs::write(site2_root.join("index.html"), "site-two-ok")?;
+
+        let token_path = ws.path().join("admin.token");
+        fs::write(&token_path, format!("{expected_tok}\n"))?;
+        let sock_path = ws.path().join("panel-admin.sock");
+
+        let master_path = ws.path().join("ferrousx.toml");
+        fs::write(
+            &master_path,
+            format!(
+                "bind_http = \"127.0.0.1:0\"\n\
+                 bind_https = \"127.0.0.1:0\"\n\
+                 sites_dir = \"{}\"\n\
+                 acme_webroot = \"{}\"\n\
+                 admin_token_file = \"{}\"\n\
+                 waf_mode = \"block\"\n",
+                sites_dir.display(),
+                ws.path().join("acme").display(),
+                token_path.display()
+            ),
+        )?;
+
+        fs::write(
+            sites_dir.join("one.ipc.test.toml"),
+            format!(
+                "domain = \"one.ipc.test\"\n\
+                 root = \"{}\"\n\
+                 [handler]\n\
+                 kind = \"static_spa\"\n\
+                 index_file = \"index.html\"\n",
+                site1_root.display()
+            ),
+        )?;
+
+        let server = FerrousxServer::start_with_ipc(&master_path, Some(sock_path.clone())).await?;
+        ensure(sock_path.exists(), "panel-admin.sock must be created")?;
+
+        // status action
+        let status_resp = send_ipc_json(
+            &sock_path,
+            &ferrousx::ipc::IpcRequest {
+                action: "status".to_string(),
+                payload: serde_json::json!({}),
+                auth_token: Some(expected_tok.to_string()),
+            },
+        )
+        .await?;
+        ensure(status_resp.success, "IPC status must succeed")?;
+        let status_data = status_resp.data.ok_or("missing status data")?;
+        ensure_eq(&status_data["epoch"], &serde_json::json!(1), "initial epoch")?;
+        ensure_eq(&status_data["vhosts_count"], &serde_json::json!(1), "initial vhosts_count")?;
+        ensure_eq(&status_data["waf_mode"], &serde_json::json!("block"), "waf_mode")?;
+
+        // Add site2 on disk and trigger panel_sync over UDS
+        fs::write(
+            sites_dir.join("two.ipc.test.toml"),
+            format!(
+                "domain = \"two.ipc.test\"\n\
+                 root = \"{}\"\n\
+                 [handler]\n\
+                 kind = \"static_spa\"\n\
+                 index_file = \"index.html\"\n",
+                site2_root.display()
+            ),
+        )?;
+
+        let sync_resp = send_ipc_json(
+            &sock_path,
+            &ferrousx::ipc::IpcRequest {
+                action: "panel_sync".to_string(),
+                payload: serde_json::json!({ "source": "ferrous-panel" }),
+                auth_token: Some(expected_tok.to_string()),
+            },
+        )
+        .await?;
+        ensure(sync_resp.success, "IPC panel_sync must succeed")?;
+        let sync_data = sync_resp.data.ok_or("missing sync data")?;
+        ensure_eq(&sync_data["epoch"], &serde_json::json!(2), "epoch after panel_sync")?;
+        ensure_eq(&sync_data["vhosts_count"], &serde_json::json!(2), "vhosts_count after panel_sync")?;
+
+        // Verify live HTTP traffic immediately serves the newly synced site
+        let (code, _, body) = send_http_request(
+            server.http_addr(),
+            "two.ipc.test",
+            "GET",
+            "/",
+            &[],
+            b"",
+        )
+        .await?;
+        ensure_eq(&code, &200u16, "HTTP 200 for synced site")?;
+        ensure_eq(&body, &"site-two-ok".to_string(), "HTTP body for synced site")?;
+
+        // cache action
+        let cache_resp = send_ipc_json(
+            &sock_path,
+            &ferrousx::ipc::IpcRequest {
+                action: "cache".to_string(),
+                payload: serde_json::json!({ "op": "stats" }),
+                auth_token: Some(expected_tok.to_string()),
+            },
+        )
+        .await?;
+        ensure(cache_resp.success, "IPC cache must succeed")?;
+
+        // unknown action rejected cleanly
+        let bad_resp = send_ipc_json(
+            &sock_path,
+            &ferrousx::ipc::IpcRequest {
+                action: "nonexistent".to_string(),
+                payload: serde_json::json!({}),
+                auth_token: Some(expected_tok.to_string()),
+            },
+        )
+        .await?;
+        ensure(!bad_resp.success, "unknown IPC action must return success=false")?;
+
+        server.shutdown().await;
+        Ok(())
+    })
+}
+

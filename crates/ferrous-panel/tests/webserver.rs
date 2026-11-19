@@ -1057,3 +1057,140 @@ fn api_webserver_endpoints_enforce_auth_validation_501_and_409() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn ferrousx_uds_ipc_client_and_engine_reload_follow_upstream_protocol() -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
+
+    run_async(async {
+        let ws = TempWorkspace::new("fx-uds-ipc")?;
+        let exec = Arc::new(FakeExecutor::new(true, true));
+        let mgr = build_test_manager(
+            &ws,
+            Arc::clone(&exec),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80),
+        )?;
+
+        let sock_path = mgr.ferrousx.paths().control_socket.clone();
+        let token_path = mgr.ferrousx.paths().admin_token_file.clone();
+        if let Some(parent) = sock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let expected_token =
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        std::fs::write(&token_path, format!("{expected_token}\n"))?;
+
+        let listener = UnixListener::bind(&sock_path)?;
+        let seen_actions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = Arc::clone(&seen_actions);
+        let token_owned = expected_token.to_string();
+
+        let server_task = tokio::spawn(async move {
+            let mut epoch = 4u64;
+            for _ in 0..4 {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut buf = Vec::new();
+                let _ = stream.read_to_end(&mut buf).await;
+                let trimmed = String::from_utf8_lossy(&buf).trim().to_string();
+                let Ok(req) = serde_json::from_str::<Value>(&trimmed) else {
+                    break;
+                };
+                let action = req["action"].as_str().unwrap_or("").to_string();
+                let auth_ok = req["auth_token"].as_str() == Some(token_owned.as_str());
+                if let Ok(mut guard) = seen_clone.lock() {
+                    guard.push(action.clone());
+                }
+
+                let resp = if !auth_ok {
+                    json!({
+                        "success": false,
+                        "message": "403 Unauthorized: invalid token",
+                        "data": null,
+                        "latency_us": 5
+                    })
+                } else if action == "status" {
+                    json!({
+                        "success": true,
+                        "message": "FerrousX online",
+                        "data": {
+                            "epoch": epoch,
+                            "workers": 4,
+                            "vhosts_count": 3,
+                            "upstreams_count": 1,
+                            "quic_enabled": true,
+                            "waf_enabled": true,
+                            "waf_mode": "Block",
+                            "uptime_secs": 120,
+                            "total_requests": 500,
+                            "active_connections": 2
+                        },
+                        "latency_us": 18
+                    })
+                } else {
+                    epoch += 1;
+                    json!({
+                        "success": true,
+                        "message": format!("RCU reload OK ({action})"),
+                        "data": {
+                            "action": action,
+                            "epoch": epoch,
+                            "vhosts_count": 3
+                        },
+                        "latency_us": 31
+                    })
+                };
+                let out = serde_json::to_vec(&resp).unwrap_or_default();
+                let _ = stream.write_all(&out).await;
+                let _ = stream.flush().await;
+                let _ = stream.shutdown().await;
+            }
+        });
+
+        let client = mgr.ferrousx.ipc_client();
+        ensure(client.socket_available(), "UDS socket must be detected as available")?;
+
+        // 1. status query
+        let (live, latency_us, _msg) = client.status().await?;
+        ensure_eq(&live.epoch, &4u64, "live status epoch")?;
+        ensure_eq(&live.vhosts_count, &3u64, "live status vhosts_count")?;
+        ensure_eq(&latency_us, &18u64, "live status latency_us")?;
+
+        // 2. FerrousxEngine::reload uses UDS IPC rather than kill -HUP when socket is live
+        mgr.ferrousx.reload().await?;
+        let kill_called = exec.recorded_calls().iter().any(|c| c.binary == "kill");
+        ensure(!kill_called, "FerrousxEngine::reload should use UDS IPC instead of SIGHUP when socket is live")?;
+
+        // 3. vhost_add and panel_sync actions
+        mgr.ferrousx.notify_vhost_add("spa.example.com").await?;
+        let sync_res = client
+            .panel_sync(json!({ "source": "ferrous-panel" }))
+            .await?;
+        ensure_eq(&sync_res.epoch, &7u64, "epoch after reload + vhost_add + panel_sync")?;
+
+        // 4. Disallowed IPC action rejected client-side before connecting
+        let bad_action = client.send_command("rm_rf", json!({})).await;
+        ensure(
+            matches!(bad_action, Err(PanelError::Validation(_))),
+            "disallowed IPC action must fail with Validation error",
+        )?;
+
+        let _ = server_task.await;
+        let recorded = seen_actions.lock().map(|g| g.clone()).unwrap_or_default();
+        ensure_eq(
+            &recorded,
+            &vec![
+                "status".to_string(),
+                "reload".to_string(),
+                "vhost_add".to_string(),
+                "panel_sync".to_string(),
+            ],
+            "ordered IPC actions received over panel-admin.sock",
+        )?;
+
+        Ok(())
+    })
+}
+

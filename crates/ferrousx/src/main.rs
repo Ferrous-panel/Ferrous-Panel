@@ -3,7 +3,7 @@
 use clap::Parser;
 use ferrousx::config::{
     load_bundle, load_default_env_map, resolve_env_var, CliArgs, MasterConfigToml,
-    DEFAULT_MASTER_CONFIG,
+    DEFAULT_CONTROL_SOCKET, DEFAULT_MASTER_CONFIG,
 };
 use ferrousx::error::ServerError;
 use ferrousx::server::FerrousxServer;
@@ -36,7 +36,24 @@ fn read_worker_threads(config_path: &std::path::Path) -> usize {
 }
 
 async fn run_daemon(args: CliArgs) -> Result<(), ServerError> {
-    let server = FerrousxServer::start(&args.config).await?;
+    let env_map = load_default_env_map();
+    let default_sock = resolve_env_var("FERROUSX_CONTROL_SOCKET", &env_map)
+        .or_else(|| resolve_env_var("FERROUSX_PANEL_UDS", &env_map))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONTROL_SOCKET));
+
+    let server = match FerrousxServer::start_with_ipc(&args.config, Some(default_sock.clone())).await
+    {
+        Ok(srv) => srv,
+        Err(err) => {
+            tracing::warn!(
+                socket = %default_sock.display(),
+                error = %err,
+                "could not bind admin IPC socket; starting HTTP/HTTPS listeners with SIGHUP fallback"
+            );
+            FerrousxServer::start(&args.config).await?
+        }
+    };
     let mut sighup = signal(SignalKind::hangup())?;
     let mut sigterm = signal(SignalKind::terminate())?;
 
