@@ -183,7 +183,7 @@ const FP_CLI_OPTIONS: {
     title: 'Gán Tên Miền Riêng cho Web Panel (Custom Domain)',
     command: 'fp 17 <domain>',
     category: 'admin',
-    promptPlaceholder: 'Nhập tên miền (VD: panel.domain.com hoặc cp.ferroushub.vn)'
+    promptPlaceholder: 'Nhập tên miền (VD: panel.example.com)'
   },
   {
     option: 18,

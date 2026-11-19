@@ -1228,21 +1228,38 @@ fn build_mail_domain_item(domain: &Domain, mailboxes_count: u32) -> MailDomainIt
     }
 }
 
-fn default_mail_server_data() -> MailServerData {
-    let Ok(dom) = Domain::parse("ferroushub.vn") else {
+fn resolve_local_domain(config: Option<&Config>) -> String {
+    if let Some(custom) = config.and_then(|c| c.custom_domain.as_deref()) {
+        if let Ok(parsed) = Domain::parse(custom) {
+            return parsed.as_str().to_string();
+        }
+    }
+    if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
+        let trimmed = hostname.trim();
+        if let Ok(parsed) = Domain::parse(trimmed) {
+            return parsed.as_str().to_string();
+        }
+    }
+    "vps.local".to_string()
+}
+
+fn default_mail_server_data(config: &Config) -> MailServerData {
+    let local_domain = resolve_local_domain(Some(config));
+    let Ok(dom) = Domain::parse(&local_domain) else {
         return MailServerData {
             postfix_version: "Postfix 3.8.6".to_string(),
             dovecot_version: "Dovecot 2.3.21".to_string(),
             rspamd_version: "Rspamd 3.8.4".to_string(),
             queue_count: 0,
-            sent_today: 18,
-            spam_blocked_today: 42,
+            sent_today: 0,
+            spam_blocked_today: 0,
             domains: Vec::new(),
             mailboxes: Vec::new(),
             forwarders: Vec::new(),
             messages: Vec::new(),
         };
     };
+    let d = dom.as_str();
     let domain_item = build_mail_domain_item(&dom, 2);
     MailServerData {
         postfix_version: "Postfix 3.8.6 (TLSv1.3 + Viktor DANE)".to_string(),
@@ -1254,42 +1271,42 @@ fn default_mail_server_data() -> MailServerData {
         domains: vec![domain_item],
         mailboxes: vec![
             MailboxAccount {
-                id: "mb-admin-ferroushub".to_string(),
-                email: "admin@ferroushub.vn".to_string(),
-                domain: "ferroushub.vn".to_string(),
+                id: "mb-admin-local".to_string(),
+                email: format!("admin@{d}"),
+                domain: d.to_string(),
                 display_name: "Ferrous System Administrator".to_string(),
                 quota_mb: 5120,
                 used_mb: 48.2,
-                imap_server: "mail.ferroushub.vn:993 (SSL/TLS)".to_string(),
-                smtp_server: "mail.ferroushub.vn:465 (SMTPS)".to_string(),
+                imap_server: format!("mail.{d}:993 (SSL/TLS)"),
+                smtp_server: format!("mail.{d}:465 (SMTPS)"),
                 status: "active".to_string(),
                 last_login: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
             },
             MailboxAccount {
-                id: "mb-security-ferroushub".to_string(),
-                email: "security@ferroushub.vn".to_string(),
-                domain: "ferroushub.vn".to_string(),
+                id: "mb-security-local".to_string(),
+                email: format!("security@{d}"),
+                domain: d.to_string(),
                 display_name: "SecOps & Certbot Alerts".to_string(),
                 quota_mb: 2048,
                 used_mb: 12.4,
-                imap_server: "mail.ferroushub.vn:993 (SSL/TLS)".to_string(),
-                smtp_server: "mail.ferroushub.vn:465 (SMTPS)".to_string(),
+                imap_server: format!("mail.{d}:993 (SSL/TLS)"),
+                smtp_server: format!("mail.{d}:465 (SMTPS)"),
                 status: "active".to_string(),
                 last_login: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
             },
         ],
         forwarders: vec![MailForwarder {
             id: "fwd-support".to_string(),
-            source_email: "support@ferroushub.vn".to_string(),
-            destination_email: "admin@ferroushub.vn".to_string(),
-            domain: "ferroushub.vn".to_string(),
+            source_email: format!("support@{d}"),
+            destination_email: format!("admin@{d}"),
+            domain: d.to_string(),
             active: true,
         }],
         messages: vec![MailMessageItem {
             id: "msg-welcome-01".to_string(),
             folder: "inbox".to_string(),
-            from: "security@ferroushub.vn".to_string(),
-            to: "admin@ferroushub.vn".to_string(),
+            from: format!("security@{d}"),
+            to: format!("admin@{d}"),
             subject: "[FerrousPanel] DKIM, SPF & DMARC Verification Ready".to_string(),
             snippet: "All outbound messages are signed with ferrous._domainkey RSA-2048...".to_string(),
             body: "FerrousPanel Mail Server subsystem is active.\n\n- Postfix virtual mailbox domains synchronized\n- Dovecot Maildir++ quotas enforced\n- Rspamd DKIM signing enabled for selector ferrous._domainkey".to_string(),
@@ -1329,7 +1346,7 @@ pub fn load_mail_server(store: &ModuleStore, config: &Config) -> Result<MailServ
     if let Some(existing) = store.get_json::<MailServerData>(KV_MAIL_SERVER)? {
         return Ok(existing);
     }
-    let initial = default_mail_server_data();
+    let initial = default_mail_server_data(config);
     store.put_json(KV_MAIL_SERVER, &initial)?;
     sync_mail_virtual_files(config, &initial)?;
     Ok(initial)
@@ -2282,18 +2299,46 @@ pub fn exec_web_ssh_command(
                 .unwrap_or_else(|_| "ferrous-ubuntu-vps".to_string());
             (h, 0)
         }
-        "uname" => (
-            "Linux ferrous-ubuntu-vps 6.8.0-49-generic #49-Ubuntu SMP PREEMPT_DYNAMIC x86_64 GNU/Linux".to_string(),
-            0,
-        ),
+        "uname" => {
+            let ostype = std::fs::read_to_string("/proc/sys/kernel/ostype")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| std::env::consts::OS.to_string());
+            let host = std::fs::read_to_string("/etc/hostname")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "localhost".to_string());
+            let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let version = std::fs::read_to_string("/proc/sys/kernel/version")
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            let arch = std::env::consts::ARCH;
+            let info = if version.is_empty() {
+                format!("{ostype} {host} {release} {arch}")
+            } else {
+                format!("{ostype} {host} {release} {version} {arch} GNU/Linux")
+            };
+            (info, 0)
+        }
         "uptime" => {
             let up = std::fs::read_to_string("/proc/uptime")
                 .ok()
                 .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
-                .unwrap_or(3600.0);
+                .unwrap_or(0.0);
             let hrs = (up as u64) / 3600;
             let mins = ((up as u64) % 3600) / 60;
-            (format!("up {hrs} hours, {mins} minutes, load average: 0.12, 0.08, 0.05"), 0)
+            let loadavg = std::fs::read_to_string("/proc/loadavg")
+                .ok()
+                .map(|s| {
+                    let cols: Vec<&str> = s.split_whitespace().take(3).collect();
+                    if cols.len() == 3 {
+                        format!("{}, {}, {}", cols[0], cols[1], cols[2])
+                    } else {
+                        "0.00, 0.00, 0.00".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "0.00, 0.00, 0.00".to_string());
+            (format!("up {hrs} hours, {mins} minutes, load average: {loadavg}"), 0)
         }
         "ls" => {
             let dir = Path::new(&clean_cwd);
@@ -2737,7 +2782,7 @@ fn default_edge_cloud_data() -> EdgeCloudData {
             id: "wasi-edge-auth".to_string(),
             name: "edge-jwt-gateway".to_string(),
             route_pattern: "/api/edge/*".to_string(),
-            target_domain: "ferroushub.vn".to_string(),
+            target_domain: resolve_local_domain(None),
             wasi_target: "wasm32-wasip2".to_string(),
             engine_version: "Wasmtime 29.0".to_string(),
             cold_start_us: 320,
@@ -2793,7 +2838,7 @@ fn default_edge_cloud_data() -> EdgeCloudData {
             id: "b3-snap-initial".to_string(),
             snapshot_name: "daily-wwwroot-merkle-checkpoint".to_string(),
             target_resource: "/www/wwwroot + SQLite WAL".to_string(),
-            s3_endpoint: "s3://vault.ferroushub.internal".to_string(),
+            s3_endpoint: "file:///var/backups/ferrous-panel/snapshots".to_string(),
             bucket: "ferrous-immutable-vault".to_string(),
             merkle_root_blake3: sha256_hex(b"b3-snap-initial"),
             compression: "Zstd Level 9".to_string(),

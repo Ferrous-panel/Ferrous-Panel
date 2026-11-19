@@ -80,11 +80,13 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
   );
   const [cronUser, setCronUser] = useState('www-data');
   const [cronTargetApp, setCronTargetApp] = useState(
-    apps[0]?.domain || 'api.ferroushub.vn'
+    apps[0]?.domain || 'app.example.com'
   );
 
   // DNS state
-  const [dnsDomain, setDnsDomain] = useState('ferroushub.vn');
+  const [dnsDomain, setDnsDomain] = useState(
+    apps[0]?.domain || 'example.com'
+  );
   const [dnsType, setDnsType] = useState<
     'A' | 'AAAA' | 'CNAME' | 'MX' | 'TXT' | 'CAA'
   >('A');
@@ -95,13 +97,13 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
     window.location.hostname !== '127.0.0.1'
       ? window.location.hostname
       : '127.0.0.1';
-  const [dnsHost, setDnsHost] = useState('edge.ferroushub.vn');
+  const [dnsHost, setDnsHost] = useState('edge.example.com');
   const [dnsValue, setDnsValue] = useState(liveIp);
   const [dnsTtl, setDnsTtl] = useState(300);
 
   // Backup state
   const [backupApp, setBackupApp] = useState(
-    apps[0]?.domain || 'api.ferroushub.vn'
+    apps[0]?.domain || 'app.example.com'
   );
   const [backupDb, setBackupDb] = useState(
     databases[0]
@@ -113,7 +115,7 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
   // SFTP state
   const [sftpUsername, setSftpUsername] = useState('');
   const [sftpApp, setSftpApp] = useState(
-    apps[0]?.domain || 'api.ferroushub.vn'
+    apps[0]?.domain || 'app.example.com'
   );
   const [sftpAuth, setSftpAuth] = useState<
     'Ed25519 SSH Key' | 'Argon2id Password'
@@ -524,7 +526,7 @@ export const CpanelSuiteView: React.FC<CpanelSuiteViewProps> = ({
                   required
                   value={dnsHost}
                   onChange={(e) => setDnsHost(e.target.value)}
-                  placeholder="api.ferroushub.vn"
+                  placeholder="app.example.com"
                   className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100"
                 />
               </div>

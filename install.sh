@@ -423,12 +423,16 @@ else
     BUILD_WORKSPACE="${SRC_DIR}"
   fi
 
-  # Ensure prebuilt dist/ static UI exists (download ferrous-dist.tar.gz if dist/index.html is missing)
+  # Ensure prebuilt dist/ static UI exists (download ferrous-dist.tar.gz if dist/index.html is missing,
+  # or build locally if npm is available on a self-hosted open-source fork)
   if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
     echo -e "${CYAN}[*] Downloading prebuilt static frontend bundle (ferrous-dist.tar.gz)...${NC}"
     mkdir -p "${BUILD_WORKSPACE}/dist"
     if curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null; then
       tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${BUILD_WORKSPACE}/dist"
+    elif command -v npm >/dev/null 2>&1 && [ -f "${BUILD_WORKSPACE}/package.json" ]; then
+      echo -e "${CYAN}[*] Prebuilt bundle unavailable; building frontend locally via npm...${NC}"
+      (cd "${BUILD_WORKSPACE}" && npm install --no-audit --no-fund && npm run build) || true
     fi
   fi
 
@@ -454,6 +458,9 @@ else
       fi
     ); then
       FX_COMMIT="$(git -C "${FERROUSX_SRC_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'main')"
+      if [ -f "${FERROUSX_SRC_DIR}/Cargo.toml" ] && grep -q '^rust-version = ' "${FERROUSX_SRC_DIR}/Cargo.toml"; then
+        sed -i '/^rust-version = /d' "${FERROUSX_SRC_DIR}/Cargo.toml"
+      fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml" ] && ! grep -Eq '^[[:space:]]*anyhow[[:space:]]*[.=]' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml"; then
         echo -e "${CYAN}[*] Applying compatibility patch: adding anyhow.workspace = true to upstream ferrousx-core/Cargo.toml...${NC}"
         awk '/^\[dependencies\]$/ { print; print "anyhow.workspace = true"; next } { print }' \
@@ -509,6 +516,9 @@ else
           ' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" && \
             mv "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
+      fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs" ] && grep -q 'let mut saw_end_request = false;' "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs"; then
+        sed -i 's/let mut saw_end_request = false;/let saw_end_request: bool;/' "${FERROUSX_SRC_DIR}/crates/ferrousx-proxy/src/fastcgi.rs"
       fi
       echo -e "${CYAN}[*] Building upstream FerrousX (${FX_COMMIT}) binaries (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
