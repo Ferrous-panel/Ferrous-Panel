@@ -262,6 +262,12 @@ update_ferrousx_from_github() {
     ); then
       local fx_commit
       fx_commit="$(git -C "${FERROUSX_SRC_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'main')"
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml" ] && ! grep -Eq '^[[:space:]]*anyhow[[:space:]]*[.=]' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml"; then
+        echo -e "${CYAN}[*] Applying compatibility patch: adding anyhow.workspace = true to upstream ferrousx-core/Cargo.toml...${NC}"
+        awk '/^\[dependencies\]$/ { print; print "anyhow.workspace = true"; next } { print }' \
+          "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml" > "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml.tmp" && \
+          mv "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/Cargo.toml"
+      fi
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
