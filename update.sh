@@ -284,6 +284,40 @@ update_ferrousx_from_github() {
         git -C "${FERROUSX_SRC_DIR}" ls-files --error-unmatch Cargo.lock >/dev/null 2>&1 || rm -f "${FERROUSX_SRC_DIR}/Cargo.lock"
         (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
       fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" ]; then
+        if grep -q 'mut stream: up_stream,' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: fixing struct pattern mutability in upstream ferrousx-http/src/server.rs...${NC}"
+          sed -i 's/mut stream: up_stream,/stream: mut up_stream,/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
+        if grep -q 'while let Some(chunk) = match decoder\.next_decoded()' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: fixing chunked decoder loop in upstream ferrousx-http/src/server.rs...${NC}"
+          awk '
+            /while let Some\(chunk\) = match decoder\.next_decoded\(\) \{/ {
+              print "                    let mut stream_err = false;"
+              print "                    loop {"
+              print "                        match decoder.next_decoded() {"
+              print "                            Ok(Some(chunk)) => {"
+              print "                                write_http1_stream_chunk(stream, &chunk, use_chunked, stats).await?;"
+              print "                            }"
+              print "                            Ok(None) => break,"
+              print "                            Err(_) => {"
+              print "                                stream_err = true;"
+              print "                                break;"
+              print "                            }"
+              print "                        }"
+              print "                    }"
+              print "                    if stream_err || decoder.is_done() {"
+              print "                        break;"
+              print "                    }"
+              skip = 8
+              next
+            }
+            skip > 0 { skip--; next }
+            { print }
+          ' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" && \
+            mv "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
+      fi
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
