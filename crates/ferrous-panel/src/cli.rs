@@ -5,7 +5,9 @@ use crate::auth::password::{
 use crate::config::Config;
 use crate::error::PanelError;
 use crate::system::cmd::{self, AllowedBinary};
-use crate::system::validate::{Domain, Port};
+use crate::system::validate::{
+    is_reserved_website_port, validate_panel_port, Domain, DEFAULT_PANEL_PORT,
+};
 use crate::webserver::{atomic_write_file, EngineKind, WebServerManager};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
@@ -244,6 +246,44 @@ async fn ensure_clean_panel_systemd_unit(env_file: &Path) -> Result<()> {
         changed = true;
     }
 
+    let mut dropin_changed = false;
+    let dropin_dir = Path::new("/etc/systemd/system/ferrous-panel.service.d");
+    if dropin_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(dropin_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) != Some("conf") {
+                    continue;
+                }
+                let Ok(drop_raw) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                if drop_raw.contains("FERROUS_PORT=") || drop_raw.contains("--port") {
+                    let filtered_lines: Vec<&str> = drop_raw
+                        .lines()
+                        .filter(|l| {
+                            let t = l.trim();
+                            !(t.starts_with("Environment=") && t.contains("FERROUS_PORT="))
+                                && !(t.starts_with("ExecStart=") && t.contains("--port"))
+                        })
+                        .collect();
+                    let has_directive = filtered_lines.iter().any(|l| {
+                        let t = l.trim();
+                        !t.is_empty() && !t.starts_with('#') && !t.starts_with('[')
+                    });
+                    if has_directive {
+                        let mut next_drop = filtered_lines.join("\n");
+                        next_drop.push('\n');
+                        let _ = atomic_write_file(&p, next_drop.as_bytes(), 0o644);
+                    } else {
+                        let _ = std::fs::remove_file(&p);
+                    }
+                    dropin_changed = true;
+                }
+            }
+        }
+    }
+
     if changed {
         let mut next_content = out_lines.join("\n");
         if !next_content.is_empty() {
@@ -251,9 +291,9 @@ async fn ensure_clean_panel_systemd_unit(env_file: &Path) -> Result<()> {
         }
         atomic_write_file(unit_path, next_content.as_bytes(), 0o644)
             .map_err(|e| anyhow::anyhow!("failed updating {}: {e}", unit_path.display()))?;
-        if AllowedBinary::Systemctl.is_available() {
-            run_systemctl(&["daemon-reload"]).await?;
-        }
+    }
+    if (changed || dropin_changed) && AllowedBinary::Systemctl.is_available() {
+        run_systemctl(&["daemon-reload"]).await?;
     }
     Ok(())
 }
@@ -277,21 +317,25 @@ async fn wait_panel_ready(bind: &str, port: u16) -> bool {
 
 fn read_env_key(env_file: &Path, key: &str) -> Option<String> {
     let raw = std::fs::read_to_string(env_file).ok()?;
+    let mut found: Option<String> = None;
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         if let Some((k, v)) = trimmed.split_once('=') {
-            if k.trim() == key {
+            let clean_key = k.trim().trim_start_matches("export ").trim();
+            if clean_key == key {
                 let val = v.trim().trim_matches('"').trim_matches('\'').trim();
                 if !val.is_empty() {
-                    return Some(val.to_string());
+                    found = Some(val.to_string());
+                } else {
+                    found = None;
                 }
             }
         }
     }
-    None
+    found
 }
 
 fn detect_display_host(env_file: &Path) -> String {
@@ -340,7 +384,11 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
             }
             "FERROUS_PORT" if !cli_flag_provided("--port") => {
                 if let Ok(p) = val.parse::<u16>() {
-                    cfg.port = p;
+                    cfg.port = if p == 0 || is_reserved_website_port(p) {
+                        DEFAULT_PANEL_PORT
+                    } else {
+                        p
+                    };
                 }
             }
             "FERROUS_DATA_DIR" if !val.is_empty() && !cli_flag_provided("--data-dir") => {
@@ -410,7 +458,11 @@ pub fn apply_default_env_files(cfg: &mut Config) {
                 }
                 "FERROUS_PORT" if !cli_flag_provided("--port") => {
                     if let Ok(p) = val.parse::<u16>() {
-                        cfg.port = p;
+                        cfg.port = if p == 0 || is_reserved_website_port(p) {
+                            DEFAULT_PANEL_PORT
+                        } else {
+                            p
+                        };
                     }
                 }
                 "FERROUS_DATA_DIR" if !val.is_empty() && !cli_flag_provided("--data-dir") => {
@@ -526,9 +578,12 @@ pub fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<()> {
             continue;
         }
         if let Some((k, _)) = trimmed.split_once('=') {
-            if k.trim() == key {
-                ordered_lines.push(format!("{key}={value}"));
-                kv_seen.insert(key.to_string(), true);
+            let clean_key = k.trim().trim_start_matches("export ").trim();
+            if clean_key == key {
+                if !kv_seen.contains_key(key) {
+                    ordered_lines.push(format!("{key}={value}"));
+                    kv_seen.insert(key.to_string(), true);
+                }
                 continue;
             }
         }
@@ -561,7 +616,7 @@ fn normalize_entrance(raw: &str) -> Result<String> {
     }
 }
 
-async fn print_status(config: &Config) -> Result<()> {
+async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
     let creds_path = config.credentials_path();
     let (username, has_creds) = if creds_path.is_file() {
         let raw = std::fs::read_to_string(&creds_path)?;
@@ -580,19 +635,56 @@ async fn print_status(config: &Config) -> Result<()> {
         .load_config()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
+    let active_port = if config.port == 0 || is_reserved_website_port(config.port) {
+        DEFAULT_PANEL_PORT
+    } else {
+        config.port
+    };
+    let display_host = detect_display_host(env_file);
+    let probe_host = match config.bind.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
+    };
+    let listening = tokio::net::TcpStream::connect((probe_host, active_port))
+        .await
+        .is_ok();
+
     println!("======================================================================");
     println!("  FERROUS-PANEL — RUNTIME STATUS (100% Pure Rust)");
     println!("======================================================================");
-    println!("  Bind Address     : {}:{}", config.bind, config.port);
+    println!(
+        "  Bind Address     : {}:{} ({})",
+        config.bind,
+        active_port,
+        if listening {
+            "LISTENING"
+        } else {
+            "NOT LISTENING — run `sudo fp restart`"
+        }
+    );
     println!("  Security Entrance: {}", config.security_entrance);
+    if config.bind == "127.0.0.1" || config.bind == "::1" {
+        println!(
+            "  Panel URL (Local): http://{}:{}{}",
+            config.bind, active_port, config.security_entrance
+        );
+    } else {
+        println!(
+            "  Panel URL (IP)   : http://{display_host}:{active_port}{}",
+            config.security_entrance
+        );
+    }
     if let Some(ref dom) = config.custom_domain {
         if !dom.trim().is_empty() {
-            println!("  Custom Domain    : {dom}");
+            println!("  Custom Domain    : {}", dom.trim());
             println!(
-                "  Panel URL (Domain): http://{}:{}{}",
+                "  Panel URL (Domain): http://{}:{active_port}{}",
                 dom.trim(),
-                config.port,
                 config.security_entrance
+            );
+            println!(
+                "  Cloudflare Note  : Set DNS record '{}' to DNS-Only (Gray Cloud) for HTTP :{active_port}; ports 80/443 are reserved strictly for websites.",
+                dom.trim()
             );
         }
     }
@@ -604,7 +696,10 @@ async fn print_status(config: &Config) -> Result<()> {
     );
     println!("  SQLite Store     : {}", config.db_path().display());
     println!("  Web Root         : {}", config.wwwroot.display());
-    println!("  Web Server Engine: {}", ws_cfg.frontend_engine);
+    println!(
+        "  Web Server Engine: {} (exclusively owns ports 80 & 443 for websites)",
+        ws_cfg.frontend_engine
+    );
     println!("======================================================================");
     Ok(())
 }
@@ -769,37 +864,44 @@ pub async fn run_fp_command(
             );
         }
         FpCommand::Port { port } => {
+            let current_port = if config.port == 0 || is_reserved_website_port(config.port) {
+                DEFAULT_PANEL_PORT
+            } else {
+                config.port
+            };
             let port_num = match port {
                 Some(p) => p,
                 None => {
                     let prompt = format!(
-                        "Enter new panel port (1..=65535, current {}, default 8443): ",
-                        config.port
+                        "Enter new panel port (1..=65535, excluding website ports 80/443; current {current_port}, default {DEFAULT_PANEL_PORT}): "
                     );
                     let raw = prompt_line(&prompt)?;
                     let cleaned = raw.trim().trim_start_matches(':');
                     if cleaned.is_empty() {
-                        println!("Port unchanged (still {}).", config.port);
+                        println!("Port unchanged (still {current_port}).");
                         return Ok(());
                     }
                     if cleaned.eq_ignore_ascii_case("default") {
-                        8443
+                        DEFAULT_PANEL_PORT
                     } else {
                         cleaned
                             .parse::<u16>()
-                            .context("invalid port integer (expected 1..=65535)")?
+                            .context("invalid port integer (expected 1..=65535, excluding 80/443)")?
                     }
                 }
             };
-            let valid_port = Port::new(port_num).map_err(|e| anyhow::anyhow!("{e}"))?;
-            let prev_port = config.port;
+            let valid_port = validate_panel_port(port_num).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let prev_port = current_port;
 
             ensure_default_env_file(env_file, config)?;
             upsert_env_var(env_file, "FERROUS_PORT", &valid_port.to_string())?;
             ensure_clean_panel_systemd_unit(env_file).await?;
 
-            if config.bind != "127.0.0.1"
-                && config.bind != "::1"
+            let effective_bind = read_env_key(env_file, "FERROUS_BIND")
+                .unwrap_or_else(|| config.bind.clone());
+
+            if effective_bind != "127.0.0.1"
+                && effective_bind != "::1"
                 && AllowedBinary::Ufw.is_available()
             {
                 let rule = format!("{valid_port}/tcp");
@@ -823,27 +925,25 @@ pub async fn run_fp_command(
                         )
                     });
                 }
-                if !wait_panel_ready(&config.bind, valid_port.get()).await {
+                if !wait_panel_ready(&effective_bind, valid_port.get()).await {
                     if prev_port != valid_port.get() {
                         let _ = upsert_env_var(env_file, "FERROUS_PORT", &prev_port.to_string());
                         let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
                     }
                     bail!(
-                        "{PANEL_SERVICE} is not listening on {}:{} (port may already be in use by Nginx/FerrousX/other service); reverted FERROUS_PORT to {prev_port}. Check `sudo fp logs`.",
-                        config.bind,
-                        valid_port
+                        "{PANEL_SERVICE} is not listening on {effective_bind}:{valid_port} (port may already be in use by another service); reverted FERROUS_PORT to {prev_port}. Check `sudo fp logs`."
                     );
                 }
             }
 
             println!(
-                "Updated FERROUS_PORT={valid_port} in {} and restarted {PANEL_SERVICE}.",
+                "Updated FERROUS_PORT={valid_port} in {} and verified {PANEL_SERVICE} is listening on {effective_bind}:{valid_port}.",
                 env_file.display()
             );
-            if config.bind == "127.0.0.1" || config.bind == "::1" {
+            if effective_bind == "127.0.0.1" || effective_bind == "::1" {
                 println!(
-                    "  Panel URL (Local) : http://{}:{valid_port}{}",
-                    config.bind, config.security_entrance
+                    "  Panel URL (Local) : http://{effective_bind}:{valid_port}{}",
+                    config.security_entrance
                 );
                 println!("  Note: bind IP is local-only; run `sudo fp bind 0.0.0.0` to allow public access.");
             } else {
@@ -858,6 +958,10 @@ pub async fn run_fp_command(
                             "  Panel URL (Domain): http://{}:{valid_port}{}",
                             dom.trim(),
                             config.security_entrance
+                        );
+                        println!(
+                            "  Cloudflare Note   : Keep '{}' on DNS-Only (Gray Cloud) to reach HTTP :{valid_port}. Ports 80/443 are reserved strictly for websites.",
+                            dom.trim()
                         );
                     }
                 }
@@ -914,16 +1018,24 @@ pub async fn run_fp_command(
                 if AllowedBinary::Systemctl.is_available() {
                     run_systemctl(&["restart", PANEL_SERVICE]).await?;
                 }
+                let active_port = if config.port == 0 || is_reserved_website_port(config.port) {
+                    DEFAULT_PANEL_PORT
+                } else {
+                    config.port
+                };
                 println!(
                     "Updated FERROUS_CUSTOM_DOMAIN={} in {} and restarted {PANEL_SERVICE}.",
                     valid_domain.as_str(),
                     env_file.display()
                 );
                 println!(
-                    "  Panel URL: http://{}:{}{}",
+                    "  Panel URL: http://{}:{active_port}{}",
                     valid_domain.as_str(),
-                    config.port,
                     config.security_entrance
+                );
+                println!(
+                    "  Note     : Keep '{}' on DNS-Only (Gray Cloud) if using Cloudflare; ports 80/443 are reserved strictly for websites.",
+                    valid_domain.as_str()
                 );
             }
         }
@@ -992,7 +1104,7 @@ pub async fn run_fp_command(
             );
         }
         FpCommand::Status => {
-            print_status(config).await?;
+            print_status(config, env_file).await?;
         }
         FpCommand::Check => {
             check_services(config).await?;
@@ -1265,6 +1377,28 @@ mod tests {
         ensure(
             cfg.security_entrance == "/panel-sec",
             "apply_env_file loaded FERROUS_SECURITY_ENTRANCE",
+        )?;
+
+        // Duplicate keys must be deduplicated and reserved website ports 80/443 must fall back to 8443.
+        std::fs::write(
+            &env_file,
+            "FERROUS_PORT=443\nexport FERROUS_PORT=80\nFERROUS_BIND=0.0.0.0\n",
+        )?;
+        let mut reserved_cfg = Config::for_test(dir.join("data"), dir.join("wwwroot"));
+        apply_env_file(&mut reserved_cfg, &env_file);
+        ensure(
+            reserved_cfg.port == DEFAULT_PANEL_PORT,
+            "apply_env_file must never bind reserved website ports 80/443",
+        )?;
+        upsert_env_var(&env_file, "FERROUS_PORT", "8443")?;
+        let deduped = std::fs::read_to_string(&env_file)?;
+        ensure(
+            deduped.matches("FERROUS_PORT=").count() == 1 && deduped.contains("FERROUS_PORT=8443"),
+            "upsert_env_var must deduplicate FERROUS_PORT entries",
+        )?;
+        ensure(
+            validate_panel_port(80).is_err() && validate_panel_port(443).is_err(),
+            "validate_panel_port must reject ports 80 and 443",
         )?;
 
         let _ = std::fs::remove_dir_all(&dir);

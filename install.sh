@@ -117,6 +117,16 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+if ! [[ "${PANEL_PORT}" =~ ^[0-9]+$ ]] || [ "${PANEL_PORT}" -lt 1 ] || [ "${PANEL_PORT}" -gt 65535 ]; then
+  echo -e "${RED}[ERROR] Invalid --port '${PANEL_PORT}' (expected integer 1..65535; default: 8443).${NC}" >&2
+  exit 1
+fi
+if [ "${PANEL_PORT}" -eq 80 ] || [ "${PANEL_PORT}" -eq 443 ]; then
+  echo -e "${RED}[ERROR] Port ${PANEL_PORT} is reserved exclusively for websites served by Nginx/FerrousX.${NC}" >&2
+  echo -e "${YELLOW}Choose a dedicated control-plane port for FerrousPanel (default: 8443).${NC}" >&2
+  exit 1
+fi
+
 if [ ! -f /etc/os-release ]; then
   echo -e "${RED}[ERROR] Missing /etc/os-release; Ubuntu 22.04/24.04 LTS required.${NC}" >&2
   exit 1
@@ -894,7 +904,6 @@ Type=simple
 User=root
 Environment=FERROUSX_CONFIG=/etc/ferrousx/ferrousx.toml
 EnvironmentFile=-/etc/ferrousx/ferrousx.env
-EnvironmentFile=-/etc/ferrous-panel/panel.env
 RuntimeDirectory=ferrousx
 RuntimeDirectoryMode=0750
 ExecStartPre=/usr/local/bin/ferrousx-bin --check-config --config ${FERROUSX_CONFIG}

@@ -448,7 +448,6 @@ Type=simple
 User=root
 Environment=FERROUSX_CONFIG=/etc/ferrousx/ferrousx.toml
 EnvironmentFile=-/etc/ferrousx/ferrousx.env
-EnvironmentFile=-/etc/ferrous-panel/panel.env
 RuntimeDirectory=ferrousx
 RuntimeDirectoryMode=0750
 ExecStartPre=/usr/local/bin/ferrousx-bin --check-config --config ${FERROUSX_CONFIG}
@@ -779,8 +778,27 @@ if [ "$UPDATE_PANEL" = true ]; then
   fi
 
   if [ -f /etc/ferrous-panel/panel.env ]; then
-    if ! grep -q '^FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null; then
-      echo "FERROUS_PORT=8443" >> /etc/ferrous-panel/panel.env
+    RAW_PANEL_PORT="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+    if [ -z "${RAW_PANEL_PORT}" ] || ! [[ "${RAW_PANEL_PORT}" =~ ^[0-9]+$ ]] || [ "${RAW_PANEL_PORT}" -lt 1 ] || [ "${RAW_PANEL_PORT}" -gt 65535 ]; then
+      RAW_PANEL_PORT="8443"
+    elif [ "${RAW_PANEL_PORT}" -eq 80 ] || [ "${RAW_PANEL_PORT}" -eq 443 ]; then
+      echo -e "${YELLOW}[!] FERROUS_PORT=${RAW_PANEL_PORT} is reserved exclusively for websites (Nginx/FerrousX); resetting panel port to 8443...${NC}"
+      RAW_PANEL_PORT="8443"
+    fi
+    # Deduplicate any duplicate/export FERROUS_PORT lines so systemd always reads one clean port
+    awk -v port="${RAW_PANEL_PORT}" '
+      /^[[:space:]]*(export[[:space:]]+)?FERROUS_PORT=/ {
+        if (!seen) { print "FERROUS_PORT=" port; seen=1 }
+        next
+      }
+      { print }
+      END { if (!seen) print "FERROUS_PORT=" port }
+    ' /etc/ferrous-panel/panel.env > /etc/ferrous-panel/panel.env.tmp && \
+      chmod 0600 /etc/ferrous-panel/panel.env.tmp && \
+      mv /etc/ferrous-panel/panel.env.tmp /etc/ferrous-panel/panel.env
+
+    if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      echo "FERROUS_BIND=0.0.0.0" >> /etc/ferrous-panel/panel.env
     fi
     if [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
       if ! grep -q '^FERROUS_PUBLIC_IP=' /etc/ferrous-panel/panel.env 2>/dev/null; then
@@ -788,6 +806,24 @@ if [ "$UPDATE_PANEL" = true ]; then
       else
         sed -i "s|^FERROUS_PUBLIC_IP=.*|FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}|" /etc/ferrous-panel/panel.env
       fi
+    fi
+  fi
+
+  if [ -d /etc/systemd/system/ferrous-panel.service.d ]; then
+    DROPIN_CLEANED=false
+    for dropin in /etc/systemd/system/ferrous-panel.service.d/*.conf; do
+      [ -f "$dropin" ] || continue
+      if grep -qE '(FERROUS_PORT=|--port)' "$dropin" 2>/dev/null; then
+        echo -e "${YELLOW}[!] Removing stale port override in ${dropin}...${NC}"
+        sed -i -E '/^[[:space:]]*Environment=.*FERROUS_PORT=/d; /^[[:space:]]*ExecStart=.*--port/d' "$dropin"
+        if ! grep -qE '^[[:space:]]*[^#[:space:]\[]' "$dropin" 2>/dev/null; then
+          rm -f "$dropin"
+        fi
+        DROPIN_CLEANED=true
+      fi
+    done
+    if [ "$DROPIN_CLEANED" = true ]; then
+      systemctl daemon-reload 2>/dev/null || true
     fi
   fi
 
@@ -818,15 +854,48 @@ EOF_SVC
     fi
   fi
 
-  ACTIVE_PANEL_PORT="$(grep -E '^FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null | head -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  ACTIVE_PANEL_PORT="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
   ACTIVE_PANEL_PORT="${ACTIVE_PANEL_PORT:-8443}"
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
-    ufw allow "${ACTIVE_PANEL_PORT}/tcp" comment 'FerrousPanel' >/dev/null 2>&1 || true
+  ACTIVE_PANEL_BIND="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  ACTIVE_PANEL_BIND="${ACTIVE_PANEL_BIND:-0.0.0.0}"
+  ACTIVE_PANEL_ENTRANCE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_SECURITY_ENTRANCE=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  ACTIVE_PANEL_ENTRANCE="${ACTIVE_PANEL_ENTRANCE:-/panel}"
+  ACTIVE_PANEL_DOMAIN="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_CUSTOM_DOMAIN=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true
+    ufw allow 443/tcp comment 'HTTPS' >/dev/null 2>&1 || true
+    if [ "${ACTIVE_PANEL_BIND}" != "127.0.0.1" ] && [ "${ACTIVE_PANEL_BIND}" != "::1" ]; then
+      ufw allow "${ACTIVE_PANEL_PORT}/tcp" comment 'FerrousPanel' >/dev/null 2>&1 || true
+    fi
   fi
 
   ln -sf "${BIN_PANEL}" /usr/local/bin/fp
   ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
   systemctl restart ferrous-panel.service 2>/dev/null || true
+
+  PROBE_HOST="${ACTIVE_PANEL_BIND}"
+  if [ "${PROBE_HOST}" = "0.0.0.0" ] || [ "${PROBE_HOST}" = "::" ]; then
+    PROBE_HOST="127.0.0.1"
+  fi
+  PANEL_READY=false
+  for _ in $(seq 1 25); do
+    if curl -fsS "http://${PROBE_HOST}:${ACTIVE_PANEL_PORT}/api/health" >/dev/null 2>&1; then
+      PANEL_READY=true
+      break
+    fi
+    sleep 0.2
+  done
+  if [ "$PANEL_READY" = true ]; then
+    echo -e "${GREEN}[+] ferrous-panel.service is live on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (ports 80/443 reserved exclusively for websites).${NC}"
+    echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+    if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
+      echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+      echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
+    fi
+  else
+    echo -e "${YELLOW}[!] Warning: ferrous-panel.service did not answer /api/health on ${PROBE_HOST}:${ACTIVE_PANEL_PORT}; check 'sudo fp logs'.${NC}"
+  fi
 fi
 
 update_nginx_engine() {

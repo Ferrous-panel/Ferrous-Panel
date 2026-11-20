@@ -9,6 +9,7 @@ use ferrous_panel::cli::{
 use ferrous_panel::config::Config;
 use ferrous_panel::configure_app;
 use ferrous_panel::state::AppState;
+use ferrous_panel::system::validate::{is_reserved_website_port, DEFAULT_PANEL_PORT};
 use ferrous_panel::webserver::WebServerManager;
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
@@ -22,7 +23,15 @@ fn init_tracing() {
         .try_init();
 }
 
-async fn run_server(config: Config) -> anyhow::Result<()> {
+async fn run_server(mut config: Config) -> anyhow::Result<()> {
+    if config.port == 0 || is_reserved_website_port(config.port) {
+        tracing::warn!(
+            configured_port = config.port,
+            fallback_port = DEFAULT_PANEL_PORT,
+            "ports 80 and 443 are reserved exclusively for websites (Nginx/FerrousX); falling back panel port to 8443"
+        );
+        config.port = DEFAULT_PANEL_PORT;
+    }
     let bind_addr = config.bind.clone();
     let bind_port = config.port;
     let (state, initial_password) =
