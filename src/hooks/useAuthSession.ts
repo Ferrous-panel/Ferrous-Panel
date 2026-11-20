@@ -84,19 +84,25 @@ export function useAuthSession(onAuthenticatedFetch?: () => void) {
   );
 
   const handleLogout = useCallback(async () => {
+    const activeToken =
+      sessionToken || localStorage.getItem('fp_admin_session_token');
     try {
-      if (sessionToken) {
-        await fetch('/api/auth/logout', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${sessionToken}`
-          },
-          body: JSON.stringify({ token: sessionToken })
-        });
-      }
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(activeToken
+            ? {
+                Authorization: `Bearer ${activeToken}`,
+                'X-FP-Session': activeToken
+              }
+            : {})
+        },
+        body: JSON.stringify({ token: activeToken || null })
+      });
     } catch {
-      // ignore
+      // ignore network error during logout
     } finally {
       localStorage.removeItem('fp_admin_session_token');
       localStorage.removeItem('fp_admin_user');

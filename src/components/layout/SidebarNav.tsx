@@ -1,5 +1,5 @@
 import React from 'react';
-import { Moon, RefreshCw, Sun } from 'lucide-react';
+import { LogOut, Moon, RefreshCw, Sun } from 'lucide-react';
 import { ActiveTab } from '../../types';
 import { PanelLanguage } from '../../i18n';
 import { SidebarNavItem } from '../../config/navigation';
@@ -16,6 +16,7 @@ interface SidebarNavProps {
   onRefresh: () => void;
   adminUsername: string;
   sshPort: number;
+  onLogout: () => void;
   tr: (viText: string, enText: string) => string;
 }
 
@@ -31,6 +32,7 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
   onRefresh,
   adminUsername,
   sshPort,
+  onLogout,
   tr
 }) => {
   return (
@@ -132,6 +134,15 @@ export const SidebarNav: React.FC<SidebarNavProps> = ({
           <span>{adminUsername}</span>
           <span>SSH :{sshPort}</span>
         </div>
+
+        <button
+          type="button"
+          onClick={onLogout}
+          className="w-full px-3 py-2 text-xs font-semibold rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/70 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 transition-colors inline-flex items-center justify-center gap-2 cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5 shrink-0" />
+          <span>{tr('Đăng xuất (Log Out)', 'Log Out')}</span>
+        </button>
       </div>
     </aside>
   );

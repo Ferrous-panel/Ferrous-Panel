@@ -184,6 +184,135 @@ async fn run_systemctl(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_clean_panel_systemd_unit(env_file: &Path) -> Result<()> {
+    let unit_path = Path::new("/etc/systemd/system/ferrous-panel.service");
+    if !unit_path.is_file() {
+        return Ok(());
+    }
+    let Ok(raw) = std::fs::read_to_string(unit_path) else {
+        return Ok(());
+    };
+
+    let env_line = format!("EnvironmentFile=-{}", env_file.display());
+    let mut has_env_file = false;
+    let mut changed = false;
+    let mut out_lines: Vec<String> = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed == env_line {
+            has_env_file = true;
+            out_lines.push(line.to_string());
+            continue;
+        }
+        if trimmed.starts_with("Environment=") && trimmed.contains("FERROUS_PORT=") {
+            changed = true;
+            continue;
+        }
+        if trimmed.starts_with("ExecStart=") && trimmed.contains("--port") {
+            let value = trimmed.trim_start_matches("ExecStart=").trim();
+            let mut filtered: Vec<&str> = Vec::new();
+            let mut skip_next = false;
+            for tok in value.split_whitespace() {
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+                if tok == "--port" {
+                    skip_next = true;
+                    continue;
+                }
+                if tok.starts_with("--port=") {
+                    continue;
+                }
+                filtered.push(tok);
+            }
+            out_lines.push(format!("ExecStart={}", filtered.join(" ")));
+            changed = true;
+            continue;
+        }
+        if !has_env_file && trimmed.starts_with("ExecStart=") {
+            out_lines.push(env_line.clone());
+            has_env_file = true;
+            changed = true;
+        }
+        out_lines.push(line.to_string());
+    }
+
+    if !has_env_file {
+        out_lines.push(env_line);
+        changed = true;
+    }
+
+    if changed {
+        let mut next_content = out_lines.join("\n");
+        if !next_content.is_empty() {
+            next_content.push('\n');
+        }
+        atomic_write_file(unit_path, next_content.as_bytes(), 0o644)
+            .map_err(|e| anyhow::anyhow!("failed updating {}: {e}", unit_path.display()))?;
+        if AllowedBinary::Systemctl.is_available() {
+            run_systemctl(&["daemon-reload"]).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn wait_panel_ready(bind: &str, port: u16) -> bool {
+    let probe_host = match bind.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
+        other => other,
+    };
+    for _ in 0..24 {
+        if tokio::net::TcpStream::connect((probe_host, port))
+            .await
+            .is_ok()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    false
+}
+
+fn read_env_key(env_file: &Path, key: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(env_file).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            if k.trim() == key {
+                let val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_display_host(env_file: &Path) -> String {
+    if let Some(ip) = read_env_key(env_file, "FERROUS_PUBLIC_IP") {
+        if ip != "127.0.0.1" && ip != "0.0.0.0" {
+            return ip;
+        }
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if sock.connect("1.1.1.1:80").is_ok() {
+            if let Ok(addr) = sock.local_addr() {
+                let ip = addr.ip().to_string();
+                if !ip.starts_with("127.") && ip != "0.0.0.0" {
+                    return ip;
+                }
+            }
+        }
+    }
+    "<VPS-IP>".to_string()
+}
+
 fn cli_flag_provided(flag: &str) -> bool {
     let prefix = format!("{flag}=");
     std::env::args().skip(1).any(|arg| arg == flag || arg.starts_with(&prefix))
@@ -643,13 +772,36 @@ pub async fn run_fp_command(
             let port_num = match port {
                 Some(p) => p,
                 None => {
-                    let raw = prompt_line("Enter new panel port (1..=65535): ")?;
-                    raw.parse::<u16>().context("invalid port integer")?
+                    let prompt = format!(
+                        "Enter new panel port (1..=65535, current {}, default 8443): ",
+                        config.port
+                    );
+                    let raw = prompt_line(&prompt)?;
+                    let cleaned = raw.trim().trim_start_matches(':');
+                    if cleaned.is_empty() {
+                        println!("Port unchanged (still {}).", config.port);
+                        return Ok(());
+                    }
+                    if cleaned.eq_ignore_ascii_case("default") {
+                        8443
+                    } else {
+                        cleaned
+                            .parse::<u16>()
+                            .context("invalid port integer (expected 1..=65535)")?
+                    }
                 }
             };
             let valid_port = Port::new(port_num).map_err(|e| anyhow::anyhow!("{e}"))?;
+            let prev_port = config.port;
+
+            ensure_default_env_file(env_file, config)?;
             upsert_env_var(env_file, "FERROUS_PORT", &valid_port.to_string())?;
-            if AllowedBinary::Ufw.is_available() {
+            ensure_clean_panel_systemd_unit(env_file).await?;
+
+            if config.bind != "127.0.0.1"
+                && config.bind != "::1"
+                && AllowedBinary::Ufw.is_available()
+            {
                 let rule = format!("{valid_port}/tcp");
                 let _ = cmd::run(
                     AllowedBinary::Ufw,
@@ -658,13 +810,58 @@ pub async fn run_fp_command(
                 )
                 .await;
             }
+
             if AllowedBinary::Systemctl.is_available() {
-                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                if let Err(err) = run_systemctl(&["restart", PANEL_SERVICE]).await {
+                    if prev_port != valid_port.get() {
+                        let _ = upsert_env_var(env_file, "FERROUS_PORT", &prev_port.to_string());
+                        let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                    }
+                    return Err(err).with_context(|| {
+                        format!(
+                            "failed to restart {PANEL_SERVICE} on port {valid_port}; reverted FERROUS_PORT to {prev_port}"
+                        )
+                    });
+                }
+                if !wait_panel_ready(&config.bind, valid_port.get()).await {
+                    if prev_port != valid_port.get() {
+                        let _ = upsert_env_var(env_file, "FERROUS_PORT", &prev_port.to_string());
+                        let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                    }
+                    bail!(
+                        "{PANEL_SERVICE} is not listening on {}:{} (port may already be in use by Nginx/FerrousX/other service); reverted FERROUS_PORT to {prev_port}. Check `sudo fp logs`.",
+                        config.bind,
+                        valid_port
+                    );
+                }
             }
+
             println!(
-                "Updated FERROUS_PORT={valid_port} in {}.",
+                "Updated FERROUS_PORT={valid_port} in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
+            if config.bind == "127.0.0.1" || config.bind == "::1" {
+                println!(
+                    "  Panel URL (Local) : http://{}:{valid_port}{}",
+                    config.bind, config.security_entrance
+                );
+                println!("  Note: bind IP is local-only; run `sudo fp bind 0.0.0.0` to allow public access.");
+            } else {
+                let host = detect_display_host(env_file);
+                println!(
+                    "  Panel URL (IP)    : http://{host}:{valid_port}{}",
+                    config.security_entrance
+                );
+                if let Some(ref dom) = config.custom_domain {
+                    if !dom.trim().is_empty() {
+                        println!(
+                            "  Panel URL (Domain): http://{}:{valid_port}{}",
+                            dom.trim(),
+                            config.security_entrance
+                        );
+                    }
+                }
+            }
         }
         FpCommand::Entrance { path } => {
             let raw = match path {
@@ -674,20 +871,20 @@ pub async fn run_fp_command(
             let clean = normalize_entrance(&raw)?;
             upsert_env_var(env_file, "FERROUS_SECURITY_ENTRANCE", &clean)?;
             if AllowedBinary::Systemctl.is_available() {
-                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }
             println!(
-                "Updated FERROUS_SECURITY_ENTRANCE={clean} in {}.",
+                "Updated FERROUS_SECURITY_ENTRANCE={clean} in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
         }
         FpCommand::ClearEntrance => {
             upsert_env_var(env_file, "FERROUS_SECURITY_ENTRANCE", "/")?;
             if AllowedBinary::Systemctl.is_available() {
-                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }
             println!(
-                "Reset FERROUS_SECURITY_ENTRANCE=/ in {}.",
+                "Reset FERROUS_SECURITY_ENTRANCE=/ in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
         }
@@ -705,17 +902,20 @@ pub async fn run_fp_command(
             {
                 upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
                 if AllowedBinary::Systemctl.is_available() {
-                    let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                    run_systemctl(&["restart", PANEL_SERVICE]).await?;
                 }
-                println!("Cleared FERROUS_CUSTOM_DOMAIN in {}.", env_file.display());
+                println!(
+                    "Cleared FERROUS_CUSTOM_DOMAIN in {} and restarted {PANEL_SERVICE}.",
+                    env_file.display()
+                );
             } else {
                 let valid_domain = Domain::parse(trimmed).map_err(|e| anyhow::anyhow!("{e}"))?;
                 upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", valid_domain.as_str())?;
                 if AllowedBinary::Systemctl.is_available() {
-                    let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                    run_systemctl(&["restart", PANEL_SERVICE]).await?;
                 }
                 println!(
-                    "Updated FERROUS_CUSTOM_DOMAIN={} in {} and restarted panel service.",
+                    "Updated FERROUS_CUSTOM_DOMAIN={} in {} and restarted {PANEL_SERVICE}.",
                     valid_domain.as_str(),
                     env_file.display()
                 );
@@ -730,10 +930,10 @@ pub async fn run_fp_command(
         FpCommand::ClearDomain => {
             upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
             if AllowedBinary::Systemctl.is_available() {
-                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }
             println!(
-                "Cleared FERROUS_CUSTOM_DOMAIN in {} and restarted panel service.",
+                "Cleared FERROUS_CUSTOM_DOMAIN in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
         }
@@ -750,6 +950,7 @@ pub async fn run_fp_command(
                 .with_context(|| format!("invalid IP address '{trimmed}'"))?;
             let ip_str = parsed_ip.to_string();
             upsert_env_var(env_file, "FERROUS_BIND", &ip_str)?;
+            ensure_clean_panel_systemd_unit(env_file).await?;
             if !parsed_ip.is_loopback() && AllowedBinary::Ufw.is_available() {
                 let rule = format!("{}/tcp", config.port);
                 let _ = cmd::run(
@@ -760,10 +961,10 @@ pub async fn run_fp_command(
                 .await;
             }
             if AllowedBinary::Systemctl.is_available() {
-                let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+                run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }
             println!(
-                "Updated FERROUS_BIND={ip_str} in {} and restarted panel service.",
+                "Updated FERROUS_BIND={ip_str} in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
         }

@@ -778,12 +778,50 @@ if [ "$UPDATE_PANEL" = true ]; then
     install -m 0755 "${TMP_DIR}/ferrous-panel" "${BIN_PANEL}"
   fi
 
-  if [ -f /etc/ferrous-panel/panel.env ] && [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
-    if ! grep -q '^FERROUS_PUBLIC_IP=' /etc/ferrous-panel/panel.env 2>/dev/null; then
-      echo "FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}" >> /etc/ferrous-panel/panel.env
-    else
-      sed -i "s|^FERROUS_PUBLIC_IP=.*|FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}|" /etc/ferrous-panel/panel.env
+  if [ -f /etc/ferrous-panel/panel.env ]; then
+    if ! grep -q '^FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      echo "FERROUS_PORT=8443" >> /etc/ferrous-panel/panel.env
     fi
+    if [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
+      if ! grep -q '^FERROUS_PUBLIC_IP=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+        echo "FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}" >> /etc/ferrous-panel/panel.env
+      else
+        sed -i "s|^FERROUS_PUBLIC_IP=.*|FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}|" /etc/ferrous-panel/panel.env
+      fi
+    fi
+  fi
+
+  if [ -f /etc/systemd/system/ferrous-panel.service ]; then
+    if ! grep -q '^EnvironmentFile=-/etc/ferrous-panel/panel.env$' /etc/systemd/system/ferrous-panel.service 2>/dev/null \
+      || grep -qE '(^Environment=.*FERROUS_PORT=|^ExecStart=.*--port)' /etc/systemd/system/ferrous-panel.service 2>/dev/null; then
+      cat > /etc/systemd/system/ferrous-panel.service <<'EOF_SVC'
+[Unit]
+Description=FerrousPanel Pure-Rust VPS Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/ferrous-panel/panel.env
+ExecStart=/usr/local/bin/ferrous-panel serve
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF_SVC
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+  fi
+
+  ACTIVE_PANEL_PORT="$(grep -E '^FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null | head -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  ACTIVE_PANEL_PORT="${ACTIVE_PANEL_PORT:-8443}"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
+    ufw allow "${ACTIVE_PANEL_PORT}/tcp" comment 'FerrousPanel' >/dev/null 2>&1 || true
   fi
 
   ln -sf "${BIN_PANEL}" /usr/local/bin/fp
