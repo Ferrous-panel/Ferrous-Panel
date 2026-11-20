@@ -20,7 +20,7 @@ use crate::error::PanelError;
 use crate::modules::ModuleStore;
 use crate::system::cmd::AllowedBinary;
 use crate::system::paths::SafePath;
-use crate::system::validate::Domain;
+use crate::system::validate::{Domain, Port};
 use crate::webserver::{
     atomic_write_file, CommandExecutor, PhpFpmVersion, SafeFilename, WebServerEngine,
     WebServerManager,
