@@ -190,12 +190,13 @@ export const TopHeaderBar: React.FC<TopHeaderBarProps> = ({
         <button
           type="button"
           onClick={onLogout}
-          className="p-2 sm:px-2.5 sm:py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/30 dark:hover:text-rose-400 text-slate-600 dark:text-slate-400 transition-colors inline-flex items-center gap-1.5 cursor-pointer shrink-0"
-          title={tr('Đăng xuất khỏi FerrousPanel', 'Sign out of FerrousPanel')}
+          className="px-2 sm:px-2.5 py-1.5 text-xs font-medium rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/80 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 transition-colors inline-flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap"
+          title={tr('Đăng xuất khỏi FerrousPanel', 'Log out of FerrousPanel')}
+          aria-label={tr('Đăng xuất', 'Log Out')}
         >
-          <LogOut className="w-3.5 h-3.5" />
-          <span className="hidden md:inline">
-            {tr('Đăng xuất', 'Sign Out')}
+          <LogOut className="w-3.5 h-3.5 shrink-0" />
+          <span className="hidden sm:inline">
+            {tr('Đăng xuất', 'Log Out')}
           </span>
         </button>
       </div>

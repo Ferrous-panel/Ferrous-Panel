@@ -3605,6 +3605,21 @@ async fn sync_panel_network_changes(
     }
 }
 
+fn schedule_panel_service_restart(config: &Config) {
+    if !is_production_vps(config) || !AllowedBinary::Systemctl.is_available() {
+        return;
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        let _ = crate::system::cmd::run(
+            AllowedBinary::Systemctl,
+            &["restart", "ferrous-panel.service"],
+            CMD_TIMEOUT,
+        )
+        .await;
+    });
+}
+
 pub async fn update_panel_admin(
     store: &ModuleStore,
     config: &Config,
@@ -3616,6 +3631,7 @@ pub async fn update_panel_admin(
     let env_file = resolve_panel_env_path(config);
     let mut new_port_opened: Option<u16> = None;
     let mut domain_changed = false;
+    let mut restart_needed = false;
 
     if let Some(ref user) = patch.admin_username {
         let u = user.trim();
@@ -3635,15 +3651,20 @@ pub async fn update_panel_admin(
         }
     }
     if let Some(port) = patch.panel_port {
-        if port > 0 {
-            admin.panel_port = port;
-            let _ = upsert_env_var(&env_file, "FERROUS_PORT", &port.to_string());
-            new_port_opened = Some(port);
+        let valid_port = Port::new(port)?;
+        if admin.panel_port != valid_port.get() {
+            restart_needed = true;
         }
+        admin.panel_port = valid_port.get();
+        let _ = upsert_env_var(&env_file, "FERROUS_PORT", &valid_port.to_string());
+        new_port_opened = Some(valid_port.get());
     }
     if let Some(ent) = patch.security_entrance {
         let trimmed = ent.trim();
         if trimmed.starts_with('/') {
+            if admin.security_entrance != trimmed {
+                restart_needed = true;
+            }
             admin.security_entrance = trimmed.to_string();
             let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", trimmed);
         }
@@ -3651,11 +3672,17 @@ pub async fn update_panel_admin(
     if let Some(dom) = patch.custom_domain {
         let trimmed = dom.trim();
         if trimmed.is_empty() {
+            if admin.custom_domain.is_some() {
+                restart_needed = true;
+            }
             admin.custom_domain = None;
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
             domain_changed = true;
         } else {
             let valid = Domain::parse(trimmed)?;
+            if admin.custom_domain.as_deref() != Some(valid.as_str()) {
+                restart_needed = true;
+            }
             admin.custom_domain = Some(valid.as_str().to_string());
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
             domain_changed = true;
@@ -3675,6 +3702,9 @@ pub async fn update_panel_admin(
 
     admin.last_modified_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
     store.put_json(KV_PANEL_ADMIN, &admin)?;
+    if restart_needed {
+        schedule_panel_service_restart(config);
+    }
     Ok(admin)
 }
 
@@ -3694,10 +3724,8 @@ pub async fn run_panel_cli_action(
     let output = match option {
         1 => {
             if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
-                let _ = executor
-                    .run(AllowedBinary::Systemctl, &["reload-or-restart", "ferrous-panel.service"], CMD_TIMEOUT)
-                    .await;
-                "Triggered systemctl reload-or-restart ferrous-panel.service.".to_string()
+                schedule_panel_service_restart(config);
+                "Scheduled systemctl restart ferrous-panel.service.".to_string()
             } else {
                 "Panel service restart queued.".to_string()
             }
@@ -3707,6 +3735,7 @@ pub async fn run_panel_cli_action(
                 Ok(()) => "Web engine reloaded cleanly".to_string(),
                 Err(e) => format!("Web engine reload warning: {e}"),
             };
+            schedule_panel_service_restart(config);
             format!("{reload_msg}; panel configuration synced.")
         }
         5 => {
@@ -3731,13 +3760,28 @@ pub async fn run_panel_cli_action(
             }
         }
         7 => {
-            if let Some(p) = value.and_then(|v| v.trim().parse::<u16>().ok()).filter(|&p| p > 0) {
+            let parsed_port = value
+                .map(|v| v.trim().trim_start_matches(':'))
+                .and_then(|v| {
+                    if v.eq_ignore_ascii_case("default") {
+                        Some(8443)
+                    } else {
+                        v.parse::<u16>().ok()
+                    }
+                })
+                .filter(|&p| p > 0);
+            if let Some(p) = parsed_port {
                 admin.panel_port = p;
                 let _ = upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string());
                 sync_panel_network_changes(config, executor, Some(p), false).await;
-                format!("Updated FERROUS_PORT={p} in panel.env and opened UFW port {p}/tcp.")
+                schedule_panel_service_restart(config);
+                format!(
+                    "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: http://{}:{p}{}).",
+                    detect_vps_server_host(config),
+                    admin.security_entrance
+                )
             } else {
-                "Invalid port number.".to_string()
+                "Invalid port number (expected 1..=65535, default 8443).".to_string()
             }
         }
         8 => {
@@ -3745,7 +3789,8 @@ pub async fn run_panel_cli_action(
             if ent.starts_with('/') {
                 admin.security_entrance = ent.to_string();
                 let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", ent);
-                format!("Updated FERROUS_SECURITY_ENTRANCE={ent}.")
+                schedule_panel_service_restart(config);
+                format!("Updated FERROUS_SECURITY_ENTRANCE={ent} and scheduled panel restart.")
             } else {
                 "Security entrance must start with '/'.".to_string()
             }
@@ -3753,7 +3798,8 @@ pub async fn run_panel_cli_action(
         9 => {
             admin.security_entrance = "/".to_string();
             let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", "/");
-            "Reset security entrance back to '/'.".to_string()
+            schedule_panel_service_restart(config);
+            "Reset security entrance back to '/' and scheduled panel restart.".to_string()
         }
         10 => {
             let raw = value.unwrap_or("").trim();
@@ -3761,12 +3807,14 @@ pub async fn run_panel_cli_action(
                 admin.custom_domain = None;
                 let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
                 sync_panel_network_changes(config, executor, None, true).await;
+                schedule_panel_service_restart(config);
                 "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced reverse proxy.".to_string()
             } else {
                 let valid = Domain::parse(raw)?;
                 admin.custom_domain = Some(valid.as_str().to_string());
                 let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
                 sync_panel_network_changes(config, executor, None, true).await;
+                schedule_panel_service_restart(config);
                 format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env and synced FerrousX.", valid.as_str())
             }
         }
@@ -3783,6 +3831,7 @@ pub async fn run_panel_cli_action(
             admin.custom_domain = None;
             let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
             sync_panel_network_changes(config, executor, None, true).await;
+            schedule_panel_service_restart(config);
             "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced FerrousX.".to_string()
         }
         13 => {
@@ -3790,7 +3839,8 @@ pub async fn run_panel_cli_action(
             if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
                 let ip_str = ip.to_string();
                 let _ = upsert_env_var(&env_file, "FERROUS_BIND", &ip_str);
-                format!("Updated FERROUS_BIND={ip_str} in panel.env.")
+                schedule_panel_service_restart(config);
+                format!("Updated FERROUS_BIND={ip_str} in panel.env and scheduled panel restart.")
             } else {
                 "Invalid bind IP address (use 0.0.0.0 or 127.0.0.1).".to_string()
             }

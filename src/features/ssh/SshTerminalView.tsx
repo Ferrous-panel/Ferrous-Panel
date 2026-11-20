@@ -122,82 +122,76 @@ const FP_CLI_OPTIONS: {
     promptPlaceholder: 'Nhập tên tài khoản Admin mới (VD: superadmin)'
   },
   {
-    option: 8,
-    title: 'Đổi cổng Web Panel (Change Panel Port + UFW)',
-    command: 'fp 8',
+    option: 7,
+    title: 'Đổi cổng Web Panel (Change Panel Port + UFW, mặc định 8443)',
+    command: 'fp 7 <port>',
     category: 'admin',
-    promptPlaceholder: 'Nhập cổng mới (VD: 8443 hoặc 8888)'
+    promptPlaceholder: 'Nhập cổng mới (mặc định: 8443)'
+  },
+  {
+    option: 8,
+    title: 'Đổi đường dẫn bảo mật (Security Entrance Path)',
+    command: 'fp 8 <path>',
+    category: 'admin',
+    promptPlaceholder: 'Nhập đường dẫn bảo mật mới (VD: /panel)'
   },
   {
     option: 9,
-    title: 'Đổi đường dẫn bảo mật (Security Entrance Path)',
+    title: 'Xóa bỏ đường dẫn bảo mật về "/" (Clear Security Entrance)',
     command: 'fp 9',
-    category: 'admin',
-    promptPlaceholder: 'Nhập đường dẫn bảo mật mới (VD: /ferrous-admin)'
+    category: 'admin'
   },
   {
     option: 10,
-    title: 'Xóa bỏ đường dẫn bảo mật (Clear Security Entrance)',
-    command: 'fp 10',
-    category: 'admin'
-  },
-  {
-    option: 11,
-    title: 'Đặt lại mật khẩu Root SQL (MariaDB & PostgreSQL)',
-    command: 'fp 11',
-    category: 'admin',
-    promptPlaceholder: 'Nhập mật khẩu Root SQL mới'
-  },
-  {
-    option: 12,
-    title: 'Sửa chữa & Đồng bộ toàn diện kiến trúc VPS (Repair)',
-    command: 'fp 12',
-    category: 'repair'
-  },
-  {
-    option: 13,
-    title: 'Dọn dẹp Cache hệ thống & Giải phóng RAM (Drop Caches)',
-    command: 'fp 13',
-    category: 'repair'
-  },
-  {
-    option: 14,
-    title: 'Mở khóa IP Admin (Unban Fail2ban) & Tắt khóa 2FA',
-    command: 'fp 14',
-    category: 'repair'
-  },
-  {
-    option: 15,
-    title: 'Xem thông tin đăng nhập mặc định (fp default)',
-    command: 'fp 15',
-    category: 'admin'
-  },
-  {
-    option: 16,
-    title: 'Kiểm tra sức khỏe 8 tầng dịch vụ VPS (Health Check)',
-    command: 'fp 16',
-    category: 'repair'
-  },
-  {
-    option: 17,
     title: 'Gán Tên Miền Riêng cho Web Panel (Custom Domain)',
-    command: 'fp 17 <domain>',
+    command: 'fp 10 <domain>',
     category: 'admin',
     promptPlaceholder: 'Nhập tên miền (VD: panel.example.com)'
   },
   {
-    option: 18,
-    title: 'Xóa bỏ Tên Miền Riêng (Trở về đăng nhập bằng IP VPS)',
-    command: 'fp 18',
+    option: 11,
+    title: 'Kiểm tra & Nạp lại Web Server Engine (Repair & Reload)',
+    command: 'fp 11',
+    category: 'repair'
+  },
+  {
+    option: 12,
+    title: 'Xóa bỏ Tên Miền Riêng Panel (Clear Custom Domain)',
+    command: 'fp 12',
     category: 'admin'
+  },
+  {
+    option: 13,
+    title: 'Đổi IP lắng nghe Panel (0.0.0.0 công khai / 127.0.0.1 nội bộ)',
+    command: 'fp 13 <ip>',
+    category: 'admin',
+    promptPlaceholder: 'Nhập 0.0.0.0 hoặc 127.0.0.1'
+  },
+  {
+    option: 14,
+    title: 'Xem trạng thái Panel & đường dẫn truy cập (fp status)',
+    command: 'fp 14',
+    category: 'admin'
+  },
+  {
+    option: 15,
+    title: 'Kiểm tra sức khỏe dịch vụ hệ thống (Health Check)',
+    command: 'fp 15',
+    category: 'repair'
+  },
+  {
+    option: 16,
+    title: 'Xem nhật ký systemd của FerrousPanel (journalctl)',
+    command: 'fp 16',
+    category: 'repair'
   },
   {
     option: 19,
     title:
-      'Chuyển đổi Web Server Engine: FerrousX (github.com/Ferrous-panel/FerrousX) ↔ Nginx 1.26',
+      'Xem / Chuyển Web Server Engine: FerrousX ↔ Nginx',
     command: 'fp 19 [ferrousx|nginx]',
     category: 'service',
-    promptPlaceholder: 'Nhập ferrousx (mặc định) hoặc nginx'
+    promptPlaceholder: 'Nhập ferrousx hoặc nginx (để trống để xem trạng thái)'
   }
 ];
 
@@ -989,7 +983,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
                 <div className="flex items-center gap-1.5">
                   <input
                     type="number"
-                    min={1024}
+                    min={1}
                     max={65535}
                     value={panelPortInput}
                     onChange={(e) => setPanelPortInput(Number(e.target.value))}
@@ -999,7 +993,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
                     type="text"
                     value={entranceInput}
                     onChange={(e) => setEntranceInput(e.target.value)}
-                    placeholder="/ferrous_admin"
+                    placeholder="/panel"
                     className="flex-1 min-w-0 px-2 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white"
                   />
                 </div>
@@ -1064,16 +1058,16 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
                 </div>
               </div>
 
-              {/* Optional Parameter Input for Options 5, 6, 8, 9, 11 */}
+              {/* Optional Parameter Input for Options 5, 6, 7, 8, 10, 13 */}
               <div className="p-3.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center gap-3">
                 <div className="text-xs font-medium text-slate-700 dark:text-slate-300 shrink-0">
-                  Tham số tùy chọn (cho mục 5, 6, 8, 9, 11):
+                  Tham số tùy chọn (cho mục 5, 6, 7, 8, 10, 13):
                 </div>
                 <input
                   type="text"
                   value={fpOptionParam}
                   onChange={(e) => setFpOptionParam(e.target.value)}
-                  placeholder="Nhập mật khẩu mới / username mới / port mới / đường dẫn entrance trước khi bấm..."
+                  placeholder="Nhập mật khẩu / username / port (VD: 8443) / entrance / domain / bind IP..."
                   className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
                 />
               </div>
