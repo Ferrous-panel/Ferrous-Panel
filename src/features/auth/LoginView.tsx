@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertCircle,
   Eye,
@@ -39,13 +39,45 @@ export const LoginView: React.FC<LoginViewProps> = ({
   onToggleLang,
   onSelectLang
 }) => {
-  const browserPort =
+  const [healthPanelPort, setHealthPanelPort] = useState<number | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { panelPort?: number } | null) => {
+        if (!active || !data) return;
+        const p = Number(data.panelPort);
+        if (Number.isInteger(p) && p > 0 && p <= 65535 && p !== 80 && p !== 443) {
+          setHealthPanelPort(p);
+        }
+      })
+      .catch(() => {
+        // Ignore transient health probe errors on login view
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const rawBrowserPort =
     typeof window !== 'undefined' && window.location.port
       ? Number(window.location.port)
-      : typeof window !== 'undefined' && window.location.protocol === 'https:'
-        ? 443
-        : 8443;
-  const panelPort = panelAdminConfig?.panelPort || browserPort;
+      : 0;
+  const safeBrowserPort =
+    Number.isInteger(rawBrowserPort) &&
+    rawBrowserPort > 0 &&
+    rawBrowserPort !== 80 &&
+    rawBrowserPort !== 443
+      ? rawBrowserPort
+      : 8443;
+  const configuredPort =
+    panelAdminConfig?.panelPort &&
+    panelAdminConfig.panelPort !== 80 &&
+    panelAdminConfig.panelPort !== 443
+      ? panelAdminConfig.panelPort
+      : null;
+  const panelPort = configuredPort || healthPanelPort || safeBrowserPort;
   const isEn = lang === 'en';
 
   const handleChooseLang = (target: PanelLanguage) => {
@@ -124,7 +156,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <Server className="w-3.5 h-3.5 text-orange-500" />
             <span>
               {panelAdminConfig?.customDomain
-                ? `Domain: ${panelAdminConfig.customDomain}`
+                ? `Domain: ${panelAdminConfig.customDomain}:${panelPort}`
                 : `Node: ${serverHost}:${panelPort}`}
             </span>
           </div>

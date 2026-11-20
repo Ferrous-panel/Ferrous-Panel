@@ -20,7 +20,9 @@ use crate::error::PanelError;
 use crate::modules::ModuleStore;
 use crate::system::cmd::AllowedBinary;
 use crate::system::paths::SafePath;
-use crate::system::validate::{Domain, Port};
+use crate::system::validate::{
+    is_reserved_website_port, validate_panel_port, Domain, DEFAULT_PANEL_PORT,
+};
 use crate::webserver::{
     atomic_write_file, CommandExecutor, PhpFpmVersion, SafeFilename, WebServerEngine,
     WebServerManager,
@@ -2874,11 +2876,13 @@ pub fn load_panel_admin(
     let env_file = resolve_panel_env_path(config);
     if let Some(port) = read_env_file_value(&env_file, "FERROUS_PORT")
         .and_then(|v| v.parse::<u16>().ok())
-        .filter(|&p| p > 0)
+        .filter(|&p| p > 0 && !is_reserved_website_port(p))
     {
         admin.panel_port = port;
-    } else {
+    } else if config.port > 0 && !is_reserved_website_port(config.port) {
         admin.panel_port = config.port;
+    } else {
+        admin.panel_port = DEFAULT_PANEL_PORT;
     }
     if let Some(ent) = read_env_file_value(&env_file, "FERROUS_SECURITY_ENTRANCE") {
         if ent.starts_with('/') {
@@ -3651,7 +3655,7 @@ pub async fn update_panel_admin(
         }
     }
     if let Some(port) = patch.panel_port {
-        let valid_port = Port::new(port)?;
+        let valid_port = validate_panel_port(port)?;
         if admin.panel_port != valid_port.get() {
             restart_needed = true;
         }
@@ -3764,24 +3768,29 @@ pub async fn run_panel_cli_action(
                 .map(|v| v.trim().trim_start_matches(':'))
                 .and_then(|v| {
                     if v.eq_ignore_ascii_case("default") {
-                        Some(8443)
+                        Some(DEFAULT_PANEL_PORT)
                     } else {
                         v.parse::<u16>().ok()
                     }
-                })
-                .filter(|&p| p > 0);
-            if let Some(p) = parsed_port {
-                admin.panel_port = p;
-                let _ = upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string());
-                sync_panel_network_changes(config, executor, Some(p), false).await;
-                schedule_panel_service_restart(config);
-                format!(
-                    "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: http://{}:{p}{}).",
-                    detect_vps_server_host(config),
-                    admin.security_entrance
-                )
-            } else {
-                "Invalid port number (expected 1..=65535, default 8443).".to_string()
+                });
+            match parsed_port {
+                Some(p) if is_reserved_website_port(p) => format!(
+                    "Port {p} is reserved exclusively for websites (Nginx/FerrousX). Choose a dedicated panel port (default: {DEFAULT_PANEL_PORT})."
+                ),
+                Some(p) if p > 0 => {
+                    admin.panel_port = p;
+                    let _ = upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string());
+                    sync_panel_network_changes(config, executor, Some(p), false).await;
+                    schedule_panel_service_restart(config);
+                    format!(
+                        "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: http://{}:{p}{}).",
+                        detect_vps_server_host(config),
+                        admin.security_entrance
+                    )
+                }
+                _ => format!(
+                    "Invalid port number (expected 1..=65535 excluding website ports 80/443; default {DEFAULT_PANEL_PORT})."
+                ),
             }
         }
         8 => {

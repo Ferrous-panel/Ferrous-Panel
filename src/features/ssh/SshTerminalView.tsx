@@ -463,6 +463,25 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
 
   const handleSavePanelAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (
+      !Number.isInteger(panelPortInput) ||
+      panelPortInput < 1 ||
+      panelPortInput > 65535
+    ) {
+      setStatusBanner(
+        'Cổng Panel không hợp lệ (chấp nhận 1..65535, mặc định 8443).'
+      );
+      return;
+    }
+    if (panelPortInput === 80 || panelPortInput === 443) {
+      setStatusBanner(
+        'Cổng 80 và 443 chỉ dành riêng cho Website (Nginx/FerrousX), không được gán cho trang Panel. Vui lòng chọn cổng riêng (mặc định: 8443).'
+      );
+      setFpCliOutput(
+        `[ERROR] Port ${panelPortInput} is reserved exclusively for websites (Nginx/FerrousX). Use a dedicated panel port (default: 8443).`
+      );
+      return;
+    }
     setSavingAdminAccount(true);
     try {
       await onUpdatePanelAdmin({
@@ -474,10 +493,10 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
         mysqlRootPassword: sqlRootPassInput
       });
       setStatusBanner(
-        `Đã cập nhật cấu hình Admin VPS (${adminUserInput}) và Tên miền Panel (${customDomainInput || 'Mặc định IP'}) vào /etc/ferrous-panel/admin.json.`
+        `Đã cập nhật cấu hình Admin VPS (${adminUserInput}) và cổng Panel (${panelPortInput}/TCP) vào /etc/ferrous-panel/panel.env.`
       );
       setFpCliOutput(
-        `[OK] Đã ghi cấu hình Admin VPS vào ${panelAdmin.configFile}\n  Admin Username  : ${adminUserInput}\n  Admin Password  : ${adminPassInput ? '[UPDATED - REDACTED]' : '[UNCHANGED]'}\n  Panel Domain    : ${customDomainInput || '(Chưa gán tên miền riêng)'}\n  Panel Port      : ${panelPortInput}/TCP (UFW Allowed)\n  Entrance Path   : ${entranceInput}`
+        `[OK] Đã ghi cấu hình Admin VPS vào /etc/ferrous-panel/panel.env\n  Admin Username  : ${adminUserInput}\n  Admin Password  : ${adminPassInput ? '[UPDATED - REDACTED]' : '[UNCHANGED]'}\n  Panel Domain    : ${customDomainInput || '(Chưa gán tên miền riêng)'}\n  Panel Port      : ${panelPortInput}/TCP (UFW Allowed · Cổng 80/443 giữ riêng cho Website)\n  Entrance Path   : ${entranceInput}`
       );
     } finally {
       setSavingAdminAccount(false);
@@ -485,6 +504,20 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
   };
 
   const handleTriggerFpOption = async (opt: number) => {
+    if (opt === 7) {
+      const cleaned = fpOptionParam.trim().replace(/^:/, '');
+      const parsed =
+        cleaned.toLowerCase() === 'default' ? 8443 : Number(cleaned);
+      if (parsed === 80 || parsed === 443) {
+        setStatusBanner(
+          'Cổng 80 và 443 chỉ dành riêng cho Website (Nginx/FerrousX). Hãy nhập cổng Panel khác (mặc định: 8443).'
+        );
+        setFpCliOutput(
+          `[ERROR] Port ${parsed} is reserved exclusively for websites (Nginx/FerrousX). Choose a dedicated panel port (default: 8443).`
+        );
+        return;
+      }
+    }
     setRunningFpOption(opt);
     try {
       const res = await onRunFpCliAction(opt, fpOptionParam.trim() || undefined);
@@ -507,7 +540,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
     }
   };
 
-  const vpsInstallCommandSnippet = `git clone https://github.com/Ferrous-panel/FerrousX.git /opt/Ferrous-panel && cd /opt/Ferrous-panel && bash Ferrous-panel/install-ubuntu.sh --admin-user="${adminUserInput}" --admin-pass="${adminPassInput}"${customDomainInput.trim() ? ` --domain="${customDomainInput.trim()}"` : ''} --port=${panelPortInput} --entrance="${entranceInput}"`;
+  const vpsInstallCommandSnippet = `curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --admin-user "${adminUserInput}"${customDomainInput.trim() ? ` --domain "${customDomainInput.trim()}"` : ''} --port ${panelPortInput} --entrance "${entranceInput}"`;
 
   const totalRustMemoryKb = sshData.rustModules.reduce(
     (sum, m) => sum + m.memoryFootprintKb,
@@ -978,7 +1011,7 @@ export const SshTerminalView: React.FC<SshTerminalViewProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-                  Cổng Panel (--port) &amp; Đường dẫn an toàn
+                  Cổng Panel (mặc định 8443, cấm 80/443) &amp; Entrance
                 </label>
                 <div className="flex items-center gap-1.5">
                   <input

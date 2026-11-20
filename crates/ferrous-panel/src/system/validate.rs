@@ -180,6 +180,28 @@ impl Port {
     }
 }
 
+/// Default TCP port for the FerrousPanel web control plane.
+pub const DEFAULT_PANEL_PORT: u16 = 8443;
+
+/// Returns `true` if `port` is strictly reserved for websites served by Nginx/FerrousX (`80` or `443`).
+#[must_use]
+pub const fn is_reserved_website_port(port: u16) -> bool {
+    matches!(port, 80 | 443)
+}
+
+/// Validates a TCP port dedicated to the FerrousPanel control plane.
+/// Ports `80` and `443` are strictly reserved for websites managed by Nginx/FerrousX.
+pub fn validate_panel_port(value: u16) -> Result<Port, PanelError> {
+    let port = Port::new(value)?;
+    if is_reserved_website_port(port.get()) {
+        return Err(PanelError::Validation(format!(
+            "port {} is reserved exclusively for websites (Nginx/FerrousX); choose a dedicated panel port (default: {DEFAULT_PANEL_PORT})",
+            port.get()
+        )));
+    }
+    Ok(port)
+}
+
 impl fmt::Display for Port {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
