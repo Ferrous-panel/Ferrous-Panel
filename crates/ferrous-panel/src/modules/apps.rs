@@ -49,6 +49,15 @@ fn is_js_or_css_runtime(fw: WebsiteRuntimeType) -> bool {
     is_static_runtime(fw) || is_js_ssr_runtime(fw)
 }
 
+fn is_rust_runtime(fw: WebsiteRuntimeType) -> bool {
+    matches!(
+        fw,
+        WebsiteRuntimeType::ActixWebRust
+            | WebsiteRuntimeType::AxumRust
+            | WebsiteRuntimeType::RocketRust
+    )
+}
+
 fn is_php_runtime(fw: WebsiteRuntimeType) -> bool {
     matches!(
         fw,
@@ -68,14 +77,94 @@ fn deno_binary_path() -> &'static str {
         .unwrap_or("/usr/local/bin/deno")
 }
 
-/// Automatically converts legacy `node`/`npm`/`npx` commands (or empty JS exec commands)
-/// into Zero-Node.js native Bun/Deno commands so JS/TS frameworks run without installing Node.js.
+/// Detects the compiled release binary inside `<working_dir>/target/release/` from `Cargo.toml`.
+fn detect_rust_release_binary(working_dir: &Path) -> Option<PathBuf> {
+    let cargo_toml = std::fs::read_to_string(working_dir.join("Cargo.toml")).ok()?;
+    let mut in_pkg = false;
+    let mut in_bin = false;
+    let mut bin_names: Vec<String> = Vec::new();
+    let mut pkg_name: Option<String> = None;
+
+    for raw_line in cargo_toml.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("[[bin]]") {
+            in_bin = true;
+            in_pkg = false;
+            continue;
+        }
+        if line.starts_with("[package]") {
+            in_pkg = true;
+            in_bin = false;
+            continue;
+        }
+        if line.starts_with('[') {
+            in_pkg = false;
+            in_bin = false;
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == "name" {
+                let cleaned = v
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .trim();
+                if !cleaned.is_empty() {
+                    if in_bin {
+                        bin_names.push(cleaned.to_string());
+                    } else if in_pkg && pkg_name.is_none() {
+                        pkg_name = Some(cleaned.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(pkg) = pkg_name {
+        bin_names.push(pkg);
+    }
+
+    for name in bin_names {
+        let candidate = working_dir.join("target/release").join(&name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Automatically normalizes framework execution commands:
+/// - Converts legacy `node`/`npm`/`pnpm`/`yarn`/`npx` commands (or empty JS exec commands)
+///   into Zero-Node.js native `bun --bun` / `deno` commands.
+/// - Auto-resolves compiled `target/release/<bin>` binaries for Rust frameworks.
 fn normalize_zero_node_exec_command(
     framework: WebsiteRuntimeType,
     raw_exec: &str,
     working_dir: &Path,
 ) -> (String, Option<String>) {
     let trimmed = raw_exec.trim();
+
+    if is_rust_runtime(framework) {
+        if let Some(detected_bin) = detect_rust_release_binary(working_dir) {
+            let bin_str = detected_bin.display().to_string();
+            let first_token = trimmed.split_whitespace().next().unwrap_or("");
+            let needs_override = trimmed.is_empty()
+                || (!first_token.is_empty() && !Path::new(first_token).is_file());
+            if needs_override {
+                return (
+                    bin_str.clone(),
+                    Some(format!(
+                        "Rust release binary auto-detected after Cargo build -> {bin_str}"
+                    )),
+                );
+            }
+        }
+        return (trimmed.to_string(), None);
+    }
+
     if !is_js_ssr_runtime(framework) {
         return (trimmed.to_string(), None);
     }
@@ -93,18 +182,64 @@ fn normalize_zero_node_exec_command(
                     format!("{bun} --bun run start")
                 }
             }
-            WebsiteRuntimeType::Nuxt3 => format!("{bun} {dir_str}/.output/server/index.mjs"),
-            WebsiteRuntimeType::SvelteKit2 => format!("{bun} {dir_str}/build/index.js"),
-            WebsiteRuntimeType::Astro5 => format!("{bun} {dir_str}/dist/server/entry.mjs"),
-            WebsiteRuntimeType::RemixReactRouterV7 => {
-                format!("{bun} x react-router-serve {dir_str}/build/server/index.js")
+            WebsiteRuntimeType::Nuxt3 => {
+                if working_dir.join(".output/server/index.mjs").is_file() {
+                    format!("{bun} {dir_str}/.output/server/index.mjs")
+                } else if package_json_has_script(working_dir, "start") {
+                    format!("{bun} --bun run start")
+                } else {
+                    format!("{bun} {dir_str}/.output/server/index.mjs")
+                }
             }
-            WebsiteRuntimeType::NestJs10 => format!("{bun} {dir_str}/dist/main.js"),
-            WebsiteRuntimeType::BunElysiaJs => format!("{bun} run {dir_str}/src/index.ts"),
+            WebsiteRuntimeType::SvelteKit2 => {
+                if working_dir.join("build/index.js").is_file() {
+                    format!("{bun} {dir_str}/build/index.js")
+                } else if package_json_has_script(working_dir, "start") {
+                    format!("{bun} --bun run start")
+                } else {
+                    format!("{bun} {dir_str}/build/index.js")
+                }
+            }
+            WebsiteRuntimeType::Astro5 => {
+                if working_dir.join("dist/server/entry.mjs").is_file() {
+                    format!("{bun} {dir_str}/dist/server/entry.mjs")
+                } else if package_json_has_script(working_dir, "start") {
+                    format!("{bun} --bun run start")
+                } else if package_json_has_script(working_dir, "preview") {
+                    format!("{bun} --bun run preview -- --host 127.0.0.1")
+                } else {
+                    format!("{bun} {dir_str}/dist/server/entry.mjs")
+                }
+            }
+            WebsiteRuntimeType::RemixReactRouterV7 => {
+                if working_dir.join("build/server/index.js").is_file() {
+                    format!("{bun} --bun x react-router-serve {dir_str}/build/server/index.js")
+                } else {
+                    format!("{bun} --bun run start")
+                }
+            }
+            WebsiteRuntimeType::NestJs10 => {
+                if working_dir.join("dist/main.js").is_file() {
+                    format!("{bun} {dir_str}/dist/main.js")
+                } else if working_dir.join("dist/src/main.js").is_file() {
+                    format!("{bun} {dir_str}/dist/src/main.js")
+                } else {
+                    format!("{bun} --bun run start")
+                }
+            }
+            WebsiteRuntimeType::BunElysiaJs => {
+                if working_dir.join("src/index.ts").is_file() {
+                    format!("{bun} run {dir_str}/src/index.ts")
+                } else if package_json_has_script(working_dir, "start") {
+                    format!("{bun} --bun run start")
+                } else {
+                    format!("{bun} run {dir_str}/src/index.ts")
+                }
+            }
             WebsiteRuntimeType::Deno2 => {
                 format!("{deno} run --allow-net --allow-env --allow-read {dir_str}/main.ts")
             }
-            _ => format!("{bun} run start"),
+            _ => format!("{bun} --bun run start"),
         };
         return (
             default_cmd.clone(),
@@ -125,7 +260,7 @@ fn normalize_zero_node_exec_command(
     match first_name {
         "node" | "nodejs" => {
             let rewritten = if rest.is_empty() {
-                format!("{bun} run start")
+                format!("{bun} --bun run start")
             } else {
                 format!("{bun} {}", rest.join(" "))
             };
@@ -138,11 +273,13 @@ fn normalize_zero_node_exec_command(
         }
         "npm" | "pnpm" | "yarn" => {
             let rewritten = if rest.is_empty() {
-                format!("{bun} run start")
+                format!("{bun} --bun run start")
             } else if rest.first().copied() == Some("start") {
                 format!("{bun} --bun run start")
+            } else if rest.first().copied() == Some("run") {
+                format!("{bun} --bun {}", rest.join(" "))
             } else {
-                format!("{bun} {}", rest.join(" "))
+                format!("{bun} --bun run {}", rest.join(" "))
             };
             (
                 rewritten.clone(),
@@ -153,9 +290,9 @@ fn normalize_zero_node_exec_command(
         }
         "npx" => {
             let rewritten = if rest.is_empty() {
-                format!("{bun} run start")
+                format!("{bun} --bun run start")
             } else {
-                format!("{bun} x {}", rest.join(" "))
+                format!("{bun} --bun x {}", rest.join(" "))
             };
             (
                 rewritten.clone(),
@@ -164,14 +301,16 @@ fn normalize_zero_node_exec_command(
                 )),
             )
         }
-        "bun" => (
-            if rest.is_empty() {
-                format!("{bun} run start")
+        "bun" => {
+            let rewritten = if rest.is_empty() {
+                format!("{bun} --bun run start")
+            } else if matches!(rest.first().copied(), Some("run" | "x")) {
+                format!("{bun} --bun {}", rest.join(" "))
             } else {
                 format!("{bun} {}", rest.join(" "))
-            },
-            None,
-        ),
+            };
+            (rewritten, None)
+        }
         "deno" => (
             if rest.is_empty() {
                 format!("{deno} run --allow-net --allow-env --allow-read main.ts")
@@ -189,21 +328,33 @@ fn ensure_default_js_envs(
     internal_port: u16,
     envs: &mut Vec<(String, String)>,
 ) {
-    if !is_js_ssr_runtime(framework) {
-        return;
-    }
     let port_str = internal_port.to_string();
-    let defaults = [
-        ("PORT", port_str.as_str()),
-        ("HOST", "127.0.0.1"),
-        ("HOSTNAME", "127.0.0.1"),
-        ("NITRO_PORT", port_str.as_str()),
-        ("NITRO_HOST", "127.0.0.1"),
-        ("NODE_ENV", "production"),
-    ];
-    for (k, v) in defaults {
-        if !envs.iter().any(|(ek, _)| ek == k) {
-            envs.push((k.to_string(), v.to_string()));
+    if is_js_ssr_runtime(framework) {
+        let defaults = [
+            ("PORT", port_str.as_str()),
+            ("HOST", "127.0.0.1"),
+            ("HOSTNAME", "127.0.0.1"),
+            ("NITRO_PORT", port_str.as_str()),
+            ("NITRO_HOST", "127.0.0.1"),
+            ("NODE_ENV", "production"),
+        ];
+        for (k, v) in defaults {
+            if !envs.iter().any(|(ek, _)| ek == k) {
+                envs.push((k.to_string(), v.to_string()));
+            }
+        }
+    } else if is_rust_runtime(framework) {
+        let defaults = [
+            ("PORT", port_str.as_str()),
+            ("HOST", "127.0.0.1"),
+            ("ROCKET_PORT", port_str.as_str()),
+            ("ROCKET_ADDRESS", "127.0.0.1"),
+            ("RUST_LOG", "info"),
+        ];
+        for (k, v) in defaults {
+            if !envs.iter().any(|(ek, _)| ek == k) {
+                envs.push((k.to_string(), v.to_string()));
+            }
         }
     }
 }
@@ -273,19 +424,71 @@ fn find_tailwind_input_output(working_dir: &Path) -> Option<(PathBuf, PathBuf)> 
     None
 }
 
-/// Executes a real Zero-Node.js JS/TS/CSS build directly via allowlisted native binaries
-/// (`bun`, `tailwindcss` standalone CLI, or `deno`) without requiring Node.js/npm on the VPS.
+/// Executes a real Zero-Node.js JS/TS/CSS or native Rust Cargo build directly via allowlisted
+/// native binaries (`bun --bun`, `tailwindcss` standalone CLI, `deno`, or `cargo build --release`).
 async fn run_zero_node_js_css_build(
     working_dir: &Path,
     framework: WebsiteRuntimeType,
     executor: &dyn CommandExecutor,
 ) -> Vec<String> {
     let mut logs = Vec::new();
+    let now = Utc::now().to_rfc3339();
+
+    if is_rust_runtime(framework) {
+        if working_dir.join("Cargo.toml").is_file() {
+            if executor.is_binary_available(AllowedBinary::Cargo) {
+                logs.push(format!(
+                    "[{now}] Rust framework build: running `cargo build --release`..."
+                ));
+                match executor
+                    .run_with_env(
+                        AllowedBinary::Cargo,
+                        &["build", "--release"],
+                        &[("PATH", "/usr/local/bin:/root/.cargo/bin:/usr/bin:/bin")],
+                        Some(working_dir),
+                        BUILD_TIMEOUT,
+                    )
+                    .await
+                {
+                    Ok(out) if out.success => {
+                        logs.push(format!(
+                            "[{}] Native Rust build (`cargo build --release`) succeeded.",
+                            Utc::now().to_rfc3339()
+                        ));
+                    }
+                    Ok(out) => {
+                        let detail = if out.stderr.is_empty() {
+                            out.stdout
+                        } else {
+                            out.stderr
+                        };
+                        logs.push(format!(
+                            "[{}] `cargo build --release` exited ({:?}): {}",
+                            Utc::now().to_rfc3339(),
+                            out.exit_code,
+                            detail.chars().take(400).collect::<String>()
+                        ));
+                    }
+                    Err(err) => {
+                        logs.push(format!(
+                            "[{}] `cargo build --release` failed: {err}",
+                            Utc::now().to_rfc3339()
+                        ));
+                    }
+                }
+            } else {
+                logs.push(format!(
+                    "[{now}] Detected Cargo.toml — Rust cargo toolchain not found on host."
+                ));
+            }
+        }
+        return logs;
+    }
+
     if !is_js_or_css_runtime(framework) {
         return logs;
     }
 
-    let now = Utc::now().to_rfc3339();
     let has_package_json = working_dir.join("package.json").is_file();
     let has_deno_json =
         working_dir.join("deno.json").is_file() || working_dir.join("deno.jsonc").is_file();
@@ -300,7 +503,10 @@ async fn run_zero_node_js_css_build(
                 .run_with_env(
                     AllowedBinary::Bun,
                     &["install", "--no-progress"],
-                    &[("NODE_ENV", "development")],
+                    &[
+                        ("NODE_ENV", "development"),
+                        ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                    ],
                     Some(working_dir),
                     BUILD_TIMEOUT,
                 )
@@ -315,8 +521,11 @@ async fn run_zero_node_js_css_build(
                         match executor
                             .run_with_env(
                                 AllowedBinary::Bun,
-                                &["run", "build"],
-                                &[("NODE_ENV", "production")],
+                                &["--bun", "run", "build"],
+                                &[
+                                    ("NODE_ENV", "production"),
+                                    ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                                ],
                                 Some(working_dir),
                                 BUILD_TIMEOUT,
                             )
@@ -324,7 +533,7 @@ async fn run_zero_node_js_css_build(
                         {
                             Ok(build_out) if build_out.success => {
                                 logs.push(format!(
-                                    "[{}] Zero-Node.js framework build (`bun run build`) completed cleanly.",
+                                    "[{}] Zero-Node.js framework build (`bun --bun run build`) completed cleanly.",
                                     Utc::now().to_rfc3339()
                                 ));
                             }
@@ -571,6 +780,12 @@ pub fn render_systemd_unit(
     }
     out.push_str("NoNewPrivileges=true\n");
     out.push_str("PrivateTmp=true\n");
+    if !env_vars.iter().any(|(k, _)| k == "PATH") {
+        out.push_str("Environment=\"PATH=/usr/local/bin:/usr/bin:/bin\"\n");
+    }
+    if !env_vars.iter().any(|(k, _)| k == "HOME") {
+        out.push_str("Environment=\"HOME=/tmp\"\n");
+    }
     for (k, v) in env_vars {
         let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
         out.push_str(&format!("Environment=\"{k}={escaped}\"\n"));
@@ -578,6 +793,25 @@ pub fn render_systemd_unit(
     out.push_str("\n[Install]\n");
     out.push_str("WantedBy=multi-user.target\n");
     out
+}
+
+async fn ensure_wwwroot_ownership(
+    working_dir: &Path,
+    config: &Config,
+    executor: &dyn CommandExecutor,
+) {
+    if config.wwwroot == Path::new("/www/wwwroot")
+        && executor.is_binary_available(AllowedBinary::Chown)
+    {
+        let dir_str = working_dir.display().to_string();
+        let _ = executor
+            .run(
+                AllowedBinary::Chown,
+                &["-R", "www-data:www-data", &dir_str],
+                SYSTEMD_TIMEOUT,
+            )
+            .await;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -888,7 +1122,7 @@ pub async fn deploy_app(
         }
     }
 
-    // Run Zero-Node.js JS/TS/CSS build (Bun / Deno / Standalone Tailwind CLI) if source exists.
+    // Run Zero-Node.js JS/TS/CSS or native Rust Cargo build if source exists.
     let build_logs = run_zero_node_js_css_build(
         safe_working.as_path(),
         req.framework,
@@ -896,6 +1130,12 @@ pub async fn deploy_app(
     )
     .await;
     initial_logs.extend(build_logs);
+    ensure_wwwroot_ownership(
+        safe_working.as_path(),
+        config,
+        webserver.executor().as_ref(),
+    )
+    .await;
 
     let effective_doc_root =
         resolve_effective_doc_root(safe_working.as_path(), &req.run_sub_dir, req.framework);
@@ -1179,6 +1419,12 @@ pub async fn app_action(
         )
         .await;
         app.logs.extend(build_logs);
+        ensure_wwwroot_ownership(
+            safe_working.as_path(),
+            config,
+            webserver.executor().as_ref(),
+        )
+        .await;
 
         if is_static_runtime(app.framework) {
             if let Ok(domain) = Domain::parse(&app.domain) {
@@ -1350,6 +1596,12 @@ pub async fn git_deploy_app(
     )
     .await;
     app.logs.extend(build_logs);
+    ensure_wwwroot_ownership(
+        safe_working.as_path(),
+        config,
+        webserver.executor().as_ref(),
+    )
+    .await;
 
     if is_static_runtime(app.framework) {
         if let Ok(domain) = Domain::parse(&app.domain) {

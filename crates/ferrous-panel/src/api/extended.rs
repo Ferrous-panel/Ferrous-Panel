@@ -1420,7 +1420,12 @@ pub async fn post_polyglot_compile(
             expose_sql_bridge: false,
             custom_functions: Vec::new(),
         });
-    let result = ext::compile_polyglot_bridge(&state.config, &body)?;
+    let result = ext::compile_polyglot_bridge(
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &body,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

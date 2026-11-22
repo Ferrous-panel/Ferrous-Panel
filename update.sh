@@ -704,6 +704,10 @@ install_zero_node_js_css_toolchain() {
       echo -e "${YELLOW}[!] Could not download Bun binary right now.${NC}"
     fi
   fi
+  if [ -x /usr/local/bin/bun ] && ! command -v node >/dev/null 2>&1; then
+    ln -sf /usr/local/bin/bun /usr/local/bin/node
+    echo -e "${GREEN}[+] Linked /usr/local/bin/node -> /usr/local/bin/bun (Zero-Node.js shebang compatibility).${NC}"
+  fi
 
   if [ ! -x /usr/local/bin/tailwindcss ]; then
     echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Rust Oxide, Zero-Node.js)...${NC}"
@@ -754,7 +758,7 @@ ensure_frontend_dist() {
       if (
         cd "${work_dir}"
         /usr/local/bin/bun install --no-progress
-        /usr/local/bin/bun run build
+        /usr/local/bin/bun --bun run build
       ); then
         rm -rf "${work_dir}/node_modules"
         if [ -f "${work_dir}/dist/index.html" ]; then

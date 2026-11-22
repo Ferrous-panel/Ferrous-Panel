@@ -649,7 +649,7 @@ async fn handle_reverse_proxy(
     }
 
     if forwarded_headers {
-        apply_forwarded_headers(&mut parts.headers, peer_addr, is_tls);
+        apply_forwarded_headers(&mut parts.headers, peer_addr, is_tls, host);
     }
 
     let limited_body = Limited::new(incoming, bundle.master.max_body_bytes);
@@ -743,7 +743,7 @@ async fn handle_websocket_upgrade(
         return text_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal Error", server_tokens);
     };
     if forwarded_headers {
-        apply_forwarded_headers(up_req.headers_mut(), peer_addr, is_tls);
+        apply_forwarded_headers(up_req.headers_mut(), peer_addr, is_tls, host);
     }
 
     let up_res = match tokio::time::timeout(
@@ -1067,7 +1067,12 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
     }
 }
 
-fn apply_forwarded_headers(headers: &mut HeaderMap, peer_addr: SocketAddr, is_tls: bool) {
+fn apply_forwarded_headers(
+    headers: &mut HeaderMap,
+    peer_addr: SocketAddr,
+    is_tls: bool,
+    host: &str,
+) {
     let ip_str = peer_addr.ip().to_string();
     if let Ok(val) = HeaderValue::from_str(&ip_str) {
         headers.insert(HeaderName::from_static("x-real-ip"), val.clone());
@@ -1088,6 +1093,16 @@ fn apply_forwarded_headers(headers: &mut HeaderMap, peer_addr: SocketAddr, is_tl
     headers.insert(
         HeaderName::from_static("x-forwarded-proto"),
         HeaderValue::from_static(proto),
+    );
+    if !host.is_empty() {
+        if let Ok(xfh) = HeaderValue::from_str(host) {
+            headers.insert(HeaderName::from_static("x-forwarded-host"), xfh);
+        }
+    }
+    let port = if is_tls { "443" } else { "80" };
+    headers.insert(
+        HeaderName::from_static("x-forwarded-port"),
+        HeaderValue::from_static(port),
     );
 }
 

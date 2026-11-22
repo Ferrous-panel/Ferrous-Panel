@@ -59,7 +59,7 @@ async fn serve_index() -> HttpResponse {
     embedded_response("index.html").unwrap_or_else(|| {
         HttpResponse::ServiceUnavailable()
             .content_type("text/plain; charset=utf-8")
-            .body("Frontend assets not embedded yet. Run `npm run build` before `cargo build --release`.")
+            .body("Frontend assets not embedded yet. Run `bun --bun run build` before `cargo build --release`.")
     })
 }
 

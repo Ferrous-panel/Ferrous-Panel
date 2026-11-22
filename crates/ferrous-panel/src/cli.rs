@@ -752,13 +752,19 @@ async fn check_services(config: &Config) -> Result<()> {
         if validation.valid { "OK" } else { "FAILED" },
         validation.output
     );
-    println!("Zero-Node.js JS/CSS Toolchain:");
+    println!("Zero-Node.js JS/CSS & Rust Compiler Toolchain:");
     println!(
         "  - bun (JS/TS frameworks)  : {}",
         AllowedBinary::Bun
             .resolved_path_str()
             .unwrap_or("not installed (run update.sh or Software Store)")
     );
+    let node_shim_status = match std::fs::read_link("/usr/local/bin/node") {
+        Ok(target) => format!("/usr/local/bin/node -> {} (Zero-Node.js compat)", target.display()),
+        Err(_) if Path::new("/usr/bin/node").is_file() => "/usr/bin/node (system)".to_string(),
+        Err(_) => "not linked (using `bun --bun` directly)".to_string(),
+    };
+    println!("  - node compat shim        : {node_shim_status}");
     println!(
         "  - tailwindcss (CSS v4)    : {}",
         AllowedBinary::TailwindCli
@@ -770,6 +776,18 @@ async fn check_services(config: &Config) -> Result<()> {
         AllowedBinary::Deno
             .resolved_path_str()
             .unwrap_or("not installed (optional)")
+    );
+    println!(
+        "  - rustc (Rust & FFI ABI)  : {}",
+        AllowedBinary::Rustc
+            .resolved_path_str()
+            .unwrap_or("not installed")
+    );
+    println!(
+        "  - cargo (Rust frameworks) : {}",
+        AllowedBinary::Cargo
+            .resolved_path_str()
+            .unwrap_or("not installed")
     );
     Ok(())
 }

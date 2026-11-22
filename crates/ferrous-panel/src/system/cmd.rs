@@ -54,6 +54,8 @@ pub enum AllowedBinary {
     Deno,
     TailwindCli,
     Git,
+    Cargo,
+    Rustc,
 }
 
 impl AllowedBinary {
@@ -104,6 +106,8 @@ impl AllowedBinary {
             Self::Deno => "deno",
             Self::TailwindCli => "tailwindcss",
             Self::Git => "git",
+            Self::Cargo => "cargo",
+            Self::Rustc => "rustc",
         }
     }
 
@@ -160,6 +164,8 @@ impl AllowedBinary {
             "deno" => Some(Self::Deno),
             "tailwindcss" => Some(Self::TailwindCli),
             "git" => Some(Self::Git),
+            "cargo" => Some(Self::Cargo),
+            "rustc" => Some(Self::Rustc),
             _ => None,
         }
     }
@@ -211,6 +217,8 @@ impl AllowedBinary {
             Self::Deno => &["/usr/local/bin/deno", "/root/.deno/bin/deno", "/usr/bin/deno"],
             Self::TailwindCli => &["/usr/local/bin/tailwindcss", "/usr/bin/tailwindcss"],
             Self::Git => &["/usr/bin/git", "/usr/local/bin/git"],
+            Self::Cargo => &["/usr/local/bin/cargo", "/root/.cargo/bin/cargo", "/usr/bin/cargo"],
+            Self::Rustc => &["/usr/local/bin/rustc", "/root/.cargo/bin/rustc", "/usr/bin/rustc"],
         }
     }
 
