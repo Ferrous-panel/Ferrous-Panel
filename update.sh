@@ -580,76 +580,23 @@ install_zero_node_js_css_toolchain() {
   fi
 }
 
-ensure_frontend_dist() {
+ensure_native_rust_ui() {
   local work_dir="$1"
-  local dist_ready=false
-
-  # 1) Use repo-tracked dist/index.html if present (fresh from git reset --hard)
-  if [ -d "${work_dir}/.git" ] \
-    && git -C "${work_dir}" ls-files --error-unmatch dist/index.html >/dev/null 2>&1 \
-    && [ -f "${work_dir}/dist/index.html" ]; then
-    echo -e "${GREEN}[+] Using repository-tracked static UI bundle (${work_dir}/dist).${NC}"
-    dist_ready=true
-  fi
-
-  # 2) Otherwise try prebuilt release tarball (ferrous-dist.tar.gz)
-  if [ "$dist_ready" = false ]; then
-    rm -rf "${TMP_DIR}/dist_new"
-    mkdir -p "${TMP_DIR}/dist_new"
-    if curl -fsSL --retry 2 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
-      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
-      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
-      rm -rf "${work_dir}/dist"
-      mv "${TMP_DIR}/dist_new" "${work_dir}/dist"
-      echo -e "${GREEN}[+] Synced prebuilt static UI bundle into ${work_dir}/dist.${NC}"
-      dist_ready=true
-    fi
-  fi
-
-  # 3) Otherwise build fresh dist/ locally using Bun (100% Zero-Node.js on VPS!)
-  if [ "$dist_ready" = false ] && [ -f "${work_dir}/package.json" ]; then
-    if [ ! -x /usr/local/bin/bun ]; then
-      install_zero_node_js_css_toolchain
-    fi
-
-    if [ -x /usr/local/bin/bun ]; then
-      echo -e "${CYAN}[*] Building static frontend UI (${work_dir}/dist) via Bun + Vite (Zero-Node.js)...${NC}"
-      if (
-        cd "${work_dir}"
-        /usr/local/bin/bun install --no-progress
-        /usr/local/bin/bun --bun run build
-      ); then
-        rm -rf "${work_dir}/node_modules"
-        if [ -f "${work_dir}/dist/index.html" ]; then
-          echo -e "${GREEN}[+] Built fresh static UI bundle into ${work_dir}/dist using Bun (100% Zero-Node.js).${NC}"
-          dist_ready=true
-        fi
-      fi
-    fi
-  fi
-
-  if [ ! -f "${work_dir}/dist/index.html" ]; then
-    echo -e "${RED}[ERROR] Frontend assets (${work_dir}/dist/index.html) could not be prepared.${NC}" >&2
-    echo -e "${YELLOW}[!] Aborting Cargo build to avoid installing a panel binary without Web UI.${NC}" >&2
+  if [ ! -f "${work_dir}/crates/ferrous-panel/src/ui/mod.rs" ]; then
+    echo -e "${RED}[ERROR] Pure-Rust Native UI module (${work_dir}/crates/ferrous-panel/src/ui/mod.rs) is missing.${NC}" >&2
     return 1
   fi
-
-  # Keep disk fallback copy in sync and force rust-embed to re-embed fresh dist/
-  mkdir -p /var/lib/ferrous-panel/dist
-  rm -rf /var/lib/ferrous-panel/dist/*
-  cp -a "${work_dir}/dist/." /var/lib/ferrous-panel/dist/
-  if [ -f "${work_dir}/crates/ferrous-panel/src/web.rs" ]; then
-    touch "${work_dir}/crates/ferrous-panel/src/web.rs"
-  fi
+  echo -e "${GREEN}[+] Pure-Rust Native Panel UI compiles straight into ferrous-panel binary (zero Node.js / npm / Vite).${NC}"
+  touch "${work_dir}/crates/ferrous-panel/src/ui/mod.rs"
 }
 
 if [ "$UPDATE_PANEL" = true ]; then
   if [ -d "${SRC_DIR}/.git" ] && command -v cargo >/dev/null 2>&1; then
-    echo -e "${BLUE}${BOLD}[*] Pulling latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH}) & rebuilding with Cargo...${NC}"
+    echo -e "${BLUE}${BOLD}[*] Pulling latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH}) & rebuilding Pure-Rust binary with Cargo...${NC}"
     git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
     git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
 
-    ensure_frontend_dist "${SRC_DIR}"
+    ensure_native_rust_ui "${SRC_DIR}"
 
     (
       cd "${SRC_DIR}"

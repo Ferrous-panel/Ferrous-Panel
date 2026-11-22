@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FerrousPanel — Pure-Rust VPS Control Plane</title>
+  <link rel="icon" type="image/svg+xml" href="/ui/favicon.svg" />
+  <link rel="stylesheet" href="/ui/panel.css" />
+</head>
+<body>
+  <script type="application/json" id="ferrous-boot"><!--FERROUS_BOOT_JSON--></script>
+  <div id="app" class="app-root">
+    <div class="boot-loader">
+      <div class="boot-mark">FP</div>
+      <p class="boot-text">Đang khởi tạo FerrousPanel Pure-Rust UI…</p>
+    </div>
+  </div>
+  <div id="modal-root" aria-live="polite"></div>
+  <div id="drawer-root" aria-live="polite"></div>
+  <div id="toast-root" class="toast-stack" aria-live="polite"></div>
+  <script type="module" src="/ui/app.js"></script>
+</body>
+</html>

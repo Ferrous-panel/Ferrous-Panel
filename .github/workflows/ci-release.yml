@@ -16,27 +16,12 @@ env:
 
 jobs:
   build-and-test:
-    name: Build SPA (Vite) + Test & Release Rust Workspace
+    name: Pure-Rust Build, Test & Release (Zero Node.js)
     runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Node.js 22 (build static frontend dist/ for rust-embed)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Install frontend dependencies & build dist/
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --legacy-peer-deps
-          else
-            npm install --no-audit --no-fund --legacy-peer-deps
-          fi
-          npm run build
-          npx tsc --noEmit
 
       - name: Setup Rust stable (1.89+) toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -56,7 +41,7 @@ jobs:
       - name: Validate shell scripts syntax (install.sh / update.sh / uninstall.sh)
         run: bash -n install.sh update.sh uninstall.sh
 
-      - name: Cargo check (workspace, all targets)
+      - name: Cargo check (workspace, all targets — Pure-Rust Native UI embedded)
         run: cargo check --workspace --all-targets
 
       - name: Cargo clippy (-D warnings)
@@ -65,20 +50,19 @@ jobs:
       - name: Cargo test (workspace)
         run: cargo test --workspace
 
-      - name: Cargo build --release x86_64 (embeds dist/ via rust-embed)
+      - name: Cargo build --release x86_64 (single Pure-Rust binary + Native UI)
         run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
 
-      - name: Cargo build --release aarch64 (embeds dist/ via rust-embed)
+      - name: Cargo build --release aarch64 (single Pure-Rust binary + Native UI)
         if: github.event_name == 'push'
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --workspace --target aarch64-unknown-linux-gnu
 
-      - name: Prepare release artifacts (prebuilt dist/ + multi-arch binaries + SHA256SUMS)
+      - name: Prepare release artifacts (multi-arch Pure-Rust binaries + SHA256SUMS)
         if: github.event_name == 'push'
         run: |
           mkdir -p release-artifacts
-          tar -czf release-artifacts/ferrous-dist.tar.gz -C dist .
           cp target/x86_64-unknown-linux-gnu/release/ferrous-panel release-artifacts/ferrous-panel-linux-x86_64
           cp target/x86_64-unknown-linux-gnu/release/ferrousx-bin release-artifacts/ferrousx-bin-linux-x86_64
           cp target/x86_64-unknown-linux-gnu/release/ferrousx-ctl release-artifacts/ferrousx-ctl-linux-x86_64
@@ -86,7 +70,7 @@ jobs:
           cp target/aarch64-unknown-linux-gnu/release/ferrousx-bin release-artifacts/ferrousx-bin-linux-aarch64
           cp target/aarch64-unknown-linux-gnu/release/ferrousx-ctl release-artifacts/ferrousx-ctl-linux-aarch64
           cp install.sh update.sh uninstall.sh release-artifacts/
-          (cd release-artifacts && sha256sum ferrous-dist.tar.gz ferrous-panel-linux-* ferrousx-bin-linux-* ferrousx-ctl-linux-* > SHA256SUMS.txt)
+          (cd release-artifacts && sha256sum ferrous-panel-linux-* ferrousx-bin-linux-* ferrousx-ctl-linux-* > SHA256SUMS.txt)
 
       - name: Publish GitHub Release (powers 1-command install.sh)
         if: github.event_name == 'push'
@@ -96,7 +80,6 @@ jobs:
           name: "FerrousPanel ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v2.5.0 (Latest)' }}"
           make_latest: "true"
           files: |
-            release-artifacts/ferrous-dist.tar.gz
             release-artifacts/ferrous-panel-linux-x86_64
             release-artifacts/ferrousx-bin-linux-x86_64
             release-artifacts/ferrousx-ctl-linux-x86_64

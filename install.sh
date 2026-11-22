@@ -450,9 +450,9 @@ if [ "${INSTALL_JS_TOOLCHAIN}" = true ]; then
 fi
 
 # ==============================================================================
-# [4/7] Fetch Source + Prebuilt Static dist/ & Build with Cargo
+# [4/7] Fetch Source & Build Pure-Rust FerrousPanel (Built-in Native UI)
 # ==============================================================================
-echo -e "${BLUE}[4/7] Building FerrousPanel with Cargo (embedding prebuilt static dist/ UI)...${NC}"
+echo -e "${BLUE}[4/7] Building Pure-Rust FerrousPanel with Cargo (built-in Native UI, zero Node.js)...${NC}"
 
 if [ "$PREBUILT_BINARY_ONLY" = true ]; then
   download_release_binary "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
@@ -481,43 +481,9 @@ else
     BUILD_WORKSPACE="${SRC_DIR}"
   fi
 
-  # Ensure prebuilt dist/ static UI exists (tracked dist/, ferrous-dist.tar.gz release,
-  # or build cleanly using native Bun — ZERO Node.js installed on VPS!)
-  if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
-    echo -e "${CYAN}[*] Downloading prebuilt static frontend bundle (ferrous-dist.tar.gz)...${NC}"
-    mkdir -p "${TMP_DIR}/dist_new"
-    if curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-dist.tar.gz" "${RELEASE_BASE}/ferrous-dist.tar.gz" 2>/dev/null \
-      && tar -xzf "${TMP_DIR}/ferrous-dist.tar.gz" -C "${TMP_DIR}/dist_new" 2>/dev/null \
-      && [ -f "${TMP_DIR}/dist_new/index.html" ]; then
-      rm -rf "${BUILD_WORKSPACE}/dist"
-      mv "${TMP_DIR}/dist_new" "${BUILD_WORKSPACE}/dist"
-      echo -e "${GREEN}[+] Synced prebuilt static UI bundle into ${BUILD_WORKSPACE}/dist.${NC}"
-    elif [ -f "${BUILD_WORKSPACE}/package.json" ]; then
-      if [ ! -x /usr/local/bin/bun ]; then
-        install_zero_node_js_css_toolchain
-      fi
-      if [ -x /usr/local/bin/bun ]; then
-        echo -e "${CYAN}[*] Building static frontend UI (${BUILD_WORKSPACE}/dist) via Bun + Vite (Zero-Node.js)...${NC}"
-        (
-          cd "${BUILD_WORKSPACE}"
-          /usr/local/bin/bun install --no-progress
-          /usr/local/bin/bun --bun run build
-        )
-        rm -rf "${BUILD_WORKSPACE}/node_modules"
-      fi
-    fi
-  fi
-
-  if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
-    echo -e "${RED}[ERROR] Frontend assets (${BUILD_WORKSPACE}/dist/index.html) are missing; cannot embed UI into ferrous-panel.${NC}" >&2
-    exit 1
-  fi
-
-  mkdir -p "${DATA_DIR}/dist"
-  rm -rf "${DATA_DIR}/dist/"*
-  cp -a "${BUILD_WORKSPACE}/dist/." "${DATA_DIR}/dist/"
-  if [ -f "${BUILD_WORKSPACE}/crates/ferrous-panel/src/web.rs" ]; then
-    touch "${BUILD_WORKSPACE}/crates/ferrous-panel/src/web.rs"
+  echo -e "${GREEN}[+] Pure-Rust Native Panel UI (crates/ferrous-panel/src/ui) compiles directly into the binary — zero Node.js/npm/Vite required.${NC}"
+  if [ -f "${BUILD_WORKSPACE}/crates/ferrous-panel/src/ui/mod.rs" ]; then
+    touch "${BUILD_WORKSPACE}/crates/ferrous-panel/src/ui/mod.rs"
   fi
 
   echo -e "${CYAN}[*] Running: cargo build --release -p ferrous-panel ...${NC}"

@@ -9,6 +9,7 @@ pub mod modules;
 pub mod pma_web;
 pub mod state;
 pub mod system;
+pub mod ui;
 pub mod web;
 pub mod webserver;
 

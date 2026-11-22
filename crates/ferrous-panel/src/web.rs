@@ -1,17 +1,24 @@
+use crate::state::AppState;
+use crate::ui::{configure_native_ui_assets, serve_native_index};
 use actix_web::{web, HttpRequest, HttpResponse};
 use rust_embed::Embed;
 use std::path::Path;
 
-/// Prebuilt React frontend static assets from repository `/dist`.
-///
-/// `allow_missing = true` permits building/testing in Rust-only environments
-/// before `npm run build` is executed; release binaries should be built after `npm run build`.
+/// Optional legacy Vite `dist/` assets (only used if `FERROUS_LEGACY_DIST_UI=1` is set).
+/// By default, FerrousPanel serves its built-in Pure-Rust Native UI (`crate::ui`)
+/// directly from the binary with zero Node.js / npm / Vite build dependency.
 #[derive(Embed)]
 #[folder = "../../dist/"]
 #[allow_missing = true]
-struct DistAssets;
+struct LegacyDistAssets;
 
-fn disk_fallback_response(path: &str) -> Option<HttpResponse> {
+fn legacy_dist_enabled() -> bool {
+    std::env::var("FERROUS_LEGACY_DIST_UI")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn legacy_disk_response(path: &str) -> Option<HttpResponse> {
     let clean = path.trim_start_matches('/');
     if clean.is_empty() || clean.contains("..") || clean.contains('\0') {
         return None;
@@ -43,8 +50,8 @@ fn disk_fallback_response(path: &str) -> Option<HttpResponse> {
     None
 }
 
-fn embedded_response(path: &str) -> Option<HttpResponse> {
-    if let Some(asset) = DistAssets::get(path) {
+fn legacy_embedded_response(path: &str) -> Option<HttpResponse> {
+    if let Some(asset) = LegacyDistAssets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return Some(
             HttpResponse::Ok()
@@ -52,43 +59,48 @@ fn embedded_response(path: &str) -> Option<HttpResponse> {
                 .body(asset.data.into_owned()),
         );
     }
-    disk_fallback_response(path)
+    legacy_disk_response(path)
 }
 
-async fn serve_index() -> HttpResponse {
-    embedded_response("index.html").unwrap_or_else(|| {
-        HttpResponse::ServiceUnavailable()
-            .content_type("text/plain; charset=utf-8")
-            .body("Frontend assets not embedded yet. Run `bun --bun run build` before `cargo build --release`.")
-    })
+async fn serve_index(state: web::Data<AppState>) -> HttpResponse {
+    if legacy_dist_enabled() {
+        if let Some(resp) = legacy_embedded_response("index.html") {
+            return resp;
+        }
+    }
+    serve_native_index(state).await
 }
 
-async fn serve_asset_or_spa(req: HttpRequest) -> HttpResponse {
+async fn serve_asset_or_spa(req: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let clean_path = req.path().trim_start_matches('/');
     if clean_path.is_empty() {
-        return serve_index().await;
+        return serve_index(state).await;
     }
 
-    if let Some(resp) = embedded_response(clean_path) {
-        return resp;
+    if legacy_dist_enabled() {
+        if let Some(resp) = legacy_embedded_response(clean_path) {
+            return resp;
+        }
     }
 
-    // Do not fall back to index.html for `/api/*` or missing static bundle assets.
+    // Never fall back to HTML shell for `/api/*`, `/ui/*`, or missing static assets.
     if clean_path == "api"
         || clean_path.starts_with("api/")
+        || clean_path.starts_with("ui/")
         || clean_path.starts_with("assets/")
         || Path::new(clean_path).extension().is_some()
     {
         return HttpResponse::NotFound().finish();
     }
 
-    serve_index().await
+    serve_index(state).await
 }
 
-/// Registers embedded static asset serving, Pure-Rust FerrousAdmin (`/phpadmin/`),
-/// and SPA client-route fallback.
+/// Registers Pure-Rust Native Panel UI (`/`, `/ui/*`), Pure-Rust FerrousAdmin (`/phpadmin/`),
+/// and SPA client-route fallback (e.g. `/panel`).
 pub fn configure_web(cfg: &mut web::ServiceConfig) {
-    cfg.service(web::resource("/").route(web::get().to(serve_index)))
+    cfg.configure(configure_native_ui_assets)
+        .service(web::resource("/").route(web::get().to(serve_index)))
         .service(web::resource("/phpadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
         .service(web::resource("/phpadmin/").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
         .service(web::resource("/phpmyadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))

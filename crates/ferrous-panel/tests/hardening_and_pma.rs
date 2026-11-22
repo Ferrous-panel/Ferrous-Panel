@@ -579,3 +579,75 @@ fn background_jobs_and_raw_file_upload_flow() -> Result<()> {
         Ok(())
     })
 }
+
+#[test]
+fn pure_rust_native_panel_ui_serves_without_nodejs_dist() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("native-ui")?;
+        let (_cfg, state, _password) = setup_test_state(&ws)?;
+        let app = init_service(App::new().configure(move |cfg| configure_app(cfg, state))).await;
+
+        for path in ["/", "/panel"] {
+            let req = TestRequest::get().uri(path).to_request();
+            let resp = try_call_service(&app, req)
+                .await
+                .map_err(|e| anyhow::anyhow!("GET {path} failed: {e}"))?;
+            ensure_eq(&resp.status(), &StatusCode::OK, path)?;
+            let ui_hdr = resp
+                .headers()
+                .get("x-ferrous-ui")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            ensure_eq(&ui_hdr, &"pure-rust-native", "x-ferrous-ui header")?;
+            let html = String::from_utf8_lossy(&read_body_bytes(resp.into_body()).await?).to_string();
+            ensure(
+                html.contains("FerrousPanel") && html.contains("/ui/app.js"),
+                "expected Pure-Rust HTML shell referencing /ui/app.js",
+            )?;
+            ensure(
+                html.contains("pure-rust-native"),
+                "expected embedded boot metadata in HTML shell",
+            )?;
+        }
+
+        for (asset_path, expected_ct) in [
+            ("/ui/panel.css", "text/css"),
+            ("/ui/favicon.svg", "image/svg+xml"),
+            ("/ui/app.js", "application/javascript"),
+            ("/ui/views-core.js", "application/javascript"),
+            ("/ui/views-infra.js", "application/javascript"),
+            ("/ui/views-security.js", "application/javascript"),
+        ] {
+            let req = TestRequest::get().uri(asset_path).to_request();
+            let resp = try_call_service(&app, req)
+                .await
+                .map_err(|e| anyhow::anyhow!("GET {asset_path} failed: {e}"))?;
+            ensure_eq(&resp.status(), &StatusCode::OK, asset_path)?;
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            ensure(
+                ct.starts_with(expected_ct),
+                &format!("unexpected content-type '{ct}' for {asset_path}"),
+            )?;
+            let body = read_body_bytes(resp.into_body()).await?;
+            ensure(!body.is_empty(), &format!("empty asset body for {asset_path}"))?;
+        }
+
+        // Unknown asset under /ui/* must return 404 (no HTML fallback)
+        let missing = TestRequest::get().uri("/ui/does-not-exist.js").to_request();
+        let missing_resp = try_call_service(&app, missing)
+            .await
+            .map_err(|e| anyhow::anyhow!("missing ui asset probe failed: {e}"))?;
+        ensure_eq(
+            &missing_resp.status(),
+            &StatusCode::NOT_FOUND,
+            "missing /ui/* asset must return 404",
+        )?;
+
+        Ok(())
+    })
+}
+
