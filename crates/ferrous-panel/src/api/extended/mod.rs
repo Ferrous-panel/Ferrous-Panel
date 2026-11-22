@@ -1,0 +1,20 @@
+mod common;
+pub mod diagnostics;
+pub mod edge_cloud;
+pub mod mail;
+pub mod oneclick;
+pub mod optimizer;
+pub mod php;
+pub mod polyglot;
+pub mod software;
+pub mod ssh_admin;
+
+pub use diagnostics::*;
+pub use edge_cloud::*;
+pub use mail::*;
+pub use oneclick::*;
+pub use optimizer::*;
+pub use php::*;
+pub use polyglot::*;
+pub use software::*;
+pub use ssh_admin::*;

@@ -53,6 +53,9 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Validate shell scripts syntax (install.sh / update.sh / uninstall.sh)
+        run: bash -n install.sh update.sh uninstall.sh
+
       - name: Cargo check (workspace, all targets)
         run: cargo check --workspace --all-targets
 
