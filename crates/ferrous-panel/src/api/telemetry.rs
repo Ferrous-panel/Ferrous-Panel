@@ -7,6 +7,9 @@ pub async fn get_telemetry(state: web::Data<AppState>) -> Result<HttpResponse, P
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let snapshot = state.snapshot_with_real_history()?;
+    let st = state.clone();
+    let snapshot = web::block(move || st.snapshot_with_real_history())
+        .await
+        .map_err(|_| PanelError::Internal("telemetry worker failed".to_string()))??;
     Ok(HttpResponse::Ok().json(snapshot))
 }

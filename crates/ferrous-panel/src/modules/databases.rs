@@ -15,14 +15,18 @@ use rusqlite::Connection;
 use serde_json::{Number, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+static DUMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
 const DB_CMD_TIMEOUT: Duration = Duration::from_secs(20);
-const DB_DUMP_TIMEOUT: Duration = Duration::from_secs(60);
+const DB_DUMP_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_MARIADB_CNF: &str = "/etc/mysql/mariadb.conf.d/50-server.cnf";
 const PREVIEW_ROW_LIMIT: usize = 50;
 const MAX_BROWSE_LIMIT: usize = 500;
-const MAX_SQL_IMPORT_BYTES: usize = 512 * 1024;
+const MAX_SQL_IMPORT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_SQL_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
 const FERROUS_ADMIN_KV_KEY: &str = "ferrous_admin_pma_settings";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -151,7 +155,9 @@ fn open_sqlite_db(store: &ModuleStore, db_ident: &SqlIdentifier) -> Result<Conne
     let path = sqlite_db_path(store, db_ident)?;
     let conn = Connection::open(&path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;",
+    )?;
     Ok(conn)
 }
 
@@ -1167,6 +1173,42 @@ fn export_sqlite_sql_sync(
     Ok(out)
 }
 
+struct TempDumpGuard(PathBuf);
+
+impl Drop for TempDumpGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn build_temp_dump_path(store: &ModuleStore, db_ident: &SqlIdentifier) -> Result<TempDumpGuard, PanelError> {
+    let tmp_dir = store.data_dir().join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let seq = DUMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stamp = Utc::now().timestamp_millis();
+    let file_name = format!(
+        "dump-{}-{}-{}-{}.sql",
+        db_ident.as_str(),
+        std::process::id(),
+        stamp,
+        seq
+    );
+    let safe = SafePath::under_root(&tmp_dir, &file_name)?;
+    Ok(TempDumpGuard(safe.as_path().to_path_buf()))
+}
+
+fn read_dump_file_bounded(path: &Path) -> Result<String, PanelError> {
+    let meta = std::fs::metadata(path)?;
+    if meta.len() > MAX_SQL_EXPORT_BYTES {
+        return Err(PanelError::Validation(format!(
+            "SQL dump size ({} bytes) exceeds 64 MiB HTTP export limit; use cPanel Zstd Backup for larger databases",
+            meta.len()
+        )));
+    }
+    let bytes = std::fs::read(path)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 pub async fn export_database_sql(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,
@@ -1186,8 +1228,9 @@ pub async fn export_database_sql(
                     "mysqldump is not installed on this host".to_string(),
                 ));
             }
+            let dump_guard = build_temp_dump_path(store, &db_ident)?;
             let out = executor
-                .run(
+                .run_to_file(
                     AllowedBinary::Mysqldump,
                     &[
                         "--single-transaction",
@@ -1195,6 +1238,7 @@ pub async fn export_database_sql(
                         "--triggers",
                         db_ident.as_str(),
                     ],
+                    &dump_guard.0,
                     DB_DUMP_TIMEOUT,
                 )
                 .await?;
@@ -1205,7 +1249,7 @@ pub async fn export_database_sql(
                     stderr: out.stderr,
                 });
             }
-            Ok(out.stdout)
+            read_dump_file_bounded(&dump_guard.0)
         }
         DbEngineKind::Postgres => {
             if !executor.is_binary_available(AllowedBinary::PgDump) {
@@ -1213,10 +1257,12 @@ pub async fn export_database_sql(
                     "pg_dump is not installed on this host".to_string(),
                 ));
             }
+            let dump_guard = build_temp_dump_path(store, &db_ident)?;
             let out = executor
-                .run(
+                .run_to_file(
                     AllowedBinary::PgDump,
                     &["--clean", "--if-exists", db_ident.as_str()],
+                    &dump_guard.0,
                     DB_DUMP_TIMEOUT,
                 )
                 .await?;
@@ -1227,7 +1273,7 @@ pub async fn export_database_sql(
                     stderr: out.stderr,
                 });
             }
-            Ok(out.stdout)
+            read_dump_file_bounded(&dump_guard.0)
         }
     }
 }

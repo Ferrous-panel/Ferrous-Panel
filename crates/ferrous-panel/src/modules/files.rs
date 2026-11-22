@@ -17,6 +17,7 @@ use std::time::Duration;
 const MAX_LIST_NODES: usize = 2000;
 const MAX_READ_CONTENT_BYTES: u64 = 128 * 1024;
 const MAX_UPLOAD_ENTRIES: usize = 512;
+const MAX_RAW_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 const FILE_CMD_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Deserialize)]
@@ -489,6 +490,46 @@ pub fn batch_chmod(
         }
     }
 
+    list_files(app_id, store, config)
+}
+
+/// Atomically writes raw uploaded bytes (up to 64 MiB) inside the application's `SafePath` web root.
+pub fn upload_raw_file(
+    app_id: &str,
+    parent_dir: &str,
+    file_name: &str,
+    bytes: &[u8],
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<Vec<WebFileNode>, PanelError> {
+    if bytes.len() > MAX_RAW_UPLOAD_BYTES {
+        return Err(PanelError::Validation(format!(
+            "uploaded file exceeds maximum size of {} MiB",
+            MAX_RAW_UPLOAD_BYTES / (1024 * 1024)
+        )));
+    }
+    let app_root = resolve_app_root(app_id, store, config)?;
+    let clean_parent = normalize_virtual_dir(parent_dir)?;
+    let clean_name = validate_single_filename(file_name)?;
+    let rel = if clean_parent.is_empty() {
+        clean_name
+    } else {
+        format!("{clean_parent}/{clean_name}")
+    };
+    let target = resolve_under_app_root(&app_root, &rel)?;
+    if let Ok(meta) = std::fs::symlink_metadata(target.as_path()) {
+        if meta.file_type().is_symlink() {
+            return Err(PanelError::Forbidden(
+                "overwriting a symbolic link via file upload is forbidden".to_string(),
+            ));
+        }
+        if meta.is_dir() {
+            return Err(PanelError::Conflict(
+                "cannot overwrite an existing directory with an uploaded file".to_string(),
+            ));
+        }
+    }
+    atomic_write_file(target.as_path(), bytes, 0o644)?;
     list_files(app_id, store, config)
 }
 

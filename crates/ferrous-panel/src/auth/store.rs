@@ -1,14 +1,17 @@
 use crate::auth::password::{generate_session_token, RedactedSecret};
 use crate::error::PanelError;
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 
 const STANDARD_TTL_SECS: i64 = 24 * 60 * 60;
 const REMEMBER_ME_TTL_SECS: i64 = 30 * 24 * 60 * 60;
+const MAX_AUDIT_LOG_ROWS: i64 = 10_000;
 
 /// Verified session identity loaded from SQLite.
 #[derive(Debug, Clone)]
@@ -16,6 +19,18 @@ pub struct SessionRecord {
     pub id: String,
     pub username: String,
     pub expires_at: i64,
+}
+
+/// Persisted security audit log entry returned by admin audit endpoints.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditLogEntry {
+    pub id: i64,
+    pub timestamp: String,
+    pub username: Option<String>,
+    pub ip: String,
+    pub action: String,
+    pub detail: String,
 }
 
 /// Thread-safe SQLite store for authentication sessions and security audit logs.
@@ -32,9 +47,11 @@ impl AuthStore {
             }
         }
         let conn = Connection::open(db_path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -108,7 +125,8 @@ impl AuthStore {
         Ok((raw_token, ttl_secs))
     }
 
-    /// Verifies a bearer/cookie token against SQLite non-expired sessions in constant time.
+    /// Verifies a bearer/cookie token against SQLite non-expired sessions via O(1) unique index
+    /// lookup on `token_hash` followed by constant-time digest verification.
     pub fn verify_session(&self, presented_token: &str) -> Result<Option<SessionRecord>, PanelError> {
         let clean = presented_token.trim();
         if clean.is_empty() || clean.len() > 256 {
@@ -119,32 +137,27 @@ impl AuthStore {
         let now = Utc::now().timestamp();
         let conn = self.lock_conn()?;
 
-        let mut stmt = conn.prepare(
-            "SELECT id, token_hash, username, expires_at FROM sessions WHERE expires_at > ?1",
-        )?;
-        let rows = stmt.query_map(params![now], |row| {
-            let id: String = row.get(0)?;
-            let hash_bytes: Vec<u8> = row.get(1)?;
-            let username: String = row.get(2)?;
-            let expires_at: i64 = row.get(3)?;
-            Ok((id, hash_bytes, username, expires_at))
-        })?;
+        let row_opt: Option<(String, Vec<u8>, String, i64)> = conn
+            .query_row(
+                "SELECT id, token_hash, username, expires_at FROM sessions WHERE token_hash = ?1 AND expires_at > ?2",
+                params![presented_digest.as_slice(), now],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
 
-        let mut matched: Option<SessionRecord> = None;
-        for row_res in rows {
-            let (id, hash_bytes, username, expires_at) = row_res?;
-            if hash_bytes.len() == presented_digest.len() {
-                let is_eq: bool = hash_bytes.ct_eq(presented_digest.as_slice()).into();
-                if is_eq && matched.is_none() {
-                    matched = Some(SessionRecord {
-                        id,
-                        username,
-                        expires_at,
-                    });
-                }
+        let matched = match row_opt {
+            Some((id, hash_bytes, username, expires_at))
+                if hash_bytes.len() == presented_digest.len()
+                    && bool::from(hash_bytes.ct_eq(presented_digest.as_slice())) =>
+            {
+                Some(SessionRecord {
+                    id,
+                    username,
+                    expires_at,
+                })
             }
-        }
-        drop(stmt);
+            _ => None,
+        };
 
         if let Some(ref record) = matched {
             conn.execute(
@@ -173,7 +186,7 @@ impl AuthStore {
         Ok(affected)
     }
 
-    /// Appends an immutable audit log entry (user, client IP, action, detail).
+    /// Appends an audit log entry (user, client IP, action, detail) with bounded retention.
     pub fn append_audit_log(
         &self,
         username: Option<&str>,
@@ -187,7 +200,35 @@ impl AuthStore {
             "INSERT INTO audit_logs (timestamp, username, ip, action, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![ts, username, ip, action, detail],
         )?;
+        let _ = conn.execute(
+            "DELETE FROM audit_logs WHERE id NOT IN (SELECT id FROM audit_logs ORDER BY id DESC LIMIT ?1)",
+            params![MAX_AUDIT_LOG_ROWS],
+        );
         Ok(())
+    }
+
+    /// Lists newest security audit log entries (clamped to `1..=500`).
+    pub fn list_audit_logs(&self, limit: usize) -> Result<Vec<AuditLogEntry>, PanelError> {
+        let clamped = i64::try_from(limit.clamp(1, 500)).unwrap_or(100);
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, timestamp, username, ip, action, detail FROM audit_logs ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![clamped], |row| {
+            Ok(AuditLogEntry {
+                id: row.get(0)?,
+                timestamp: row.get(1)?,
+                username: row.get(2)?,
+                ip: row.get(3)?,
+                action: row.get(4)?,
+                detail: row.get(5)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
     }
 
     /// Returns total number of audit log rows recorded in SQLite.

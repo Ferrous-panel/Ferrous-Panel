@@ -1,8 +1,10 @@
 #![forbid(unsafe_code)]
 
+use actix_web::middleware::from_fn;
 use actix_web::{web, App, HttpServer};
 use anyhow::Context;
 use clap::Parser;
+use ferrous_panel::auth::middleware::security_headers_middleware;
 use ferrous_panel::cli::{
     apply_env_file, run_fp_command, run_interactive_menu, FpCli, PanelCommand,
 };
@@ -72,15 +74,24 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(err) = telemetry_state.record_telemetry_sample(true) {
-                tracing::debug!(error = %err, "background telemetry sample skipped");
+            let sample_state = telemetry_state.clone();
+            match web::block(move || sample_state.record_telemetry_sample(true)).await {
+                Ok(Err(err)) => {
+                    tracing::debug!(error = %err, "background telemetry sample skipped");
+                }
+                Err(err) => {
+                    tracing::debug!(error = %err, "background telemetry worker skipped");
+                }
+                Ok(Ok(())) => {}
             }
         }
     });
 
     let mut server = HttpServer::new(move || {
         let app_state = shared_state.clone();
-        App::new().configure(move |cfg| configure_app(cfg, app_state))
+        App::new()
+            .wrap(from_fn(security_headers_middleware))
+            .configure(move |cfg| configure_app(cfg, app_state))
     })
     .bind((bind_addr.as_str(), bind_port))
     .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"))?;

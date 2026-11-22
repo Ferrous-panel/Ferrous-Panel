@@ -6,6 +6,7 @@ pub mod databases;
 pub mod extended;
 pub mod files;
 pub mod health;
+pub mod jobs;
 pub mod security;
 pub mod telemetry;
 pub mod webserver;
@@ -14,6 +15,10 @@ use crate::auth::middleware::require_auth;
 use crate::error::PanelError;
 use actix_web::middleware::from_fn;
 use actix_web::{web, HttpResponse};
+
+const LARGE_SQL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const LARGE_ZIP_JSON_BYTES: usize = 32 * 1024 * 1024;
+const LARGE_RAW_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 async fn not_implemented() -> Result<HttpResponse, PanelError> {
     Err(PanelError::NotImplemented(
@@ -58,9 +63,10 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             "/databases/{id}/export",
             web::get().to(databases::export_database),
         )
-        .route(
-            "/databases/{id}/import",
-            web::post().to(databases::import_database),
+        .service(
+            web::resource("/databases/{id}/import")
+                .app_data(web::PayloadConfig::default().limit(LARGE_SQL_PAYLOAD_BYTES))
+                .route(web::post().to(databases::import_database)),
         )
         .route(
             "/databases/{id}/tables/{table}/rows",
@@ -78,7 +84,16 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         // SafePath File Manager (static ops before dynamic {file_id})
         .route("/files/{app_id}", web::get().to(files::list_files))
         .route("/files/{app_id}", web::post().to(files::create_node))
-        .route("/files/{app_id}/upload-zip", web::post().to(files::upload_zip))
+        .service(
+            web::resource("/files/{app_id}/upload-zip")
+                .app_data(web::JsonConfig::default().limit(LARGE_ZIP_JSON_BYTES))
+                .route(web::post().to(files::upload_zip)),
+        )
+        .service(
+            web::resource("/files/{app_id}/upload-raw")
+                .app_data(web::PayloadConfig::default().limit(LARGE_RAW_UPLOAD_BYTES))
+                .route(web::post().to(files::upload_raw)),
+        )
         .route("/files/{app_id}/compress", web::post().to(files::compress_dir))
         .route(
             "/files/{app_id}/remote-download",
@@ -130,7 +145,31 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             "/security/waf/{id}/toggle",
             web::put().to(security::toggle_waf_rule),
         )
-        .route("/security/fim-scan", web::post().to(security::run_fim_scan));
+        .route("/security/fim-scan", web::post().to(security::run_fim_scan))
+        .route(
+            "/security/audit-logs",
+            web::get().to(security::get_audit_logs),
+        )
+        // Asynchronous Background Job Manager (prevents HTTP / Cloudflare 522/524 timeouts)
+        .route("/jobs", web::get().to(jobs::list_jobs))
+        .route(
+            "/jobs/apps/{id}/rebuild",
+            web::post().to(jobs::start_rebuild_app_job),
+        )
+        .route(
+            "/jobs/apps/{id}/git-deploy",
+            web::post().to(jobs::start_git_deploy_job),
+        )
+        .route(
+            "/jobs/apps/{id}/renew-ssl",
+            web::post().to(jobs::start_renew_ssl_job),
+        )
+        .route(
+            "/jobs/cpanel/backups",
+            web::post().to(jobs::start_create_backup_job),
+        )
+        .route("/jobs/{id}/poll", web::get().to(jobs::poll_job))
+        .route("/jobs/{id}", web::get().to(jobs::get_job));
 }
 
 fn register_extended_routes(cfg: &mut web::ServiceConfig) {
@@ -344,9 +383,10 @@ fn register_pma_api_routes(cfg: &mut web::ServiceConfig) {
             "/databases/{id}/export",
             web::get().to(databases::export_database),
         )
-        .route(
-            "/databases/{id}/import",
-            web::post().to(databases::import_database),
+        .service(
+            web::resource("/databases/{id}/import")
+                .app_data(web::PayloadConfig::default().limit(LARGE_SQL_PAYLOAD_BYTES))
+                .route(web::post().to(databases::import_database)),
         )
         .route(
             "/databases/{id}/tables/{table}/rows",

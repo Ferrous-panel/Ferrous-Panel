@@ -1,5 +1,6 @@
 use crate::auth::middleware::{AuthenticatedUser, SESSION_COOKIE_NAME};
 use crate::auth::password::{constant_time_eq, verify_password};
+use crate::auth::rate_limit::extract_client_ip;
 use crate::error::PanelError;
 use crate::state::AppState;
 use actix_web::cookie::time::Duration as CookieDuration;
@@ -56,12 +57,6 @@ struct LogoutResponse {
     message: &'static str,
 }
 
-fn client_ip(req: &HttpRequest) -> String {
-    req.peer_addr()
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
-}
-
 fn user_agent(req: &HttpRequest) -> String {
     req.headers()
         .get(header::USER_AGENT)
@@ -79,12 +74,13 @@ pub async fn login(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let ip = client_ip(&req);
+    let ip = extract_client_ip(&req, &state.config);
     let ua = user_agent(&req);
     state.rate_limiter.check(&ip)?;
 
-    let clean_user = payload.username.trim();
-    let clean_pass = payload.password.trim();
+    let clean_user = payload.username.trim().to_string();
+    let clean_pass = payload.password.trim().to_string();
+    let remember_me = payload.remember_me;
     if clean_user.is_empty() || clean_pass.is_empty() {
         return Err(PanelError::Validation(
             "username and password are required".to_string(),
@@ -100,36 +96,54 @@ pub async fn login(
     };
 
     let user_matches = constant_time_eq(clean_user.as_bytes(), stored_user.as_bytes());
-    let pass_matches = verify_password(clean_pass, &stored_hash);
+    let pass_for_block = clean_pass;
+    let hash_for_block = stored_hash;
+    let pass_matches = web::block(move || verify_password(&pass_for_block, &hash_for_block))
+        .await
+        .map_err(|_| PanelError::Internal("password verification worker failed".to_string()))?;
 
     if !user_matches || !pass_matches {
         state.rate_limiter.record_failure(&ip)?;
-        let _ = state.auth_store.append_audit_log(
-            Some(clean_user),
-            &ip,
-            "AUTH_LOGIN_FAILED",
-            "invalid credentials",
-        );
+        let st_fail = state.clone();
+        let ip_fail = ip.clone();
+        let user_fail = clean_user;
+        let _ = web::block(move || {
+            st_fail.auth_store.append_audit_log(
+                Some(&user_fail),
+                &ip_fail,
+                "AUTH_LOGIN_FAILED",
+                "invalid credentials",
+            )
+        })
+        .await;
         return Err(PanelError::Unauthorized(
             "invalid username or password".to_string(),
         ));
     }
 
     state.rate_limiter.clear(&ip)?;
-    let (token, ttl_secs) =
-        state
+    let st_sess = state.clone();
+    let user_sess = stored_user.clone();
+    let ip_sess = ip.clone();
+    let ua_sess = ua;
+    let (token, ttl_secs) = web::block(move || {
+        let issued = st_sess
             .auth_store
-            .create_session(&stored_user, payload.remember_me, &ip, &ua)?;
-    state.auth_store.append_audit_log(
-        Some(&stored_user),
-        &ip,
-        "AUTH_LOGIN_SUCCESS",
-        if payload.remember_me {
-            "session issued (30d rememberMe)"
-        } else {
-            "session issued (24h)"
-        },
-    )?;
+            .create_session(&user_sess, remember_me, &ip_sess, &ua_sess)?;
+        st_sess.auth_store.append_audit_log(
+            Some(&user_sess),
+            &ip_sess,
+            "AUTH_LOGIN_SUCCESS",
+            if remember_me {
+                "session issued (30d rememberMe)"
+            } else {
+                "session issued (24h)"
+            },
+        )?;
+        Ok::<_, PanelError>(issued)
+    })
+    .await
+    .map_err(|_| PanelError::Internal("session creation worker failed".to_string()))??;
 
     let cookie = Cookie::build(SESSION_COOKIE_NAME, token.expose().to_string())
         .path("/")
@@ -183,7 +197,7 @@ pub async fn logout(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let ip = client_ip(&req);
+    let ip = extract_client_ip(&req, &state.config);
     let username = req
         .extensions()
         .get::<AuthenticatedUser>()
@@ -200,16 +214,21 @@ pub async fn logout(
         }
     }
 
-    if let Some(ref tok) = token {
-        state.auth_store.revoke_session(tok)?;
-    }
-
-    state.auth_store.append_audit_log(
-        username.as_deref(),
-        &ip,
-        "AUTH_LOGOUT",
-        "session revoked",
-    )?;
+    let st_logout = state.clone();
+    web::block(move || {
+        if let Some(ref tok) = token {
+            st_logout.auth_store.revoke_session(tok)?;
+        }
+        st_logout.auth_store.append_audit_log(
+            username.as_deref(),
+            &ip,
+            "AUTH_LOGOUT",
+            "session revoked",
+        )?;
+        Ok::<_, PanelError>(())
+    })
+    .await
+    .map_err(|_| PanelError::Internal("logout worker failed".to_string()))??;
 
     let cleared = Cookie::build(SESSION_COOKIE_NAME, "")
         .path("/")

@@ -40,6 +40,13 @@ pub struct ImportSqlRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExportSqlQuery {
+    #[serde(default)]
+    pub download: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BrowseRowsQuery {
     #[serde(default = "default_browse_limit")]
     pub limit: usize,
@@ -324,10 +331,12 @@ pub async fn truncate_table(
 }
 
 /// `GET /api/databases/{id}/export` — exports full real `.sql` dump (Pure Rust SQLite / mysqldump / pg_dump).
+/// Pass `?download=1` to receive a direct `application/sql` file attachment instead of a JSON envelope.
 pub async fn export_database(
     req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
+    query: web::Query<ExportSqlQuery>,
 ) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
@@ -347,24 +356,66 @@ pub async fn export_database(
         "database.export",
         &format!("id={id} bytes={}", sql.len()),
     )?;
+
+    if query.into_inner().download.unwrap_or(false) {
+        let safe_filename: String = id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        let file_label = if safe_filename.is_empty() {
+            "database".to_string()
+        } else {
+            safe_filename
+        };
+        return Ok(HttpResponse::Ok()
+            .content_type("application/sql; charset=utf-8")
+            .insert_header((
+                "Content-Disposition",
+                format!("attachment; filename=\"{file_label}.sql\""),
+            ))
+            .body(sql));
+    }
+
     Ok(HttpResponse::Ok().json(ExportSqlResponse {
         database_id: id,
         sql,
     }))
 }
 
-/// `POST /api/databases/{id}/import` — imports a `.sql` script into the database.
+/// `POST /api/databases/{id}/import` — imports a `.sql` script up to 64 MiB.
+/// Accepts either JSON `{ "sql": "..." }` or a raw UTF-8 SQL request body (`text/plain`, `application/sql`).
 pub async fn import_database(
     req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
-    payload: web::Json<ImportSqlRequest>,
+    body: web::Bytes,
 ) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let sql = payload.into_inner().sql;
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let sql = if content_type.contains("application/json")
+        || (content_type.is_empty() && body.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{'))
+    {
+        let parsed: ImportSqlRequest = serde_json::from_slice(&body).map_err(|err| {
+            PanelError::Validation(format!("invalid JSON SQL import payload: {err}"))
+        })?;
+        parsed.sql
+    } else {
+        std::str::from_utf8(&body)
+            .map_err(|_| {
+                PanelError::Validation("raw SQL import body must be valid UTF-8 text".to_string())
+            })?
+            .to_string()
+    };
+
     let res = db_mod::import_database_sql(
         &state.modules,
         state.webserver.executor().as_ref(),
@@ -378,7 +429,7 @@ pub async fn import_database(
         Some(&actor),
         &ip,
         "database.import",
-        &format!("id={id} success={}", res.success),
+        &format!("id={id} bytes={} success={}", sql.len(), res.success),
     )?;
     Ok(HttpResponse::Ok().json(res))
 }

@@ -1,4 +1,5 @@
 use crate::auth::middleware::AuthenticatedUser;
+use crate::auth::rate_limit::extract_client_ip;
 use crate::error::PanelError;
 use crate::modules::security as sec_mod;
 use crate::state::AppState;
@@ -31,16 +32,24 @@ pub struct UnbanIpRequest {
     pub ip: String,
 }
 
-fn actor_and_ip(req: &HttpRequest) -> (String, String) {
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditLogsQuery {
+    #[serde(default = "default_audit_limit")]
+    pub limit: usize,
+}
+
+fn default_audit_limit() -> usize {
+    100
+}
+
+fn actor_and_ip(req: &HttpRequest, state: &AppState) -> (String, String) {
     let actor = req
         .extensions()
         .get::<AuthenticatedUser>()
         .map(|u| u.username.clone())
         .unwrap_or_else(|| "unknown".to_string());
-    let ip = req
-        .peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let ip = extract_client_ip(req, &state.config);
     (actor, ip)
 }
 
@@ -77,7 +86,7 @@ pub async fn add_ufw_rule(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -104,7 +113,7 @@ pub async fn toggle_ufw_rule(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -126,7 +135,7 @@ pub async fn delete_ufw_rule(
     let id = path.into_inner();
     let rules = sec_mod::delete_ufw_rule(state.webserver.executor().as_ref(), &id).await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state
         .auth_store
         .append_audit_log(Some(&actor), &ip, "security.ufw.delete", &format!("id={id}"))?;
@@ -151,7 +160,7 @@ pub async fn ban_ip(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -179,7 +188,7 @@ pub async fn unban_ip(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -202,7 +211,7 @@ pub async fn toggle_hardening(
     let directives =
         sec_mod::toggle_hardening(state.webserver.executor().as_ref(), &id).await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -238,7 +247,7 @@ pub async fn set_ddos_mode(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -260,7 +269,7 @@ pub async fn toggle_waf_rule(
     let id = path.into_inner();
     let shield = sec_mod::toggle_waf_rule(&state.modules, &id)?;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -270,7 +279,7 @@ pub async fn toggle_waf_rule(
     Ok(HttpResponse::Ok().json(shield))
 }
 
-/// `POST /api/security/fim-scan` — executes a real SHA-256 File Integrity Monitoring scan across `wwwroot` and `data_dir`.
+/// `POST /api/security/fim-scan` — executes a real SHA-256 File Integrity Monitoring scan on a blocking worker thread.
 pub async fn run_fim_scan(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -278,10 +287,13 @@ pub async fn run_fim_scan(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
+    let st = state.clone();
     let (scanned_files, sha256_root, shield) =
-        sec_mod::run_fim_scan(&state.modules, &state.config)?;
+        web::block(move || sec_mod::run_fim_scan(&st.modules, &st.config))
+            .await
+            .map_err(|_| PanelError::Internal("FIM scan worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req);
+    let (actor, ip) = actor_and_ip(&req, &state);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -295,4 +307,20 @@ pub async fn run_fim_scan(
         "antiDdos": shield,
         "antiDdosShield": shield,
     })))
+}
+
+/// `GET /api/security/audit-logs?limit=100` — lists newest persisted security audit log entries.
+pub async fn get_audit_logs(
+    state: web::Data<AppState>,
+    query: web::Query<AuditLogsQuery>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let limit = query.into_inner().limit;
+    let st = state.clone();
+    let logs = web::block(move || st.auth_store.list_audit_logs(limit))
+        .await
+        .map_err(|_| PanelError::Internal("audit log query worker failed".to_string()))??;
+    Ok(HttpResponse::Ok().json(logs))
 }

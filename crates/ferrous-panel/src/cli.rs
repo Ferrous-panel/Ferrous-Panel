@@ -400,6 +400,11 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
             "FERROUS_BACKUPS_DIR" if !val.is_empty() && !cli_flag_provided("--backups-dir") => {
                 cfg.backups_dir = PathBuf::from(val);
             }
+            "FERROUS_TRUSTED_PROXIES"
+                if !val.is_empty() && !cli_flag_provided("--trusted-proxies") =>
+            {
+                cfg.trusted_proxies = val.to_string();
+            }
             "FERROUS_SYSTEMD_DIR"
                 if !val.is_empty() && !cli_flag_provided("--systemd-unit-dir") =>
             {

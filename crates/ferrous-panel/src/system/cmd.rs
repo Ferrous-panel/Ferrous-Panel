@@ -1,4 +1,6 @@
 use crate::error::PanelError;
+use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -419,6 +421,64 @@ pub async fn run_with_stdin(
         exit_code: output.status.code(),
         success: output.status.success(),
         stdout: bounded_utf8(&output.stdout),
+        stderr: bounded_utf8(&output.stderr),
+    })
+}
+
+/// Runs an allowlisted binary directly (`execve`, no shell) and streams its stdout straight to
+/// `output_file` (mode `0600`) without the 64 KiB in-memory stdout cap.
+pub async fn run_to_file(
+    bin: AllowedBinary,
+    args: &[&str],
+    output_file: &Path,
+    timeout: Duration,
+) -> Result<CmdOutput, PanelError> {
+    if timeout.is_zero() {
+        return Err(PanelError::Validation(
+            "command timeout must be greater than zero".to_string(),
+        ));
+    }
+    for arg in args {
+        if arg.contains('\0') {
+            return Err(PanelError::Forbidden(
+                "NUL byte in command argument is forbidden".to_string(),
+            ));
+        }
+    }
+    let resolved = bin.resolve_path()?;
+
+    if let Some(parent) = output_file.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let out_file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(output_file)?;
+
+    let mut cmd = Command::new(resolved);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_file))
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let child = cmd.spawn()?;
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| PanelError::CommandTimeout {
+            binary: bin.label(),
+            timeout_ms,
+        })??;
+
+    Ok(CmdOutput {
+        exit_code: output.status.code(),
+        success: output.status.success(),
+        stdout: String::new(),
         stderr: bounded_utf8(&output.stderr),
     })
 }

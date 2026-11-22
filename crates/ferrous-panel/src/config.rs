@@ -58,6 +58,10 @@ pub struct Config {
     #[arg(long, env = "FERROUS_SYSTEMD_DIR", default_value = "/etc/systemd/system")]
     pub systemd_unit_dir: PathBuf,
 
+    /// Comma-separated reverse proxy IPs trusted to supply X-Forwarded-For / CF-Connecting-IP headers.
+    #[arg(long, env = "FERROUS_TRUSTED_PROXIES", default_value = "127.0.0.1,::1")]
+    pub trusted_proxies: String,
+
     /// Optional CLI subcommand (`fp ...` or `serve`). Defaults to serving the panel daemon.
     #[command(subcommand)]
     pub command: Option<PanelCommand>,
@@ -72,6 +76,19 @@ impl Config {
     #[must_use]
     pub fn credentials_path(&self) -> PathBuf {
         self.data_dir.join("admin.credentials.json")
+    }
+
+    /// Returns true if `peer_ip` is explicitly allowlisted as a trusted reverse proxy.
+    #[must_use]
+    pub fn is_trusted_proxy(&self, peer_ip: &str) -> bool {
+        let needle = peer_ip.trim();
+        if needle.is_empty() {
+            return false;
+        }
+        self.trusted_proxies
+            .split(',')
+            .map(str::trim)
+            .any(|entry| !entry.is_empty() && entry == needle)
     }
 
     /// Convenience constructor for integration tests with isolated temp directories.
@@ -92,6 +109,7 @@ impl Config {
             reload_webserver: false,
             backups_dir,
             systemd_unit_dir,
+            trusted_proxies: "127.0.0.1,::1".to_string(),
             command: None,
         }
     }

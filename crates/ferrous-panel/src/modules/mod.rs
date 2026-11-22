@@ -3,6 +3,7 @@ pub mod cpanel;
 pub mod databases;
 pub mod extended;
 pub mod files;
+pub mod jobs;
 pub mod security;
 
 use crate::api::contract::{BackupArchiveItem, ManagedApp, TelemetryHistoryPoint};
@@ -10,9 +11,13 @@ use crate::error::PanelError;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+
+const MAX_PANEL_JOBS: i64 = 200;
+const MAX_JOB_LOG_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct ManagedDbMeta {
@@ -36,6 +41,21 @@ pub struct CronRunMeta {
     pub last_output: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelJobRecord {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub status: String,
+    pub progress: u8,
+    pub output: String,
+    pub error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub finished_at: Option<String>,
+}
+
 /// Persistent SQLite metadata store for operational modules (`panel.db`).
 ///
 /// Security guarantee: Database passwords and root credentials are NEVER stored here.
@@ -56,9 +76,11 @@ impl ModuleStore {
             std::fs::create_dir_all(&data_dir)?;
         }
         let conn = Connection::open(db_path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS telemetry_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,6 +131,19 @@ impl ModuleStore {
                 value_json TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS panel_jobs (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL,
+                output TEXT NOT NULL,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                finished_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_panel_jobs_created_at ON panel_jobs(created_at);
             ",
         )?;
         Ok(Self {
@@ -451,5 +486,170 @@ impl ModuleStore {
             params![key, raw, now],
         )?;
         Ok(())
+    }
+
+    // ---- Background Panel Jobs ----
+
+    pub fn insert_job(&self, job: &PanelJobRecord) -> Result<(), PanelError> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO panel_jobs (id, kind, title, status, progress, output, error, created_at, updated_at, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                job.id,
+                job.kind,
+                job.title,
+                job.status,
+                i64::from(job.progress),
+                job.output,
+                job.error,
+                job.created_at,
+                job.updated_at,
+                job.finished_at,
+            ],
+        )?;
+        let _ = conn.execute(
+            "DELETE FROM panel_jobs WHERE id NOT IN (SELECT id FROM panel_jobs ORDER BY created_at DESC LIMIT ?1)",
+            params![MAX_PANEL_JOBS],
+        );
+        Ok(())
+    }
+
+    pub fn update_job(
+        &self,
+        id: &str,
+        status: &str,
+        progress: u8,
+        append_log: Option<&str>,
+        error: Option<&str>,
+        finished: bool,
+    ) -> Result<Option<PanelJobRecord>, PanelError> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock_conn()?;
+        let existing: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT output, finished_at FROM panel_jobs WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((mut output, existing_finished)) = existing else {
+            return Ok(None);
+        };
+
+        if let Some(chunk) = append_log {
+            if !chunk.is_empty() {
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(chunk);
+                if output.len() > MAX_JOB_LOG_BYTES {
+                    let trim_start = output.len().saturating_sub(MAX_JOB_LOG_BYTES);
+                    let mut boundary = trim_start;
+                    while boundary < output.len() && !output.is_char_boundary(boundary) {
+                        boundary += 1;
+                    }
+                    output = output[boundary..].to_string();
+                }
+            }
+        }
+
+        let finished_at = if finished {
+            Some(now.clone())
+        } else {
+            existing_finished
+        };
+
+        conn.execute(
+            "UPDATE panel_jobs SET status = ?2, progress = ?3, output = ?4, error = ?5, updated_at = ?6, finished_at = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                status,
+                i64::from(progress.min(100)),
+                output,
+                error,
+                now,
+                finished_at,
+            ],
+        )?;
+
+        conn.query_row(
+            "SELECT id, kind, title, status, progress, output, error, created_at, updated_at, finished_at
+             FROM panel_jobs WHERE id = ?1",
+            params![id],
+            |row| {
+                let p_raw: i64 = row.get(4)?;
+                Ok(PanelJobRecord {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    progress: u8::try_from(p_raw.clamp(0, 100)).unwrap_or(0),
+                    output: row.get(5)?,
+                    error: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    finished_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(PanelError::from)
+    }
+
+    pub fn get_job(&self, id: &str) -> Result<Option<PanelJobRecord>, PanelError> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT id, kind, title, status, progress, output, error, created_at, updated_at, finished_at
+             FROM panel_jobs WHERE id = ?1",
+            params![id],
+            |row| {
+                let p_raw: i64 = row.get(4)?;
+                Ok(PanelJobRecord {
+                    id: row.get(0)?,
+                    kind: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    progress: u8::try_from(p_raw.clamp(0, 100)).unwrap_or(0),
+                    output: row.get(5)?,
+                    error: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                    finished_at: row.get(9)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(PanelError::from)
+    }
+
+    pub fn list_jobs(&self, limit: usize) -> Result<Vec<PanelJobRecord>, PanelError> {
+        let clamped = i64::try_from(limit.clamp(1, 200)).unwrap_or(50);
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, kind, title, status, progress, output, error, created_at, updated_at, finished_at
+             FROM panel_jobs ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![clamped], |row| {
+            let p_raw: i64 = row.get(4)?;
+            Ok(PanelJobRecord {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                title: row.get(2)?,
+                status: row.get(3)?,
+                progress: u8::try_from(p_raw.clamp(0, 100)).unwrap_or(0),
+                output: row.get(5)?,
+                error: row.get(6)?,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+                finished_at: row.get(9)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for item in rows {
+            out.push(item?);
+        }
+        Ok(out)
     }
 }

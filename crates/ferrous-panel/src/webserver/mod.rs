@@ -558,6 +558,27 @@ pub trait CommandExecutor: fmt::Debug + Send + Sync {
         self.run(bin, args, timeout)
     }
 
+    fn run_to_file<'a>(
+        &'a self,
+        bin: AllowedBinary,
+        args: &'a [&'a str],
+        output_file: &'a Path,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
+        Box::pin(async move {
+            let out = self.run(bin, args, timeout).await?;
+            if out.success {
+                if let Some(parent) = output_file.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(output_file, out.stdout.as_bytes())?;
+            }
+            Ok(out)
+        })
+    }
+
     fn http_probe<'a>(
         &'a self,
         connect_addr: SocketAddr,
@@ -603,6 +624,16 @@ impl CommandExecutor for SystemCommandExecutor {
         timeout: Duration,
     ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
         Box::pin(cmd::run_with_stdin(bin, args, stdin_bytes, timeout))
+    }
+
+    fn run_to_file<'a>(
+        &'a self,
+        bin: AllowedBinary,
+        args: &'a [&'a str],
+        output_file: &'a Path,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
+        Box::pin(cmd::run_to_file(bin, args, output_file, timeout))
     }
 
     fn http_probe<'a>(
@@ -885,9 +916,11 @@ impl WebServerStore {
             }
         }
         let conn = Connection::open(db_path)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS webserver_settings (
                 key TEXT PRIMARY KEY,
