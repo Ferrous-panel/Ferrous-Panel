@@ -524,41 +524,76 @@ pub async fn software_package_action(
                         pkg.logs.push(format!("[{now}] {msg}"));
                     } else {
                         if let Some(apt_pkg) = m.apt_package {
-                            if executor.is_binary_available(AllowedBinary::AptGet) {
-                                let res = executor
-                                    .run_with_env(
-                                        AllowedBinary::AptGet,
-                                        &["install", "-y", "-qq", apt_pkg],
-                                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                                        None,
-                                        APT_TIMEOUT,
-                                    )
-                                    .await?;
-                                if !res.success {
-                                    return Err(PanelError::CommandFailed {
-                                        binary: "apt-get",
-                                        exit_code: res.exit_code,
-                                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
-                                    });
-                                }
+                            if !executor.is_binary_available(AllowedBinary::AptGet) {
+                                return Err(PanelError::Conflict(format!(
+                                    "thiếu apt-get để cài '{apt_pkg}' (gợi ý: sudo apt install -y {apt_pkg})"
+                                )));
+                            }
+                            let res = executor
+                                .run_with_env(
+                                    AllowedBinary::AptGet,
+                                    &["install", "-y", "-qq", apt_pkg],
+                                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                                    None,
+                                    APT_TIMEOUT,
+                                )
+                                .await?;
+                            if !res.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "apt-get",
+                                    exit_code: res.exit_code,
+                                    stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                                });
                             }
                         }
-                        if !m.systemd_unit.is_empty()
-                            && executor.is_binary_available(AllowedBinary::Systemctl)
-                        {
-                            // Prevent port 80/443 collision between FerrousX and Nginx
-                            if id == "pkg-nginx" {
-                                let _ = executor
-                                    .run(AllowedBinary::Systemctl, &["stop", "ferrousx.service"], CMD_TIMEOUT)
-                                    .await;
-                            } else if id == "pkg-ferrousx" {
-                                let _ = executor
-                                    .run(AllowedBinary::Systemctl, &["stop", "nginx.service"], CMD_TIMEOUT)
-                                    .await;
+                        if !m.systemd_unit.is_empty() {
+                            if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                                return Err(PanelError::Conflict(format!(
+                                    "thiếu systemctl để kích hoạt dịch vụ '{}'",
+                                    m.systemd_unit
+                                )));
                             }
-                            let _ = executor
+                            // Prevent port 80/443 collision between FerrousX and Nginx
+                            let competing = if id == "pkg-nginx" {
+                                Some("ferrousx.service")
+                            } else if id == "pkg-ferrousx" {
+                                Some("nginx.service")
+                            } else {
+                                None
+                            };
+                            if let Some(other_unit) = competing {
+                                let other_active = executor
+                                    .run(AllowedBinary::Systemctl, &["is-active", other_unit], CMD_TIMEOUT)
+                                    .await
+                                    .map(|o| o.success && o.stdout.trim() == "active")
+                                    .unwrap_or(false);
+                                if other_active {
+                                    let stop_other = executor
+                                        .run(AllowedBinary::Systemctl, &["stop", other_unit], CMD_TIMEOUT)
+                                        .await?;
+                                    if !stop_other.success {
+                                        return Err(PanelError::CommandFailed {
+                                            binary: "systemctl",
+                                            exit_code: stop_other.exit_code,
+                                            stderr: if stop_other.stderr.is_empty() {
+                                                stop_other.stdout
+                                            } else {
+                                                stop_other.stderr
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                            let en = executor
                                 .run(AllowedBinary::Systemctl, &["enable", "--now", m.systemd_unit], CMD_TIMEOUT)
-                                .await;
+                                .await?;
+                            if !en.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "systemctl",
+                                    exit_code: en.exit_code,
+                                    stderr: if en.stderr.is_empty() { en.stdout } else { en.stderr },
+                                });
+                            }
                         }
                     }
                 }
@@ -578,34 +613,53 @@ pub async fn software_package_action(
                             _ => None,
                         };
                         if let Some(p) = bin_path {
-                            let _ = std::fs::remove_file(p);
+                            if Path::new(p).exists() {
+                                std::fs::remove_file(p)?;
+                            }
                         }
                     } else {
                         if !m.systemd_unit.is_empty()
                             && executor.is_binary_available(AllowedBinary::Systemctl)
                         {
-                            let _ = executor
-                                .run(AllowedBinary::Systemctl, &["disable", "--now", m.systemd_unit], CMD_TIMEOUT)
-                                .await;
-                        }
-                        if let Some(apt_pkg) = m.apt_package {
-                            if executor.is_binary_available(AllowedBinary::AptGet) {
-                                let res = executor
-                                    .run_with_env(
-                                        AllowedBinary::AptGet,
-                                        &["remove", "-y", "-qq", apt_pkg],
-                                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                                        None,
-                                        APT_TIMEOUT,
-                                    )
+                            let is_active = executor
+                                .run(AllowedBinary::Systemctl, &["is-active", m.systemd_unit], CMD_TIMEOUT)
+                                .await
+                                .map(|o| o.success && o.stdout.trim() == "active")
+                                .unwrap_or(false);
+                            if is_active {
+                                let dis = executor
+                                    .run(AllowedBinary::Systemctl, &["disable", "--now", m.systemd_unit], CMD_TIMEOUT)
                                     .await?;
-                                if !res.success {
+                                if !dis.success {
                                     return Err(PanelError::CommandFailed {
-                                        binary: "apt-get",
-                                        exit_code: res.exit_code,
-                                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                                        binary: "systemctl",
+                                        exit_code: dis.exit_code,
+                                        stderr: if dis.stderr.is_empty() { dis.stdout } else { dis.stderr },
                                     });
                                 }
+                            }
+                        }
+                        if let Some(apt_pkg) = m.apt_package {
+                            if !executor.is_binary_available(AllowedBinary::AptGet) {
+                                return Err(PanelError::Conflict(format!(
+                                    "thiếu apt-get để gỡ gói '{apt_pkg}'"
+                                )));
+                            }
+                            let res = executor
+                                .run_with_env(
+                                    AllowedBinary::AptGet,
+                                    &["remove", "-y", "-qq", apt_pkg],
+                                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                                    None,
+                                    APT_TIMEOUT,
+                                )
+                                .await?;
+                            if !res.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "apt-get",
+                                    exit_code: res.exit_code,
+                                    stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                                });
                             }
                         }
                     }
@@ -618,18 +672,42 @@ pub async fn software_package_action(
         "start" | "restart" => {
             if prod {
                 if let Some(ref m) = meta {
-                    if !m.is_cli_tool
-                        && !m.systemd_unit.is_empty()
-                        && executor.is_binary_available(AllowedBinary::Systemctl)
-                    {
-                        if id == "pkg-nginx" {
-                            let _ = executor
-                                .run(AllowedBinary::Systemctl, &["stop", "ferrousx.service"], CMD_TIMEOUT)
-                                .await;
+                    if !m.is_cli_tool && !m.systemd_unit.is_empty() {
+                        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                            return Err(PanelError::Conflict(format!(
+                                "thiếu systemctl để thực hiện '{action}' trên '{}'",
+                                m.systemd_unit
+                            )));
+                        }
+                        let competing = if id == "pkg-nginx" {
+                            Some("ferrousx.service")
                         } else if id == "pkg-ferrousx" {
-                            let _ = executor
-                                .run(AllowedBinary::Systemctl, &["stop", "nginx.service"], CMD_TIMEOUT)
-                                .await;
+                            Some("nginx.service")
+                        } else {
+                            None
+                        };
+                        if let Some(other_unit) = competing {
+                            let other_active = executor
+                                .run(AllowedBinary::Systemctl, &["is-active", other_unit], CMD_TIMEOUT)
+                                .await
+                                .map(|o| o.success && o.stdout.trim() == "active")
+                                .unwrap_or(false);
+                            if other_active {
+                                let stop_other = executor
+                                    .run(AllowedBinary::Systemctl, &["stop", other_unit], CMD_TIMEOUT)
+                                    .await?;
+                                if !stop_other.success {
+                                    return Err(PanelError::CommandFailed {
+                                        binary: "systemctl",
+                                        exit_code: stop_other.exit_code,
+                                        stderr: if stop_other.stderr.is_empty() {
+                                            stop_other.stdout
+                                        } else {
+                                            stop_other.stderr
+                                        },
+                                    });
+                                }
+                            }
                         }
                         let res = executor
                             .run(AllowedBinary::Systemctl, &[action, m.systemd_unit], CMD_TIMEOUT)
@@ -651,13 +729,23 @@ pub async fn software_package_action(
         "stop" => {
             if prod {
                 if let Some(ref m) = meta {
-                    if !m.is_cli_tool
-                        && !m.systemd_unit.is_empty()
-                        && executor.is_binary_available(AllowedBinary::Systemctl)
-                    {
-                        let _ = executor
+                    if !m.is_cli_tool && !m.systemd_unit.is_empty() {
+                        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                            return Err(PanelError::Conflict(format!(
+                                "thiếu systemctl để dừng '{}'",
+                                m.systemd_unit
+                            )));
+                        }
+                        let res = executor
                             .run(AllowedBinary::Systemctl, &["stop", m.systemd_unit], CMD_TIMEOUT)
-                            .await;
+                            .await?;
+                        if !res.success {
+                            return Err(PanelError::CommandFailed {
+                                binary: "systemctl",
+                                exit_code: res.exit_code,
+                                stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
+                            });
+                        }
                     }
                 }
             }
@@ -695,56 +783,93 @@ pub async fn save_software_package_config(
     if is_production_vps(config) {
         if let Some(meta) = package_system_meta(id) {
             let real_path = Path::new(meta.real_config_path);
-            if let Some(parent) = real_path.parent() {
-                if parent.is_dir() {
-                    let prev_backup = std::fs::read(real_path).ok();
-                    atomic_write_file(real_path, config_content.as_bytes(), 0o644)?;
+            let Some(parent) = real_path.parent() else {
+                return Err(PanelError::Conflict(format!(
+                    "đường dẫn cấu hình không hợp lệ: {}",
+                    meta.real_config_path
+                )));
+            };
+            if !parent.is_dir() {
+                return Err(PanelError::Conflict(format!(
+                    "thư mục cấu hình '{}' chưa tồn tại — hãy cài gói '{}' trước",
+                    parent.display(),
+                    pkg.name
+                )));
+            }
+            let prev_backup = std::fs::read(real_path).ok();
+            atomic_write_file(real_path, config_content.as_bytes(), 0o644)?;
 
-                    // Validate web engine config before reload; rollback on syntax error
-                    let validation_err: Option<String> = if id == "pkg-nginx"
-                        && executor.is_binary_available(AllowedBinary::Nginx)
-                    {
-                        match executor.run(AllowedBinary::Nginx, &["-t"], CMD_TIMEOUT).await {
-                            Ok(o) if o.success => None,
-                            Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
-                            Err(e) => Some(e.to_string()),
-                        }
-                    } else if id == "pkg-ferrousx"
-                        && executor.is_binary_available(AllowedBinary::Ferrousx)
-                    {
-                        match executor
-                            .run(
-                                AllowedBinary::Ferrousx,
-                                &["--check-config", "--config", meta.real_config_path],
-                                CMD_TIMEOUT,
-                            )
-                            .await
-                        {
-                            Ok(o) if o.success => None,
-                            Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
-                            Err(e) => Some(e.to_string()),
-                        }
-                    } else {
-                        None
-                    };
+            let rollback = || {
+                if let Some(ref prev) = prev_backup {
+                    let _ = atomic_write_file(real_path, prev, 0o644);
+                } else {
+                    let _ = std::fs::remove_file(real_path);
+                }
+            };
 
-                    if let Some(err_detail) = validation_err {
-                        if let Some(prev) = prev_backup {
-                            let _ = atomic_write_file(real_path, &prev, 0o644);
-                        }
-                        return Err(PanelError::Validation(format!(
-                            "Configuration syntax check failed (rolled back): {err_detail}"
-                        )));
+            // Validate web engine config before reload; rollback on syntax error
+            let validation_err: Option<String> = if id == "pkg-nginx"
+                && executor.is_binary_available(AllowedBinary::Nginx)
+            {
+                match executor.run(AllowedBinary::Nginx, &["-t"], CMD_TIMEOUT).await {
+                    Ok(o) if o.success => None,
+                    Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
+                    Err(e) => Some(e.to_string()),
+                }
+            } else if id == "pkg-ferrousx"
+                && executor.is_binary_available(AllowedBinary::Ferrousx)
+            {
+                match executor
+                    .run(
+                        AllowedBinary::Ferrousx,
+                        &["--check-config", "--config", meta.real_config_path],
+                        CMD_TIMEOUT,
+                    )
+                    .await
+                {
+                    Ok(o) if o.success => None,
+                    Ok(o) => Some(if o.stderr.is_empty() { o.stdout } else { o.stderr }),
+                    Err(e) => Some(e.to_string()),
+                }
+            } else {
+                None
+            };
+
+            if let Some(err_detail) = validation_err {
+                rollback();
+                return Err(PanelError::Validation(format!(
+                    "Configuration syntax check failed (rolled back): {err_detail}"
+                )));
+            }
+
+            if !meta.is_cli_tool && !meta.systemd_unit.is_empty() {
+                if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                    rollback();
+                    return Err(PanelError::Conflict(format!(
+                        "thiếu systemctl để reload '{}' (đã rollback)",
+                        meta.systemd_unit
+                    )));
+                }
+                let rel = executor
+                    .run(
+                        AllowedBinary::Systemctl,
+                        &["reload-or-restart", meta.systemd_unit],
+                        CMD_TIMEOUT,
+                    )
+                    .await;
+                match rel {
+                    Ok(o) if o.success => {}
+                    Ok(o) => {
+                        rollback();
+                        return Err(PanelError::CommandFailed {
+                            binary: "systemctl",
+                            exit_code: o.exit_code,
+                            stderr: if o.stderr.is_empty() { o.stdout } else { o.stderr },
+                        });
                     }
-
-                    if executor.is_binary_available(AllowedBinary::Systemctl) {
-                        let _ = executor
-                            .run(
-                                AllowedBinary::Systemctl,
-                                &["reload-or-restart", meta.systemd_unit],
-                                CMD_TIMEOUT,
-                            )
-                            .await;
+                    Err(e) => {
+                        rollback();
+                        return Err(e);
                     }
                 }
             }

@@ -129,6 +129,14 @@ impl EngineRuntimeMetrics {
         self.upstream_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_rate_limited(&self) {
+        self.rate_limited.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_waf_blocked(&self) {
+        self.waf_blocked.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn record_bytes_sent(&self, bytes: u64) {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
     }

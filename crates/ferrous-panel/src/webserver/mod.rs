@@ -396,6 +396,53 @@ pub enum SiteMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SiteRedirectRule {
+    pub source_path: String,
+    pub target_url: String,
+    #[serde(default = "default_site_redirect_code")]
+    pub status_code: u16,
+    #[serde(default = "default_site_true")]
+    pub keep_query: bool,
+    #[serde(default = "default_site_true")]
+    pub enabled: bool,
+}
+
+const fn default_site_redirect_code() -> u16 {
+    301
+}
+
+const fn default_site_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteHotlinkProtection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub protected_extensions: String,
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    #[serde(default)]
+    pub block_empty_referer: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteDirectoryAuth {
+    pub path: String,
+    #[serde(default)]
+    pub label: String,
+    pub username: String,
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
+    #[serde(default = "default_site_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SiteSpec {
     pub domain: Domain,
     #[serde(default)]
@@ -412,6 +459,12 @@ pub struct SiteSpec {
     pub websocket_enabled: bool,
     #[serde(default)]
     pub rate_limit_rps: u32,
+    #[serde(default)]
+    pub redirects: Vec<SiteRedirectRule>,
+    #[serde(default)]
+    pub hotlink_protection: Option<SiteHotlinkProtection>,
+    #[serde(default)]
+    pub directory_auth: Vec<SiteDirectoryAuth>,
 }
 
 impl SiteSpec {
@@ -440,6 +493,58 @@ impl SiteSpec {
                 "redirectHttps requires sslEnabled = true".to_string(),
             ));
         }
+        for rule in &self.redirects {
+            if !rule.enabled {
+                continue;
+            }
+            let src = rule.source_path.trim();
+            let dst = rule.target_url.trim();
+            if !src.starts_with('/')
+                || src.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+            {
+                return Err(PanelError::Validation(format!(
+                    "invalid redirect sourcePath '{}'",
+                    rule.source_path
+                )));
+            }
+            if dst.is_empty()
+                || dst.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+            {
+                return Err(PanelError::Validation(format!(
+                    "invalid redirect targetUrl '{}'",
+                    rule.target_url
+                )));
+            }
+            if !matches!(rule.status_code, 301 | 302 | 307 | 308) {
+                return Err(PanelError::Validation(
+                    "redirect statusCode must be 301, 302, 307, or 308".to_string(),
+                ));
+            }
+        }
+        for auth in &self.directory_auth {
+            if !auth.enabled {
+                continue;
+            }
+            let p = auth.path.trim();
+            if !p.starts_with('/')
+                || p.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+            {
+                return Err(PanelError::Validation(format!(
+                    "invalid directoryAuth path '{}'",
+                    auth.path
+                )));
+            }
+            let u = auth.username.trim();
+            if u.is_empty()
+                || u.len() > 64
+                || !u.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            {
+                return Err(PanelError::Validation(format!(
+                    "invalid directoryAuth username '{}'",
+                    auth.username
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -454,6 +559,202 @@ impl SiteSpec {
         }
         out
     }
+}
+
+/// Computes an Apache/OpenSSL `$apr1$<salt>$<hash>` entry readable by BOTH Nginx (`ngx_crypt_apr1`)
+/// and FerrousX (`verify_htpasswd_hash`) without spawning shells or exposing passwords in argv.
+#[must_use]
+pub fn compute_apr1_htpasswd_hash(password: &str, salt_raw: &str) -> String {
+    let salt = &salt_raw[..salt_raw.len().min(8)];
+    let pw = password.as_bytes();
+    let salt_bytes = salt.as_bytes();
+
+    let mut alt_input = Vec::with_capacity(pw.len() * 2 + salt_bytes.len());
+    alt_input.extend_from_slice(pw);
+    alt_input.extend_from_slice(salt_bytes);
+    alt_input.extend_from_slice(pw);
+    let alt = panel_md5_digest(&alt_input);
+
+    let mut init_input = Vec::with_capacity(pw.len() * 2 + salt_bytes.len() + 32);
+    init_input.extend_from_slice(pw);
+    init_input.extend_from_slice(b"$apr1$");
+    init_input.extend_from_slice(salt_bytes);
+    let mut rem = pw.len();
+    while rem > 0 {
+        let take = rem.min(16);
+        init_input.extend_from_slice(&alt[..take]);
+        rem -= take;
+    }
+    let mut bit_len = pw.len();
+    while bit_len > 0 {
+        if (bit_len & 1) != 0 {
+            init_input.push(0u8);
+        } else if let Some(&first) = pw.first() {
+            init_input.push(first);
+        } else {
+            init_input.push(0u8);
+        }
+        bit_len >>= 1;
+    }
+    let mut digest = panel_md5_digest(&init_input);
+
+    let mut round_buf = Vec::with_capacity(pw.len() * 2 + salt_bytes.len() + 32);
+    for i in 0..1000usize {
+        round_buf.clear();
+        if (i & 1) != 0 {
+            round_buf.extend_from_slice(pw);
+        } else {
+            round_buf.extend_from_slice(&digest);
+        }
+        if i % 3 != 0 {
+            round_buf.extend_from_slice(salt_bytes);
+        }
+        if i % 7 != 0 {
+            round_buf.extend_from_slice(pw);
+        }
+        if (i & 1) != 0 {
+            round_buf.extend_from_slice(&digest);
+        } else {
+            round_buf.extend_from_slice(pw);
+        }
+        digest = panel_md5_digest(&round_buf);
+    }
+
+    const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut encoded = String::with_capacity(22);
+    let mut push_64 = |mut v: u32, count: usize| {
+        for _ in 0..count {
+            encoded.push(char::from(ITOA64[(v & 0x3f) as usize]));
+            v >>= 6;
+        }
+    };
+    for (a, b, c) in [(0usize, 6usize, 12usize), (1, 7, 13), (2, 8, 14), (3, 9, 15), (4, 10, 5)] {
+        let v = (u32::from(digest[a]) << 16)
+            | (u32::from(digest[b]) << 8)
+            | u32::from(digest[c]);
+        push_64(v, 4);
+    }
+    push_64(u32::from(digest[11]), 2);
+    format!("$apr1${salt}${encoded}")
+}
+
+fn panel_md5_digest(input: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ];
+    let mut msg = input.to_vec();
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut a0: u32 = 0x6745_2301;
+    let mut b0: u32 = 0xefcd_ab89;
+    let mut c0: u32 = 0x98ba_dcfe;
+    let mut d0: u32 = 0x1032_5476;
+    for chunk in msg.chunks_exact(64) {
+        let mut m = [0u32; 16];
+        for (idx, word) in m.iter_mut().enumerate() {
+            let off = idx * 4;
+            *word = u32::from_le_bytes([
+                chunk[off],
+                chunk[off + 1],
+                chunk[off + 2],
+                chunk[off + 3],
+            ]);
+        }
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for i in 0..64usize {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | (!d)), (7 * i) % 16),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            let sum = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
+            b = b.wrapping_add(sum.rotate_left(S[i]));
+            a = tmp;
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+    let mut out = [0u8; 16];
+    out[0..4].copy_from_slice(&a0.to_le_bytes());
+    out[4..8].copy_from_slice(&b0.to_le_bytes());
+    out[8..12].copy_from_slice(&c0.to_le_bytes());
+    out[12..16].copy_from_slice(&d0.to_le_bytes());
+    out
+}
+
+/// Writes or updates an htpasswd file with `$apr1$` entries readable by both Nginx and FerrousX.
+pub fn write_site_htpasswd_file(
+    htpasswd_path: &Path,
+    entries: &[SiteDirectoryAuth],
+) -> Result<(), PanelError> {
+    use rand::Rng as _;
+    const SALT_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789./";
+
+    let mut existing: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    if let Ok(raw) = std::fs::read_to_string(htpasswd_path) {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if let Some((u, h)) = trimmed.split_once(':') {
+                if !u.is_empty() && !h.is_empty() {
+                    existing.insert(u.to_string(), h.to_string());
+                }
+            }
+        }
+    }
+
+    let mut rng = rand::thread_rng();
+    let mut active_users = std::collections::BTreeSet::new();
+    for entry in entries.iter().filter(|e| e.enabled) {
+        let user = entry.username.trim().to_string();
+        active_users.insert(user.clone());
+        if let Some(ref pw) = entry.password {
+            if !pw.is_empty() {
+                let mut salt = String::with_capacity(8);
+                for _ in 0..8 {
+                    let idx = rng.gen_range(0..SALT_CHARS.len());
+                    salt.push(char::from(SALT_CHARS[idx]));
+                }
+                let hash = compute_apr1_htpasswd_hash(pw, &salt);
+                existing.insert(user, hash);
+            }
+        } else if !existing.contains_key(&user) {
+            return Err(PanelError::Validation(format!(
+                "directoryAuth user '{user}' requires a password when first configured"
+            )));
+        }
+    }
+
+    let mut out = String::new();
+    for user in active_users {
+        if let Some(hash) = existing.get(&user) {
+            out.push_str(&format!("{user}:{hash}\n"));
+        }
+    }
+    atomic_write_file(htpasswd_path, out.as_bytes(), 0o640)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1224,14 +1525,44 @@ impl WebServerManager {
         let engine = preferred_engine.unwrap_or(cfg.frontend_engine);
         let rendered = match engine {
             EngineKind::Nginx => {
+                let avail_snap = FileSnapshot::capture(
+                    &self.nginx.paths().sites_available.join(format!("{}.conf", spec.domain.as_str())),
+                )?;
+                let link_snap = SymlinkSnapshot::capture(
+                    &self.nginx.paths().sites_enabled.join(format!("{}.conf", spec.domain.as_str())),
+                )?;
                 let r = self.nginx.render_site(spec)?;
                 self.nginx.write_site(spec).await?;
                 if self.nginx.status().await.map(|s| s.active).unwrap_or(false) {
-                    self.nginx.reload().await?;
+                    if let Err(err) = self.nginx.reload().await {
+                        let _ = link_snap.restore();
+                        let _ = avail_snap.restore();
+                        let _ = self.nginx.reload().await;
+                        return Err(err);
+                    }
+                    // Verify site responds over HTTP from this host; rollback on 5xx or connection error
+                    // when nginx is active on real port 80 (skip probe error if probe_addr is not listening in unit tests).
+                    if let Ok(code) = self
+                        .probe_site_with_retry(&spec.domain, Duration::from_secs(2))
+                        .await
+                    {
+                        if code >= 500 {
+                            let _ = link_snap.restore();
+                            let _ = avail_snap.restore();
+                            let _ = self.nginx.reload().await;
+                            return Err(PanelError::BadGateway(format!(
+                                "nginx returned HTTP {code} for {} after reload; previous vhost restored",
+                                spec.domain.as_str()
+                            )));
+                        }
+                    }
                 }
                 r
             }
             EngineKind::Ferrousx => {
+                let site_snap = FileSnapshot::capture(
+                    &self.ferrousx.paths().sites_dir.join(format!("{}.toml", spec.domain.as_str())),
+                )?;
                 let r = self.ferrousx.render_site(spec)?;
                 self.ferrousx.write_site(spec).await?;
                 if self
@@ -1241,7 +1572,24 @@ impl WebServerManager {
                     .map(|s| s.active)
                     .unwrap_or(false)
                 {
-                    self.ferrousx.notify_vhost_add(spec.domain.as_str()).await?;
+                    if let Err(err) = self.ferrousx.notify_vhost_add(spec.domain.as_str()).await {
+                        let _ = site_snap.restore();
+                        let _ = self.ferrousx.reload().await;
+                        return Err(err);
+                    }
+                    if let Ok(code) = self
+                        .probe_site_with_retry(&spec.domain, Duration::from_secs(2))
+                        .await
+                    {
+                        if code >= 500 {
+                            let _ = site_snap.restore();
+                            let _ = self.ferrousx.reload().await;
+                            return Err(PanelError::BadGateway(format!(
+                                "FerrousX returned HTTP {code} for {} after reload; previous vhost restored",
+                                spec.domain.as_str()
+                            )));
+                        }
+                    }
                 }
                 r
             }

@@ -363,11 +363,15 @@ pub async fn compile_polyglot_bridge(
             ),
             Err(err) => (false, format!("cargo execution error: {err}")),
         }
+    } else if is_production_vps(config) {
+        return Err(PanelError::Conflict(
+            "thiếu rustc/cargo trên VPS để biên dịch thư viện FFI (.so) — gợi ý: curl https://sh.rustup.rs -sSf | sh".to_string(),
+        ));
     } else {
         (
             false,
             format!(
-                "Generated Rust crate & FFI headers at {} (install rustc/cargo on VPS to compile native .so artifact).",
+                "Generated Rust crate & FFI headers at {} (test mode: rustc/cargo not installed).",
                 out_dir.display()
             ),
         )

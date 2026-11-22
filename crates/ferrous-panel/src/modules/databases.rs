@@ -400,6 +400,61 @@ async fn run_psql_internal(
     Ok(out)
 }
 
+async fn run_mysql_stdin(
+    executor: &dyn CommandExecutor,
+    db: Option<&str>,
+    sql: &str,
+) -> Result<crate::system::cmd::CmdOutput, PanelError> {
+    ensure_engine_installed(executor, DbEngineKind::MariaDb)?;
+    let mut args = vec!["--batch", "--raw"];
+    let db_owned;
+    if let Some(d) = db {
+        db_owned = SqlIdentifier::parse(d)?;
+        args.push("-D");
+        args.push(db_owned.as_str());
+    }
+    let out = executor
+        .run_with_stdin(AllowedBinary::Mysql, &args, sql.as_bytes(), DB_CMD_TIMEOUT)
+        .await?;
+    if !out.success {
+        return Err(PanelError::CommandFailed {
+            binary: "mysql",
+            exit_code: out.exit_code,
+            stderr: out.stderr,
+        });
+    }
+    Ok(out)
+}
+
+async fn run_psql_stdin(
+    executor: &dyn CommandExecutor,
+    db: Option<&str>,
+    sql: &str,
+) -> Result<crate::system::cmd::CmdOutput, PanelError> {
+    ensure_engine_installed(executor, DbEngineKind::Postgres)?;
+    let db_ident;
+    let mut args = vec!["-v", "ON_ERROR_STOP=1", "-At", "-F", "\t"];
+    if let Some(d) = db {
+        db_ident = SqlIdentifier::parse(d)?;
+        args.push("-d");
+        args.push(db_ident.as_str());
+    } else {
+        args.push("-d");
+        args.push("postgres");
+    }
+    let out = executor
+        .run_with_stdin(AllowedBinary::Psql, &args, sql.as_bytes(), DB_CMD_TIMEOUT)
+        .await?;
+    if !out.success {
+        return Err(PanelError::CommandFailed {
+            binary: "psql",
+            exit_code: out.exit_code,
+            stderr: out.stderr,
+        });
+    }
+    Ok(out)
+}
+
 async fn run_psql(
     executor: &dyn CommandExecutor,
     db: Option<&str>,
@@ -715,7 +770,7 @@ pub async fn create_database(
                  GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'127.0.0.1'; \
                  FLUSH PRIVILEGES;"
             );
-            run_mysql(executor, None, &sql).await?;
+            run_mysql_stdin(executor, None, &sql).await?;
         }
         DbEngineKind::Postgres => {
             let pw = password_raw.ok_or_else(|| {
@@ -728,10 +783,10 @@ pub async fn create_database(
             let quser = user_ident.quote_postgres();
             let qpw = escape_postgres_literal(pw)?;
             let create_role_sql = format!(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = {}) THEN CREATE ROLE {quser} WITH LOGIN PASSWORD {qpw}; END IF; END $$;",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = {}) THEN CREATE ROLE {quser} WITH LOGIN PASSWORD {qpw}; END IF; END $$;\n",
                 escape_postgres_literal(user_ident.as_str())?
             );
-            run_psql(executor, None, &create_role_sql).await?;
+            run_psql_stdin(executor, None, &create_role_sql).await?;
             let create_db_sql = format!("CREATE DATABASE {qdb} OWNER {quser};");
             run_psql(executor, None, &create_db_sql).await?;
         }
@@ -798,13 +853,13 @@ pub async fn change_database_password(
                  ALTER USER {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
                  FLUSH PRIVILEGES;"
             );
-            run_mysql(executor, None, &sql).await?;
+            run_mysql_stdin(executor, None, &sql).await?;
         }
         DbEngineKind::Postgres => {
             let quser = user_ident.quote_postgres();
             let qpw = escape_postgres_literal(pw)?;
-            let sql = format!("ALTER ROLE {quser} WITH PASSWORD {qpw};");
-            run_psql(executor, None, &sql).await?;
+            let sql = format!("ALTER ROLE {quser} WITH PASSWORD {qpw};\n");
+            run_psql_stdin(executor, None, &sql).await?;
         }
     }
 

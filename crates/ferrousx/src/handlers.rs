@@ -1,4 +1,7 @@
-use crate::config::{LoadedBundle, SiteHandler, UpstreamOrigin, ValidatedSite};
+use crate::config::{
+    LoadedBundle, SiteHandler, UpstreamOrigin, ValidatedDirectoryAuth, ValidatedHotlinkConfig,
+    ValidatedRedirectRule, ValidatedSite,
+};
 use crate::ipc::EngineRuntimeMetrics;
 use crate::router::{match_site_for_request, resolve_safe_path, PathError};
 use fastcgi_client::{Client as FastcgiClient, Params as FastcgiParams, Request as FastcgiRequest};
@@ -11,12 +14,15 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
+use std::time::Instant;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 
@@ -25,11 +31,54 @@ pub type HttpLegacyClient = Client<HttpConnector, Limited<Incoming>>;
 
 const FILE_CHUNK_SIZE: usize = 64 * 1024;
 
+/// Per-site, per-IP token-bucket rate limiter enforced on every HTTP/HTTPS request.
+#[derive(Debug, Default)]
+pub struct IpRateLimiter {
+    buckets: Mutex<HashMap<(String, IpAddr), (f64, Instant)>>,
+}
+
+impl IpRateLimiter {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[must_use]
+    pub fn allow(&self, domain: &str, ip: IpAddr, rps: u32) -> bool {
+        if rps == 0 {
+            return true;
+        }
+        let Ok(mut map) = self.buckets.lock() else {
+            return true;
+        };
+        let now = Instant::now();
+        if map.len() > 4096 {
+            map.retain(|_, (_, last)| now.duration_since(*last).as_secs() < 60);
+        }
+        let capacity = f64::from(rps).max(1.0);
+        let rate = f64::from(rps);
+        let key = (domain.to_string(), ip);
+        let entry = map.entry(key).or_insert((capacity, now));
+        let elapsed = now.duration_since(entry.1).as_secs_f64();
+        entry.0 = (entry.0 + elapsed * rate).min(capacity);
+        entry.1 = now;
+        if entry.0 >= 1.0 {
+            entry.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppRuntime {
     pub bundle: Arc<RwLock<Arc<LoadedBundle>>>,
     pub http_client: HttpLegacyClient,
     pub metrics: Arc<EngineRuntimeMetrics>,
+    pub rate_limiter: Arc<IpRateLimiter>,
 }
 
 impl AppRuntime {
@@ -42,6 +91,7 @@ impl AppRuntime {
             bundle: Arc::new(RwLock::new(Arc::new(initial))),
             http_client,
             metrics: Arc::new(EngineRuntimeMetrics::new()),
+            rate_limiter: Arc::new(IpRateLimiter::new()),
         }
     }
 
@@ -119,6 +169,44 @@ pub async fn dispatch_request(
                 code,
                 &host,
                 req.uri().path_and_query().map(|pq| pq.as_str()).unwrap_or("/"),
+                server_tokens,
+            ));
+        }
+    }
+
+    // 2.5 Per-site IP token-bucket rate limiting.
+    if site.rate_limit_rps > 0
+        && !runtime
+            .rate_limiter
+            .allow(site.domain.as_str(), peer_addr.ip(), site.rate_limit_rps)
+    {
+        runtime.metrics.record_rate_limited();
+        return Ok(build_rate_limited_response(server_tokens));
+    }
+
+    // 2.6 Per-site directory HTTP Basic Authentication (htpasswd).
+    if let Some(auth_rule) = match_directory_auth(&site.directory_auth, &req_path) {
+        if !verify_request_basic_auth(req.headers(), auth_rule) {
+            return Ok(build_basic_auth_challenge(&auth_rule.label, server_tokens));
+        }
+    }
+
+    // 2.7 Per-site URL redirect rules.
+    if let Some(redir) = match_redirect_rule(&site.redirects, &req_path) {
+        return Ok(build_custom_redirect(
+            redir,
+            req.uri().query(),
+            server_tokens,
+        ));
+    }
+
+    // 2.8 Per-site hotlink protection.
+    if let Some(ref hl) = site.hotlink {
+        if is_hotlink_blocked(hl, &req_path, req.headers(), site) {
+            runtime.metrics.record_waf_blocked();
+            return Ok(text_response(
+                StatusCode::FORBIDDEN,
+                "Hotlink Forbidden",
                 server_tokens,
             ));
         }
@@ -269,6 +357,498 @@ fn build_https_redirect(
     builder
         .body(empty_body())
         .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "redirect error", false))
+}
+
+fn build_rate_limited_response(server_tokens: bool) -> Response<RespBody> {
+    let body = Full::new(Bytes::from_static(b"Too Many Requests"))
+        .map_err(|never| match never {})
+        .boxed();
+    let mut builder = Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::RETRY_AFTER, "1");
+    if server_tokens {
+        builder = builder.header(header::SERVER, "FerrousX");
+    }
+    builder
+        .body(body)
+        .unwrap_or_else(|_| text_response(StatusCode::TOO_MANY_REQUESTS, "Too Many Requests", false))
+}
+
+fn match_redirect_rule<'a>(
+    rules: &'a [ValidatedRedirectRule],
+    req_path: &str,
+) -> Option<&'a ValidatedRedirectRule> {
+    rules.iter().find(|r| {
+        if r.source_path == req_path {
+            true
+        } else if r.source_path.ends_with('/') {
+            req_path.starts_with(&r.source_path)
+        } else {
+            false
+        }
+    })
+}
+
+fn build_custom_redirect(
+    rule: &ValidatedRedirectRule,
+    query: Option<&str>,
+    server_tokens: bool,
+) -> Response<RespBody> {
+    let status = StatusCode::from_u16(rule.status_code).unwrap_or(StatusCode::MOVED_PERMANENTLY);
+    let mut location = rule.target_url.clone();
+    if rule.keep_query {
+        if let Some(q) = query {
+            if !q.is_empty() {
+                if location.contains('?') {
+                    location.push('&');
+                } else {
+                    location.push('?');
+                }
+                location.push_str(q);
+            }
+        }
+    }
+    let mut builder = Response::builder().status(status);
+    if let Ok(val) = HeaderValue::from_str(&location) {
+        builder = builder.header(header::LOCATION, val);
+    }
+    if server_tokens {
+        builder = builder.header(header::SERVER, "FerrousX");
+    }
+    builder
+        .body(empty_body())
+        .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "redirect error", false))
+}
+
+fn is_hotlink_blocked(
+    hl: &ValidatedHotlinkConfig,
+    req_path: &str,
+    headers: &HeaderMap,
+    site: &ValidatedSite,
+) -> bool {
+    let Some(ext) = Path::new(req_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+    else {
+        return false;
+    };
+    if !hl.protected_extensions.iter().any(|e| e == &ext) {
+        return false;
+    }
+
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .unwrap_or("");
+    if referer.is_empty() {
+        return hl.block_empty_referer;
+    }
+
+    let Some(ref_host) = extract_url_host(referer) else {
+        return true;
+    };
+    let lower_host = ref_host.to_ascii_lowercase();
+    if site
+        .server_names
+        .iter()
+        .any(|d| lower_host == d.as_str() || lower_host.ends_with(&format!(".{}", d.as_str())))
+    {
+        return false;
+    }
+    for allowed in &hl.allowed_domains {
+        let clean = allowed.trim_start_matches("*.").trim_start_matches('.');
+        if !clean.is_empty()
+            && (lower_host == clean || lower_host.ends_with(&format!(".{clean}")))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn extract_url_host(raw: &str) -> Option<&str> {
+    let rest = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))?;
+    let authority = rest.split('/').next()?;
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    if host_port.starts_with('[') {
+        host_port.split(']').next().map(|s| s.trim_start_matches('['))
+    } else {
+        Some(host_port.split(':').next().unwrap_or(host_port))
+    }
+}
+
+fn match_directory_auth<'a>(
+    rules: &'a [ValidatedDirectoryAuth],
+    req_path: &str,
+) -> Option<&'a ValidatedDirectoryAuth> {
+    rules.iter().find(|r| {
+        if r.path == "/" {
+            true
+        } else {
+            let trimmed = r.path.trim_end_matches('/');
+            req_path == trimmed || req_path.starts_with(&format!("{trimmed}/"))
+        }
+    })
+}
+
+fn build_basic_auth_challenge(realm: &str, server_tokens: bool) -> Response<RespBody> {
+    let body = Full::new(Bytes::from_static(b"Unauthorized"))
+        .map_err(|never| match never {})
+        .boxed();
+    let header_val = format!("Basic realm=\"{}\"", realm.replace('"', "'"));
+    let mut builder = Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::WWW_AUTHENTICATE, header_val);
+    if server_tokens {
+        builder = builder.header(header::SERVER, "FerrousX");
+    }
+    builder
+        .body(body)
+        .unwrap_or_else(|_| text_response(StatusCode::UNAUTHORIZED, "Unauthorized", false))
+}
+
+fn verify_request_basic_auth(headers: &HeaderMap, rule: &ValidatedDirectoryAuth) -> bool {
+    let Some(auth_hdr) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(b64_part) = auth_hdr
+        .trim()
+        .strip_prefix("Basic ")
+        .or_else(|| auth_hdr.trim().strip_prefix("basic "))
+    else {
+        return false;
+    };
+    let Some(decoded) = decode_base64(b64_part.trim()) else {
+        return false;
+    };
+    let Ok(creds) = String::from_utf8(decoded) else {
+        return false;
+    };
+    let Some((req_user, req_pass)) = creds.split_once(':') else {
+        return false;
+    };
+    let Ok(htpasswd_content) = std::fs::read_to_string(&rule.htpasswd_file) else {
+        return false;
+    };
+    for line in htpasswd_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((file_user, stored_hash)) = trimmed.split_once(':') else {
+            continue;
+        };
+        if file_user == req_user && verify_htpasswd_hash(req_pass, stored_hash.trim()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Verifies Apache/Nginx `$apr1$...`, `{SSHA}...`, and `{SHA}...` htpasswd hashes in constant time.
+#[must_use]
+pub fn verify_htpasswd_hash(password: &str, stored_hash: &str) -> bool {
+    if let Some(rest) = stored_hash.strip_prefix("$apr1$") {
+        let Some((salt, _)) = rest.split_once('$') else {
+            return false;
+        };
+        if salt.is_empty() || salt.len() > 8 {
+            return false;
+        }
+        let computed = compute_apr1_hash(password, salt);
+        return bool::from(computed.as_bytes().ct_eq(stored_hash.as_bytes()));
+    }
+    if let Some(b64) = stored_hash.strip_prefix("{SSHA}") {
+        let Some(raw) = decode_base64(b64) else {
+            return false;
+        };
+        if raw.len() <= 20 {
+            return false;
+        }
+        let (expected_digest, salt) = raw.split_at(20);
+        let mut msg = Vec::with_capacity(password.len() + salt.len());
+        msg.extend_from_slice(password.as_bytes());
+        msg.extend_from_slice(salt);
+        let actual = sha1_digest(&msg);
+        return bool::from(actual.ct_eq(expected_digest));
+    }
+    if let Some(b64) = stored_hash.strip_prefix("{SHA}") {
+        let Some(raw) = decode_base64(b64) else {
+            return false;
+        };
+        if raw.len() != 20 {
+            return false;
+        }
+        let actual = sha1_digest(password.as_bytes());
+        return bool::from(actual.ct_eq(raw.as_slice()));
+    }
+    false
+}
+
+/// Computes Apache `$apr1$<salt>$<22-char-hash>` compatible with `openssl passwd -apr1` and Nginx.
+#[must_use]
+pub fn compute_apr1_hash(password: &str, salt_raw: &str) -> String {
+    let salt = &salt_raw[..salt_raw.len().min(8)];
+    let pw = password.as_bytes();
+    let salt_bytes = salt.as_bytes();
+
+    // Alternate digest: MD5(pw + salt + pw)
+    let mut alt_input = Vec::with_capacity(pw.len() * 2 + salt_bytes.len());
+    alt_input.extend_from_slice(pw);
+    alt_input.extend_from_slice(salt_bytes);
+    alt_input.extend_from_slice(pw);
+    let alt = md5_digest(&alt_input);
+
+    // Initial digest: pw + "$apr1$" + salt + alt chunks + length bit encoding
+    let mut init_input = Vec::with_capacity(pw.len() * 2 + salt_bytes.len() + 32);
+    init_input.extend_from_slice(pw);
+    init_input.extend_from_slice(b"$apr1$");
+    init_input.extend_from_slice(salt_bytes);
+    let mut rem = pw.len();
+    while rem > 0 {
+        let take = rem.min(16);
+        init_input.extend_from_slice(&alt[..take]);
+        rem -= take;
+    }
+    let mut bit_len = pw.len();
+    while bit_len > 0 {
+        if (bit_len & 1) != 0 {
+            init_input.push(0u8);
+        } else if let Some(&first) = pw.first() {
+            init_input.push(first);
+        } else {
+            init_input.push(0u8);
+        }
+        bit_len >>= 1;
+    }
+    let mut digest = md5_digest(&init_input);
+
+    let mut round_buf = Vec::with_capacity(pw.len() * 2 + salt_bytes.len() + 32);
+    for i in 0..1000usize {
+        round_buf.clear();
+        if (i & 1) != 0 {
+            round_buf.extend_from_slice(pw);
+        } else {
+            round_buf.extend_from_slice(&digest);
+        }
+        if i % 3 != 0 {
+            round_buf.extend_from_slice(salt_bytes);
+        }
+        if i % 7 != 0 {
+            round_buf.extend_from_slice(pw);
+        }
+        if (i & 1) != 0 {
+            round_buf.extend_from_slice(&digest);
+        } else {
+            round_buf.extend_from_slice(pw);
+        }
+        digest = md5_digest(&round_buf);
+    }
+
+    const ITOA64: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut encoded = String::with_capacity(22);
+    let mut push_64 = |mut v: u32, count: usize| {
+        for _ in 0..count {
+            encoded.push(char::from(ITOA64[(v & 0x3f) as usize]));
+            v >>= 6;
+        }
+    };
+    let groups = [
+        (0usize, 6usize, 12usize),
+        (1, 7, 13),
+        (2, 8, 14),
+        (3, 9, 15),
+        (4, 10, 5),
+    ];
+    for (a, b, c) in groups {
+        let v = (u32::from(digest[a]) << 16)
+            | (u32::from(digest[b]) << 8)
+            | u32::from(digest[c]);
+        push_64(v, 4);
+    }
+    push_64(u32::from(digest[11]), 2);
+
+    format!("$apr1${salt}${encoded}")
+}
+
+fn md5_digest(input: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
+        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    const K: [u32; 64] = [
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+        0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+        0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+        0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+        0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391,
+    ];
+
+    let mut msg = input.to_vec();
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_le_bytes());
+
+    let mut a0: u32 = 0x6745_2301;
+    let mut b0: u32 = 0xefcd_ab89;
+    let mut c0: u32 = 0x98ba_dcfe;
+    let mut d0: u32 = 0x1032_5476;
+
+    for chunk in msg.chunks_exact(64) {
+        let mut m = [0u32; 16];
+        for (idx, word) in m.iter_mut().enumerate() {
+            let off = idx * 4;
+            *word = u32::from_le_bytes([
+                chunk[off],
+                chunk[off + 1],
+                chunk[off + 2],
+                chunk[off + 3],
+            ]);
+        }
+        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
+        for i in 0..64usize {
+            let (f, g) = match i {
+                0..=15 => ((b & c) | ((!b) & d), i),
+                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
+                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | (!d)), (7 * i) % 16),
+            };
+            let tmp = d;
+            d = c;
+            c = b;
+            let sum = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
+            b = b.wrapping_add(sum.rotate_left(S[i]));
+            a = tmp;
+        }
+        a0 = a0.wrapping_add(a);
+        b0 = b0.wrapping_add(b);
+        c0 = c0.wrapping_add(c);
+        d0 = d0.wrapping_add(d);
+    }
+
+    let mut out = [0u8; 16];
+    out[0..4].copy_from_slice(&a0.to_le_bytes());
+    out[4..8].copy_from_slice(&b0.to_le_bytes());
+    out[8..12].copy_from_slice(&c0.to_le_bytes());
+    out[12..16].copy_from_slice(&d0.to_le_bytes());
+    out
+}
+
+fn sha1_digest(input: &[u8]) -> [u8; 20] {
+    let mut msg = input.to_vec();
+    let bit_len = (input.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    let mut h0: u32 = 0x6745_2301;
+    let mut h1: u32 = 0xefcd_ab89;
+    let mut h2: u32 = 0x98ba_dcfe;
+    let mut h3: u32 = 0x1032_5476;
+    let mut h4: u32 = 0xc3d2_e1f0;
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            let off = i * 4;
+            w[i] = u32::from_be_bytes([
+                chunk[off],
+                chunk[off + 1],
+                chunk[off + 2],
+                chunk[off + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for (i, &wi) in w.iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5a82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ed9_eba1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1b_bcdc_u32),
+                _ => (b ^ c ^ d, 0xca62_c1d6u32),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(wi);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+
+    let mut out = [0u8; 20];
+    out[0..4].copy_from_slice(&h0.to_be_bytes());
+    out[4..8].copy_from_slice(&h1.to_be_bytes());
+    out[8..12].copy_from_slice(&h2.to_be_bytes());
+    out[12..16].copy_from_slice(&h3.to_be_bytes());
+    out[16..20].copy_from_slice(&h4.to_be_bytes());
+    out
+}
+
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let val = |c: u8| -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
+    for chunk in bytes.chunks_exact(4) {
+        let a = val(chunk[0])?;
+        let b = val(chunk[1])?;
+        out.push((a << 2) | (b >> 4));
+        if chunk[2] != b'=' {
+            let c = val(chunk[2])?;
+            out.push((b << 4) | (c >> 2));
+            if chunk[3] != b'=' {
+                let d = val(chunk[3])?;
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Some(out)
 }
 
 #[derive(Debug, Clone, Copy)]

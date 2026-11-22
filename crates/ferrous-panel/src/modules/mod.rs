@@ -1,4 +1,5 @@
 pub mod apps;
+pub mod capabilities;
 pub mod cpanel;
 pub mod databases;
 pub mod extended;

@@ -48,6 +48,7 @@ UPDATE_PANEL=true
 FORCE_FERROUSX=false
 FORCE_NGINX=false
 SYNC_JS_TOOLCHAIN=true
+INSECURE_SKIP_VERIFY=false
 
 usage() {
   cat <<'EOF_HELP'
@@ -63,6 +64,7 @@ Options:
   --ferrousx-only              Update ONLY FerrousX from GitHub (do not rebuild ferrous-panel)
   --js-only                    Install/update ONLY Zero-Node.js JS/CSS binaries (bun + tailwindcss)
   --no-js-toolchain            Skip syncing Zero-Node.js JS/CSS binaries (bun + tailwindcss)
+  --insecure-skip-verify       Bypass SHA-256 verification on downloaded release/tool binaries (NOT recommended)
   --engine <nginx|ferrousx>    Target web engine to update & validate
   --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
@@ -98,6 +100,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-js-toolchain)
       SYNC_JS_TOOLCHAIN=false
+      shift
+      ;;
+    --insecure-skip-verify)
+      INSECURE_SKIP_VERIFY=true
       shift
       ;;
     --engine)
@@ -161,6 +167,54 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+verify_sha256_entry() {
+  local sums_file="$1"
+  local asset_name="$2"
+  local work_dir="$3"
+  local label="$4"
+
+  if [ ! -f "${sums_file}" ]; then
+    if [ "${INSECURE_SKIP_VERIFY}" = true ]; then
+      echo -e "${YELLOW}[WARNING] --insecure-skip-verify active: skipping missing SHA-256 manifest for ${label} (${asset_name}).${NC}" >&2
+      return 0
+    fi
+    echo -e "${RED}[ERROR] Cannot download SHA-256 checksum manifest for ${label} (${asset_name}). Refusing unverified binary update.${NC}" >&2
+    echo -e "${YELLOW}Pass --insecure-skip-verify ONLY if you explicitly accept installing an unverified binary.${NC}" >&2
+    exit 1
+  fi
+
+  local matched_line
+  matched_line="$(grep -E "[[:space:]](\./|\*)?${asset_name}$" "${sums_file}" | head -n 1 || true)"
+  if [ -z "${matched_line}" ]; then
+    if [ "${INSECURE_SKIP_VERIFY}" = true ]; then
+      echo -e "${YELLOW}[WARNING] --insecure-skip-verify active: no SHA-256 entry found for ${asset_name} in ${label}.${NC}" >&2
+      return 0
+    fi
+    echo -e "${RED}[ERROR] No SHA-256 entry matching '${asset_name}' in ${label} checksum manifest. Aborting update.${NC}" >&2
+    exit 1
+  fi
+
+  local expected_hash
+  expected_hash="$(printf '%s\n' "${matched_line}" | awk '{print $1}')"
+  if ! (cd "${work_dir}" && printf '%s  %s\n' "${expected_hash}" "${asset_name}" | sha256sum -c -); then
+    echo -e "${RED}[ERROR] SHA-256 verification FAILED for ${asset_name} (${label}). Aborting update.${NC}" >&2
+    exit 1
+  fi
+}
+
+download_verified_release_asset() {
+  local asset_name="$1"
+  local dest_path="$2"
+  local tmp_asset="${TMP_DIR}/${asset_name}"
+
+  if ! curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null; then
+    rm -f "${TMP_DIR}/SHA256SUMS.txt"
+  fi
+  curl -fsSL --retry 3 --connect-timeout 10 -o "${tmp_asset}" "${RELEASE_BASE}/${asset_name}"
+  verify_sha256_entry "${TMP_DIR}/SHA256SUMS.txt" "${asset_name}" "${TMP_DIR}" "FerrousPanel release"
+  install -m 0755 "${tmp_asset}" "${dest_path}"
+}
 
 ensure_rust_toolchain() {
   local min_ver_code=189
@@ -511,12 +565,7 @@ update_ferrousx_from_github() {
 
   if [ "$fx_installed" = false ]; then
     echo -e "${CYAN}[*] Downloading prebuilt ferrousx-bin release (${RELEASE_TAG}, ${ARCH})...${NC}"
-    curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
-    curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrousx-bin" "${RELEASE_BASE}/ferrousx-bin-linux-${ARCH}"
-    if [ -f "${TMP_DIR}/SHA256SUMS.txt" ] && grep -q " ferrousx-bin-linux-${ARCH}\$" "${TMP_DIR}/SHA256SUMS.txt"; then
-      (cd "$TMP_DIR" && mv ferrousx-bin "ferrousx-bin-linux-${ARCH}" && grep " ferrousx-bin-linux-${ARCH}\$" SHA256SUMS.txt | sha256sum -c - && mv "ferrousx-bin-linux-${ARCH}" ferrousx-bin)
-    fi
-    install -m 0755 "${TMP_DIR}/ferrousx-bin" "${BIN_FERROUSX}"
+    download_verified_release_asset "ferrousx-bin-linux-${ARCH}" "${BIN_FERROUSX}"
   fi
 
   ensure_ferrousx_runtime_files
@@ -553,12 +602,20 @@ install_zero_node_js_css_toolchain() {
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
     fi
     mkdir -p "${TMP_DIR}/bun-dl"
-    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/bun.zip" \
-      "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${bun_arch}.zip" \
-      && unzip -qo "${TMP_DIR}/bun-dl/bun.zip" -d "${TMP_DIR}/bun-dl" \
-      && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
-      install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
-      echo -e "${GREEN}[+] Installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+    local bun_asset="bun-linux-${bun_arch}.zip"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/${bun_asset}" \
+      "https://github.com/oven-sh/bun/releases/latest/download/${bun_asset}"; then
+      curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/bun-dl/SHASUMS256.txt" \
+        "https://github.com/oven-sh/bun/releases/latest/download/SHASUMS256.txt" 2>/dev/null || rm -f "${TMP_DIR}/bun-dl/SHASUMS256.txt"
+      verify_sha256_entry "${TMP_DIR}/bun-dl/SHASUMS256.txt" "${bun_asset}" "${TMP_DIR}/bun-dl" "Bun release"
+      if unzip -qo "${TMP_DIR}/bun-dl/${bun_asset}" -d "${TMP_DIR}/bun-dl" \
+        && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
+        install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
+        echo -e "${GREEN}[+] Verified & installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+      else
+        echo -e "${RED}[ERROR] Failed to unpack verified Bun archive.${NC}" >&2
+        exit 1
+      fi
     else
       echo -e "${YELLOW}[!] Could not download Bun binary right now.${NC}"
     fi
@@ -570,10 +627,18 @@ install_zero_node_js_css_toolchain() {
 
   if [ ! -x /usr/local/bin/tailwindcss ]; then
     echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Rust Oxide, Zero-Node.js)...${NC}"
-    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tailwindcss" \
-      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-${tw_arch}"; then
-      install -m 0755 "${TMP_DIR}/tailwindcss" /usr/local/bin/tailwindcss
-      echo -e "${GREEN}[+] Installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
+    mkdir -p "${TMP_DIR}/tw-dl"
+    local tw_asset="tailwindcss-linux-${tw_arch}"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tw-dl/${tw_asset}" \
+      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/${tw_asset}"; then
+      if ! curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" \
+        "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/sha256sums.txt" 2>/dev/null; then
+        curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" \
+          "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/tw-dl/sha256sums.txt"
+      fi
+      verify_sha256_entry "${TMP_DIR}/tw-dl/sha256sums.txt" "${tw_asset}" "${TMP_DIR}/tw-dl" "Tailwind CSS release"
+      install -m 0755 "${TMP_DIR}/tw-dl/${tw_asset}" /usr/local/bin/tailwindcss
+      echo -e "${GREEN}[+] Verified & installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
     else
       echo -e "${YELLOW}[!] Could not download Tailwind CSS standalone binary right now.${NC}"
     fi
@@ -606,13 +671,7 @@ if [ "$UPDATE_PANEL" = true ]; then
     install -m 0755 "${SRC_DIR}/target/release/ferrous-panel" "${BIN_PANEL}"
   else
     echo -e "${CYAN}[*] Downloading updated FerrousPanel release (${RELEASE_TAG}, ${ARCH})...${NC}"
-    curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
-
-    curl -fsSL --retry 3 --connect-timeout 10 -o "${TMP_DIR}/ferrous-panel" "${RELEASE_BASE}/ferrous-panel-linux-${ARCH}"
-    if [ -f "${TMP_DIR}/SHA256SUMS.txt" ] && grep -q " ferrous-panel-linux-${ARCH}\$" "${TMP_DIR}/SHA256SUMS.txt"; then
-      (cd "$TMP_DIR" && mv ferrous-panel "ferrous-panel-linux-${ARCH}" && grep " ferrous-panel-linux-${ARCH}\$" SHA256SUMS.txt | sha256sum -c - && mv "ferrous-panel-linux-${ARCH}" ferrous-panel)
-    fi
-    install -m 0755 "${TMP_DIR}/ferrous-panel" "${BIN_PANEL}"
+    download_verified_release_asset "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
   fi
 
   if [ -f /etc/ferrous-panel/panel.env ]; then
@@ -635,8 +694,11 @@ if [ "$UPDATE_PANEL" = true ]; then
       chmod 0600 /etc/ferrous-panel/panel.env.tmp && \
       mv /etc/ferrous-panel/panel.env.tmp /etc/ferrous-panel/panel.env
 
+    if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_MODE=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      echo "FERROUS_MODE=production" >> /etc/ferrous-panel/panel.env
+    fi
     if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null; then
-      echo "FERROUS_BIND=0.0.0.0" >> /etc/ferrous-panel/panel.env
+      echo "FERROUS_BIND=127.0.0.1" >> /etc/ferrous-panel/panel.env
     fi
     if [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
       if ! grep -q '^FERROUS_PUBLIC_IP=' /etc/ferrous-panel/panel.env 2>/dev/null; then
@@ -695,10 +757,19 @@ EOF_SVC
   ACTIVE_PANEL_PORT="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_PORT=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
   ACTIVE_PANEL_PORT="${ACTIVE_PANEL_PORT:-8443}"
   ACTIVE_PANEL_BIND="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
-  ACTIVE_PANEL_BIND="${ACTIVE_PANEL_BIND:-0.0.0.0}"
+  ACTIVE_PANEL_BIND="${ACTIVE_PANEL_BIND:-127.0.0.1}"
   ACTIVE_PANEL_ENTRANCE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_SECURITY_ENTRANCE=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
   ACTIVE_PANEL_ENTRANCE="${ACTIVE_PANEL_ENTRANCE:-/panel}"
   ACTIVE_PANEL_DOMAIN="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_CUSTOM_DOMAIN=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  ACTIVE_SECURE_COOKIE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_SECURE_COOKIE=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+
+  if [ -n "${ACTIVE_PANEL_DOMAIN}" ] && [ -f "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/fullchain.pem" ] && [ "${ACTIVE_SECURE_COOKIE}" != "true" ]; then
+    sed -i 's|^FERROUS_SECURE_COOKIE=.*|FERROUS_SECURE_COOKIE=true|' /etc/ferrous-panel/panel.env
+    ACTIVE_SECURE_COOKIE="true"
+    echo -e "${GREEN}[+] Enabled FERROUS_SECURE_COOKIE=true for HTTPS domain ${ACTIVE_PANEL_DOMAIN}.${NC}"
+  elif [ "${ACTIVE_PANEL_BIND}" != "127.0.0.1" ] && [ "${ACTIVE_PANEL_BIND}" != "::1" ] && [ "${ACTIVE_SECURE_COOKIE}" != "true" ]; then
+    echo -e "${YELLOW}[WARNING] CẢNH BÁO BẢO MẬT: Panel đang chạy HTTP không mã hóa trên ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} với FERROUS_SECURE_COOKIE=false.${NC}" >&2
+  fi
 
   if command -v ufw >/dev/null 2>&1; then
     ufw allow 80/tcp comment 'HTTP' >/dev/null 2>&1 || true

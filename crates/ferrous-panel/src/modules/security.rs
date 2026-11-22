@@ -350,9 +350,32 @@ pub async fn add_ufw_rule(
     list_ufw_rules(executor).await
 }
 
+fn rule_protects_port(rule: &UfwRule, port: u16) -> bool {
+    let port_str = port.to_string();
+    let trimmed = rule.port.trim();
+    if trimmed == port_str {
+        return true;
+    }
+    if let Some((start_s, end_s)) = trimmed.split_once(':') {
+        if let (Ok(s), Ok(e)) = (start_s.parse::<u16>(), end_s.parse::<u16>()) {
+            return port >= s && port <= e;
+        }
+    }
+    trimmed.eq_ignore_ascii_case("OpenSSH") && port == 22
+}
+
 pub async fn delete_ufw_rule(
     executor: &dyn CommandExecutor,
     rule_id: &str,
+) -> Result<Vec<UfwRule>, PanelError> {
+    delete_ufw_rule_guarded(executor, rule_id, &[], true).await
+}
+
+pub async fn delete_ufw_rule_guarded(
+    executor: &dyn CommandExecutor,
+    rule_id: &str,
+    protected_ports: &[u16],
+    force: bool,
 ) -> Result<Vec<UfwRule>, PanelError> {
     if !executor.is_binary_available(AllowedBinary::Ufw) {
         return Err(PanelError::Conflict(
@@ -368,6 +391,21 @@ pub async fn delete_ufw_rule(
             "UFW rule ID must be >= 1".to_string(),
         ));
     }
+
+    if !force && !protected_ports.is_empty() {
+        let current_rules = list_ufw_rules(executor).await?;
+        if let Some(target_rule) = current_rules.iter().find(|r| r.id == rule_num.to_string()) {
+            for &port in protected_ports {
+                if rule_protects_port(target_rule, port) {
+                    return Err(PanelError::Conflict(format!(
+                        "Refusing to delete UFW rule #{rule_num} ({}) because it protects active SSH/Panel port {port}. Pass ?force=true to confirm lockout risk.",
+                        target_rule.port
+                    )));
+                }
+            }
+        }
+    }
+
     let rule_str = rule_num.to_string();
     let out = executor
         .run(AllowedBinary::Ufw, &["--force", "delete", &rule_str], SEC_TIMEOUT)
@@ -544,13 +582,14 @@ const KV_ANTI_DDOS: &str = "security.anti_ddos_shield";
 fn default_anti_ddos_shield() -> AntiDdosShieldState {
     AntiDdosShieldState {
         protection_mode: "normal".to_string(),
-        xdp_status: "Active (XDP_DRV Native Zero-Copy)".to_string(),
+        xdp_status: "Not Attached (kernel sysctl SYN cookies active; eBPF/XDP experimental)"
+            .to_string(),
         syn_cookies_enabled: true,
         syn_rate_limit_pps: 150_000,
-        dropped_packets_total: 12_840,
-        blocked_l7_attacks_today: 342,
-        fim_integrity_status: "Verified (SHA-256 Clean)".to_string(),
-        last_fim_scan_at: Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        dropped_packets_total: 0,
+        blocked_l7_attacks_today: 0,
+        fim_integrity_status: "Pending initial SHA-256 scan".to_string(),
+        last_fim_scan_at: String::new(),
         waf_rules: vec![
             WafRuleItem {
                 id: "waf-sqli-942100".to_string(),
@@ -558,7 +597,7 @@ fn default_anti_ddos_shield() -> AntiDdosShieldState {
                 name: "SQL Injection (libinjection AST + Tautology Filter)".to_string(),
                 category: "SQLi".to_string(),
                 threat_type: "SQL Injection / Auth Bypass".to_string(),
-                blocked_count: 148,
+                blocked_count: 0,
                 enabled: true,
                 description: "Blocks UNION SELECT, tautology payloads, and stacked SQL queries before upstream dispatch.".to_string(),
             },
@@ -568,7 +607,7 @@ fn default_anti_ddos_shield() -> AntiDdosShieldState {
                 name: "Cross-Site Scripting (DOM / Script Tag Vector)".to_string(),
                 category: "XSS".to_string(),
                 threat_type: "Reflected & Stored XSS".to_string(),
-                blocked_count: 89,
+                blocked_count: 0,
                 enabled: true,
                 description: "Inspects query strings, headers, and JSON bodies for inline JS event handlers and script vectors.".to_string(),
             },
@@ -578,7 +617,7 @@ fn default_anti_ddos_shield() -> AntiDdosShieldState {
                 name: "Remote Command Execution & Shell Shock Guard".to_string(),
                 category: "RCE".to_string(),
                 threat_type: "POSIX Shell / Subshell Injection".to_string(),
-                blocked_count: 64,
+                blocked_count: 0,
                 enabled: true,
                 description: "Rejects request parameters attempting command substitution, pipe chaining, or /bin/sh payloads.".to_string(),
             },
@@ -588,7 +627,7 @@ fn default_anti_ddos_shield() -> AntiDdosShieldState {
                 name: "Path Traversal & Dot-Dot (/etc/passwd / .env Probe)".to_string(),
                 category: "PathTraversal".to_string(),
                 threat_type: "LFI / Arbitrary File Read".to_string(),
-                blocked_count: 41,
+                blocked_count: 0,
                 enabled: true,
                 description: "Drops URLs containing encoded '../', '/.git/', '/.env', or sensitive system path probes.".to_string(),
             },
@@ -621,6 +660,23 @@ pub async fn set_ddos_mode(
         )));
     };
 
+    if executor.is_binary_available(AllowedBinary::Sysctl) {
+        let sysctl_out = executor
+            .run(
+                AllowedBinary::Sysctl,
+                &["-w", "net.ipv4.tcp_syncookies=1"],
+                SEC_TIMEOUT,
+            )
+            .await?;
+        if !sysctl_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "sysctl",
+                exit_code: sysctl_out.exit_code,
+                stderr: sysctl_out.stderr,
+            });
+        }
+    }
+
     let mut shield = load_anti_ddos_shield(store)?;
     shield.protection_mode = target_mode.to_string();
     shield.syn_cookies_enabled = true;
@@ -630,20 +686,10 @@ pub async fn set_ddos_mode(
         _ => 10_000,
     };
     shield.xdp_status = match target_mode {
-        "normal" => "Active (XDP_DRV Native Zero-Copy)".to_string(),
-        "elevated" => "SYNProxy Strict (XDP_DRV + Per-IP Token Bucket)".to_string(),
-        _ => "Emergency Lockdown (XDP_DROP + L7 Challenge Active)".to_string(),
+        "normal" => "Kernel SYN Cookies Active (eBPF/XDP not attached — experimental)".to_string(),
+        "elevated" => "Strict Kernel SYN Cookies + Per-Site Rate Limiting Active (eBPF/XDP experimental)".to_string(),
+        _ => "Emergency Kernel SYN Lockdown Active (eBPF/XDP experimental)".to_string(),
     };
-
-    if executor.is_binary_available(AllowedBinary::Sysctl) {
-        let _ = executor
-            .run(
-                AllowedBinary::Sysctl,
-                &["-w", "net.ipv4.tcp_syncookies=1"],
-                SEC_TIMEOUT,
-            )
-            .await;
-    }
 
     store.put_json(KV_ANTI_DDOS, &shield)?;
     Ok(shield)

@@ -7,6 +7,11 @@ pub async fn get_telemetry(state: web::Data<AppState>) -> Result<HttpResponse, P
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
+    state
+        .telemetry
+        .refresh_nginx_version(state.webserver.executor().as_ref())
+        .await;
+
     let st = state.clone();
     let snapshot = web::block(move || st.snapshot_with_real_history())
         .await

@@ -2,6 +2,7 @@
 import {
   api, esc, fmtBytes, fmtTime, fmtUptime, statusClass,
   toast, openModal, closeModal, confirmAction, openJobDrawer, navigate, state,
+  capBannerHtml, capDisabledAttr, withBusy,
 } from './app.js';
 
 function sparklineSvg(values, color = 'var(--accent)') {
@@ -21,7 +22,7 @@ function sparklineSvg(values, color = 'var(--accent)') {
 }
 
 // ============================================================================
-// 1. OVERVIEW / TELEMETRY
+// 1. OVERVIEW / TELEMETRY + CAPABILITY MATRIX
 // ============================================================================
 export async function renderOverview(container) {
   const [tel, ws, apps, dbs, jobs] = await Promise.all([
@@ -40,6 +41,7 @@ export async function renderOverview(container) {
 
   const activeEngine = ws?.frontendEngine || ws?.frontend_engine || 'nginx';
   const loadAvg = Array.isArray(tel.loadAverage) ? tel.loadAverage.map((v) => Number(v).toFixed(2)).join(' / ') : '0.00 / 0.00 / 0.00';
+  const caps = state.capabilities?.capabilities || [];
 
   container.innerHTML = `
     <div class="page-head">
@@ -85,7 +87,7 @@ export async function renderOverview(container) {
       <div class="kpi-card">
         <div class="kpi-label">Website & Database</div>
         <div class="kpi-val">${Array.isArray(apps) ? apps.length : 0} / ${Array.isArray(dbs) ? dbs.length : 0}</div>
-        <div class="kpi-sub">Web Engine: <strong class="mono">${esc(activeEngine)}</strong> · Active conn: <span class="mono">${esc(tel.activeConnections || 0)}</span></div>
+        <div class="kpi-sub">Web Engine: <strong class="mono">${esc(activeEngine)}</strong> · Mode: <span class="mono">${esc(state.capabilities?.mode || 'production')}</span></div>
       </div>
     </div>
 
@@ -136,6 +138,33 @@ export async function renderOverview(container) {
         </div>
       </section>
     </div>
+
+    <section class="surface">
+      <div class="surface-head">
+        <h2 class="surface-title">Trạng thái khả dụng phân hệ (Feature Capabilities — kiểm tra thật trên VPS)</h2>
+        <span class="meta-line"><span>Tổng: <strong class="mono">${caps.length}</strong> tính năng</span></span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr><th>Phân hệ</th><th>Trạng thái</th><th>Lý do kiểm chứng</th><th>Lệnh gợi ý</th></tr>
+          </thead>
+          <tbody>
+            ${
+              caps.length
+                ? caps.map((c) => `
+                  <tr>
+                    <td><strong>${esc(c.label || c.id)}</strong></td>
+                    <td><span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span></td>
+                    <td>${esc(c.reason || '—')}</td>
+                    <td class="mono">${esc(c.fixHint || '—')}</td>
+                  </tr>`).join('')
+                : '<tr><td colspan="4" class="empty-state">Không tải được bảng trạng thái capabilities.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
   `;
 
   document.getElementById('ov-new-app')?.addEventListener('click', () => navigate('apps'));
@@ -147,11 +176,11 @@ export async function renderOverview(container) {
 
   state.refreshTimer = setInterval(() => {
     if (state.route === 'overview') renderOverview(container);
-  }, 10000);
+  }, 15000);
 }
 
 // ============================================================================
-// 2. WEBSITES & APPS + 1-CLICK TEMPLATES
+// 2. WEBSITES & APPS + 1-CLICK TEMPLATES + SITE SETTINGS
 // ============================================================================
 const RUNTIMES = [
   'Static HTML / SPA',
@@ -201,6 +230,8 @@ export async function renderApps(container) {
         </div>
       </div>
 
+      ${capBannerHtml(['ssl_certbot'])}
+
       ${activeTab === 'sites' ? `
         <section class="surface">
           <div class="surface-head">
@@ -229,15 +260,22 @@ export async function renderApps(container) {
                         </td>
                         <td>
                           <div>${esc(a.framework)}</div>
-                          <div class="meta-line"><span>${esc(a.webServerEngine || 'nginx')}</span><span>·</span><span>SSL: ${a.sslEnabled ? 'Bật' : 'Tắt'}</span></div>
+                          <div class="meta-line">
+                            <span>${esc(a.webServerEngine || 'nginx')}</span>
+                            <span>·</span>
+                            <span>SSL: ${a.sslEnabled ? 'Bật' : 'Tắt'}</span>
+                            ${a.rateLimitRps ? `<span>·</span><span class="mono">${esc(a.rateLimitRps)} rps</span>` : ''}
+                          </div>
                         </td>
                         <td><span class="${statusClass(a.status)}">${esc(a.status)}</span></td>
                         <td class="mono">${esc(a.internalPort || '—')}</td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
+                            <button type="button" class="btn btn-sm" data-app-settings="${esc(a.id)}">Cài đặt Site</button>
                             <button type="button" class="btn btn-sm" data-app-act="restart" data-id="${esc(a.id)}">Restart</button>
                             <button type="button" class="btn btn-sm" data-app-job="rebuild" data-id="${esc(a.id)}">Rebuild</button>
-                            <button type="button" class="btn btn-sm" data-app-job="renew-ssl" data-id="${esc(a.id)}">SSL</button>
+                            ${a.gitRepoUrl ? `<button type="button" class="btn btn-sm" data-app-job="git-deploy" data-id="${esc(a.id)}">Git Pull</button>` : ''}
+                            <button type="button" class="btn btn-sm" data-app-job="renew-ssl" data-id="${esc(a.id)}" ${capDisabledAttr('ssl_certbot')}>SSL</button>
                             <button type="button" class="btn btn-sm" data-app-probe="${esc(a.id)}">Test HTTP</button>
                             <button type="button" class="btn btn-sm btn-danger" data-app-del="${esc(a.id)}" data-domain="${esc(a.domain)}">Xóa</button>
                           </div>
@@ -278,61 +316,60 @@ export async function renderApps(container) {
     document.getElementById('apps-search')?.addEventListener('input', (e) => { searchTerm = e.target.value; draw(); });
     document.getElementById('btn-deploy-app')?.addEventListener('click', () => openDeployModal(container));
 
-    container.querySelectorAll('[data-app-act]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
-        try {
-          await api('POST', `/api/apps/${encodeURIComponent(btn.dataset.id)}/action`, { action: btn.dataset.appAct });
-          toast('Đã gửi lệnh khởi động lại dịch vụ.');
-          await renderApps(container);
-        } catch (err) {
-          toast(err.message, 'err');
-          btn.disabled = false;
-        }
+    container.querySelectorAll('[data-app-settings]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const app = apps.find((x) => x.id === btn.dataset.appSettings);
+        if (app) openSiteSettingsModal(app, container);
       });
     });
 
+    container.querySelectorAll('[data-app-act]').forEach((btn) => {
+      btn.addEventListener('click', () => withBusy(btn, async () => {
+        try {
+          await api('POST', `/api/apps/${encodeURIComponent(btn.dataset.id)}/action`, { action: btn.dataset.appAct });
+          toast('Đã khởi động lại dịch vụ và xác nhận trạng thái active.');
+          await renderApps(container);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      }));
+    });
+
     container.querySelectorAll('[data-app-job]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
+      btn.addEventListener('click', () => withBusy(btn, async () => {
         try {
           const job = await api('POST', `/api/jobs/apps/${encodeURIComponent(btn.dataset.id)}/${btn.dataset.appJob}`, {});
           toast(`Đã xếp hàng tác vụ ${job.title}`);
           openJobDrawer(job.id);
         } catch (err) {
           toast(err.message, 'err');
-        } finally {
-          btn.disabled = false;
         }
-      });
+      }));
     });
 
     container.querySelectorAll('[data-app-probe]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        btn.disabled = true;
+      btn.addEventListener('click', () => withBusy(btn, async () => {
         try {
           const res = await api('POST', `/api/apps/${encodeURIComponent(btn.dataset.appProbe)}/test-http`, {});
           toast(`HTTP ${res.statusCode || 200} · ${res.latencyMs || 0} ms · ${res.protocol || 'HTTP/1.1'}`);
         } catch (err) {
           toast(err.message, 'err');
-        } finally {
-          btn.disabled = false;
         }
-      });
+      }));
     });
 
     container.querySelectorAll('[data-app-del]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        confirmAction('Xóa Website', `Xác nhận xóa website ${btn.dataset.domain}?`, async () => {
-          btn.disabled = true;
-          try {
-            await api('DELETE', `/api/apps/${encodeURIComponent(btn.dataset.appDel)}`);
-            toast(`Đã xóa ${btn.dataset.domain}`);
-            await renderApps(container);
-          } catch (err) {
-            toast(err.message, 'err');
-            btn.disabled = false;
-          }
+        confirmAction('Xóa Website', `Xác nhận xóa vĩnh viễn website ${btn.dataset.domain} cùng cấu hình vhost và unit systemd?`, async () => {
+          await withBusy(btn, async () => {
+            try {
+              await api('DELETE', `/api/apps/${encodeURIComponent(btn.dataset.appDel)}`);
+              toast(`Đã xóa ${btn.dataset.domain}`);
+              await renderApps(container);
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          });
         });
       });
     });
@@ -354,29 +391,32 @@ export async function renderApps(container) {
               <input class="input" name="adminEmail" type="email" placeholder="admin@example.com" />
             </div>
             <div class="row" style="justify-content:flex-end;margin-top:16px">
-              <button type="submit" class="btn btn-primary">Bắt đầu triển khai</button>
+              <button type="submit" class="btn btn-primary" id="oc-submit-btn">Bắt đầu triển khai</button>
             </div>
           </form>
         `, {
           onMount(body) {
             body.querySelector('#oc-form')?.addEventListener('submit', async (e) => {
               e.preventDefault();
-              const fd = new FormData(e.target);
-              try {
-                await api('POST', '/api/oneclick/deploy', {
-                  templateId: btn.dataset.ocDeploy,
-                  domain: fd.get('domain'),
-                  siteTitle: fd.get('siteTitle') || '',
-                  adminEmail: fd.get('adminEmail') || '',
-                  enableSsl: false,
-                  autoCreateDb: true,
-                });
-                closeModal();
-                toast('Đã triển khai ứng dụng 1-Click.');
-                await renderApps(container);
-              } catch (err) {
-                toast(err.message, 'err');
-              }
+              const sub = body.querySelector('#oc-submit-btn');
+              await withBusy(sub, async () => {
+                const fd = new FormData(e.target);
+                try {
+                  await api('POST', '/api/oneclick/deploy', {
+                    templateId: btn.dataset.ocDeploy,
+                    domain: fd.get('domain'),
+                    siteTitle: fd.get('siteTitle') || '',
+                    adminEmail: fd.get('adminEmail') || '',
+                    enableSsl: false,
+                    autoCreateDb: true,
+                  });
+                  closeModal();
+                  toast('Đã triển khai ứng dụng 1-Click.');
+                  await renderApps(container);
+                } catch (err) {
+                  toast(err.message, 'err');
+                }
+              });
             });
           },
         });
@@ -385,6 +425,133 @@ export async function renderApps(container) {
   }
 
   draw();
+}
+
+function openSiteSettingsModal(app, container) {
+  const hotlink = app.hotlinkProtection || { enabled: false, allowedDomains: [], extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'], allowEmptyReferer: true };
+  const redirectsText = (app.redirects || [])
+    .filter((r) => r.enabled !== false)
+    .map((r) => `${r.sourcePath || r.source_path} -> ${r.targetUrl || r.target_url} ${r.statusCode || r.status_code || 301}`)
+    .join('\n');
+  const firstAuth = (app.directoryPrivacy || [])[0] || null;
+
+  openModal(`Cài đặt nâng cao: ${app.domain}`, `
+    <form id="site-settings-form">
+      <div class="row" style="margin-bottom:12px">
+        <label class="checkbox-row"><input type="checkbox" name="sslEnabled" ${app.sslEnabled ? 'checked' : ''} /><span>Bật HTTPS / SSL</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="forceHttps" ${app.forceHttps ? 'checked' : ''} /><span>Ép chuyển hướng HTTPS (301)</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="websocketEnabled" ${app.websocketEnabled !== false ? 'checked' : ''} /><span>Bật WebSocket Proxy</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="http3Quic" ${app.http3Quic ? 'checked' : ''} /><span>Bật HTTP/3 QUIC (chỉ khi engine hỗ trợ)</span></label>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label>Rate Limit theo IP (req/giây, 0 = tắt)</label>
+          <input class="input mono" name="rateLimitRps" type="number" min="0" max="10000" value="${esc(app.rateLimitRps || 0)}" />
+        </div>
+        <div class="field">
+          <label>Chống Hotlink — Tên miền cho phép (phân cách bằng dấu phẩy)</label>
+          <input class="input mono" name="hotlinkDomains" value="${esc((hotlink.allowedDomains || []).join(', '))}" placeholder="example.com, cdn.example.com" />
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:12px">
+        <label class="checkbox-row"><input type="checkbox" name="hotlinkEnabled" ${hotlink.enabled ? 'checked' : ''} /><span>Bật chống Hotlink ảnh/video</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="hotlinkAllowEmpty" ${hotlink.allowEmptyReferer !== false ? 'checked' : ''} /><span>Cho phép truy cập không có Referer</span></label>
+      </div>
+      <div class="field">
+        <label>Chuyển hướng URL (mỗi dòng: <code>/old-path -> https://example.com/new 301</code>)</label>
+        <textarea class="textarea" name="redirects" style="min-height:80px" placeholder="/blog -> https://blog.example.com 301">${esc(redirectsText)}</textarea>
+      </div>
+      <hr class="divider" />
+      <div class="meta-line" style="margin-bottom:8px"><strong>Khóa thư mục bằng HTTP Basic Auth (.htpasswd $apr1$)</strong></div>
+      <div class="form-grid">
+        <div class="field">
+          <label>Đường dẫn bảo vệ (để trống để tắt)</label>
+          <input class="input mono" name="authPath" value="${esc(firstAuth?.path || '')}" placeholder="/admin" />
+        </div>
+        <div class="field">
+          <label>Realm</label>
+          <input class="input" name="authRealm" value="${esc(firstAuth?.realm || 'Protected Area')}" />
+        </div>
+        <div class="field">
+          <label>Tài khoản</label>
+          <input class="input mono" name="authUser" value="${esc(firstAuth?.username || '')}" placeholder="admin" />
+        </div>
+        <div class="field">
+          <label>Mật khẩu mới (để trống để giữ hash cũ)</label>
+          <input class="input" name="authPass" type="password" placeholder="••••••••" />
+        </div>
+      </div>
+      <div class="row" style="justify-content:flex-end;margin-top:14px">
+        <button type="submit" class="btn btn-primary" id="ss-submit-btn">Lưu & Áp dụng cấu hình</button>
+      </div>
+    </form>
+  `, {
+    large: true,
+    onMount(body) {
+      body.querySelector('#site-settings-form')?.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const sub = body.querySelector('#ss-submit-btn');
+        await withBusy(sub, async () => {
+          const fd = new FormData(e.target);
+          const redirects = String(fd.get('redirects') || '')
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .map((line, idx) => {
+              const parts = line.split('->').map((s) => s.trim());
+              const src = parts[0] || '/';
+              const rhs = (parts[1] || '').split(/\s+/);
+              const targetUrl = rhs[0] || '/';
+              const code = Number(rhs[1]) === 302 ? 302 : 301;
+              return { id: `redir-${idx + 1}`, sourcePath: src, targetUrl, statusCode: code, enabled: true };
+            });
+
+          const authPath = String(fd.get('authPath') || '').trim();
+          const authUser = String(fd.get('authUser') || '').trim();
+          const authPass = String(fd.get('authPass') || '');
+          const directoryAuth = authPath && authUser
+            ? [{
+                id: firstAuth?.id || 'dir-auth-1',
+                path: authPath,
+                realm: String(fd.get('authRealm') || 'Protected Area').trim(),
+                username: authUser,
+                passwordHash: firstAuth?.passwordHash || '',
+                password: authPass || undefined,
+                enabled: true,
+              }]
+            : [];
+
+          const hotlinkDomains = String(fd.get('hotlinkDomains') || '')
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+
+          try {
+            await api('PUT', `/api/apps/${encodeURIComponent(app.id)}/site-settings`, {
+              sslEnabled: fd.get('sslEnabled') === 'on',
+              forceHttps: fd.get('forceHttps') === 'on',
+              http3Quic: fd.get('http3Quic') === 'on',
+              websocketEnabled: fd.get('websocketEnabled') === 'on',
+              rateLimitRps: Number(fd.get('rateLimitRps') || 0),
+              redirects,
+              hotlinkProtection: {
+                enabled: fd.get('hotlinkEnabled') === 'on',
+                allowedDomains: hotlinkDomains,
+                extensions: hotlink.extensions || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'],
+                allowEmptyReferer: fd.get('hotlinkAllowEmpty') === 'on',
+              },
+              directoryAuth,
+            });
+            closeModal();
+            toast(`Đã cập nhật & kiểm chứng cấu hình vhost cho ${app.domain}.`);
+            await renderApps(container);
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        });
+      });
+    },
+  });
 }
 
 function openDeployModal(container) {
@@ -421,55 +588,59 @@ function openDeployModal(container) {
       <div class="row" style="margin:8px 0 14px">
         <label class="checkbox-row"><input type="checkbox" name="sslEnabled" /><span>Tự động cấp SSL Let's Encrypt</span></label>
         <label class="checkbox-row"><input type="checkbox" name="websocketEnabled" checked /><span>Hỗ trợ WebSocket</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="http3Quic" /><span>HTTP/3 QUIC</span></label>
       </div>
       <div class="row" style="justify-content:flex-end">
-        <button type="submit" class="btn btn-primary">Tạo & Triển khai</button>
+        <button type="submit" class="btn btn-primary" id="deploy-submit-btn">Tạo & Triển khai</button>
       </div>
     </form>
   `, {
     onMount(body) {
       body.querySelector('#deploy-app-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
-        const fd = new FormData(e.target);
-        try {
-          await api('POST', '/api/apps', {
-            name: String(fd.get('name') || '').trim(),
-            framework: String(fd.get('framework') || 'Static HTML / SPA'),
-            domain: String(fd.get('domain') || '').trim(),
-            aliases: [],
-            internalPort: Number(fd.get('internalPort') || 8080),
-            workingDir: '',
-            runSubDir: '',
-            execCommand: String(fd.get('execCommand') || '').trim(),
-            workers: 1,
-            memoryLimitMb: 256,
-            sslEnabled: fd.get('sslEnabled') === 'on',
-            http3Quic: true,
-            websocketEnabled: fd.get('websocketEnabled') === 'on',
-            rateLimitRps: 0,
-            createDatabase: false,
-            dbEngine: '',
-            dbName: '',
-            dbUser: '',
-            dbPassword: '',
-            createFtp: false,
-            ftpUser: '',
-            gitRepoUrl: String(fd.get('gitRepoUrl') || '').trim(),
-            gitBranch: 'main',
-          });
-          closeModal();
-          toast('Đã triển khai website mới.');
-          await renderApps(container);
-        } catch (err) {
-          toast(err.message, 'err');
-        }
+        const sub = body.querySelector('#deploy-submit-btn');
+        await withBusy(sub, async () => {
+          const fd = new FormData(e.target);
+          try {
+            await api('POST', '/api/apps', {
+              name: String(fd.get('name') || '').trim(),
+              framework: String(fd.get('framework') || 'Static HTML / SPA'),
+              domain: String(fd.get('domain') || '').trim(),
+              aliases: [],
+              internalPort: Number(fd.get('internalPort') || 8080),
+              workingDir: '',
+              runSubDir: '',
+              execCommand: String(fd.get('execCommand') || '').trim(),
+              workers: 1,
+              memoryLimitMb: 256,
+              sslEnabled: fd.get('sslEnabled') === 'on',
+              http3Quic: fd.get('http3Quic') === 'on',
+              websocketEnabled: fd.get('websocketEnabled') === 'on',
+              rateLimitRps: 0,
+              createDatabase: false,
+              dbEngine: '',
+              dbName: '',
+              dbUser: '',
+              dbPassword: '',
+              createFtp: false,
+              ftpUser: '',
+              gitRepoUrl: String(fd.get('gitRepoUrl') || '').trim(),
+              gitBranch: 'main',
+            });
+            closeModal();
+            toast('Đã triển khai website mới.');
+            await renderApps(container);
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        });
       });
     },
   });
 }
 
 // ============================================================================
-// 3. SAFEPATH FILE MANAGER
+// 3. SAFEPATH FILE MANAGER (FULL PARITY: RENAME, COMPRESS, REMOTE DOWNLOAD, CHMOD)
 // ============================================================================
 export async function renderFiles(container) {
   const apps = await api('GET', '/api/apps');
@@ -493,20 +664,25 @@ export async function renderFiles(container) {
       <div class="page-head">
         <div>
           <h1 class="page-title">Quản lý Tệp (SafePath)</h1>
-          <p class="page-desc">Chỉnh sửa trực tiếp mã nguồn, tải lên tệp nhị phân raw tới 64 MiB và giải nén lưu trữ an toàn.</p>
+          <p class="page-desc">Chỉnh sửa mã nguồn, đổi tên, nén/giải nén an toàn chống symlink escape, tải từ URL chống SSRF và chuẩn hóa quyền.</p>
         </div>
         <div class="row">
-          <select class="select" id="fm-app-select" style="width:auto;min-width:220px">
+          <select class="select" id="fm-app-select" style="width:auto;min-width:200px">
             ${apps.map((a) => `<option value="${esc(a.id)}" ${a.id === selectedAppId ? 'selected' : ''}>${esc(a.domain)}</option>`).join('')}
           </select>
-          <button type="button" class="btn" id="fm-new-file">Tạo tệp</button>
-          <button type="button" class="btn" id="fm-new-dir">Tạo thư mục</button>
-          <label class="btn btn-primary" style="cursor:pointer">
+          <button type="button" class="btn btn-sm" id="fm-new-file">Tạo tệp</button>
+          <button type="button" class="btn btn-sm" id="fm-new-dir">Tạo thư mục</button>
+          <button type="button" class="btn btn-sm" id="fm-compress-btn">Nén thư mục</button>
+          <button type="button" class="btn btn-sm" id="fm-remote-dl-btn">Tải từ URL</button>
+          <button type="button" class="btn btn-sm" id="fm-chmod-btn">Batch Chmod</button>
+          <label class="btn btn-sm btn-primary" style="cursor:pointer">
             Tải tệp lên
             <input type="file" id="fm-upload-input" hidden />
           </label>
         </div>
       </div>
+
+      ${capBannerHtml(['files'])}
 
       <section class="surface">
         <div class="surface-head">
@@ -537,7 +713,8 @@ export async function renderFiles(container) {
                       <td class="right">
                         <div class="row" style="justify-content:flex-end">
                           ${n.type !== 'directory' ? `<button type="button" class="btn btn-sm" data-edit-file="${esc(n.id)}">Sửa</button>` : ''}
-                          ${n.name.endsWith('.zip') ? `<button type="button" class="btn btn-sm" data-extract-file="${esc(n.id)}">Giải nén</button>` : ''}
+                          <button type="button" class="btn btn-sm" data-rename-file="${esc(n.id)}" data-name="${esc(n.name)}">Đổi tên</button>
+                          ${/\.(zip|tar\.gz|tgz|tar\.zst)$/i.test(n.name) ? `<button type="button" class="btn btn-sm" data-extract-file="${esc(n.id)}">Giải nén</button>` : ''}
                           <button type="button" class="btn btn-sm btn-danger" data-del-file="${esc(n.id)}" data-name="${esc(n.name)}">Xóa</button>
                         </div>
                       </td>
@@ -568,6 +745,74 @@ export async function renderFiles(container) {
     document.getElementById('fm-new-file')?.addEventListener('click', () => openCreateNodeModal('file'));
     document.getElementById('fm-new-dir')?.addEventListener('click', () => openCreateNodeModal('directory'));
 
+    document.getElementById('fm-compress-btn')?.addEventListener('click', () => {
+      openModal('Nén thư mục hiện tại (.tar.gz)', `
+        <form id="fm-comp-form">
+          <div class="field"><label>Thư mục nguồn</label><input class="input mono" name="sourceDir" value="${esc(currentDir)}" required /></div>
+          <div class="field"><label>Tên file nén</label><input class="input mono" name="archiveName" value="archive.tar.gz" required /></div>
+          <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="fm-comp-sub">Nén ngay</button></div>
+        </form>
+      `, {
+        onMount(body) {
+          body.querySelector('#fm-comp-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await withBusy(body.querySelector('#fm-comp-sub'), async () => {
+              const fd = new FormData(e.target);
+              try {
+                await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/compress`, {
+                  sourceDir: fd.get('sourceDir'),
+                  archiveName: fd.get('archiveName'),
+                });
+                closeModal();
+                toast('Đã tạo lưu trữ thành công.');
+                await loadAndDraw();
+              } catch (err) { toast(err.message, 'err'); }
+            });
+          });
+        },
+      });
+    });
+
+    document.getElementById('fm-remote-dl-btn')?.addEventListener('click', () => {
+      openModal('Tải tệp từ URL công khai (SSRF Guard)', `
+        <form id="fm-rdl-form">
+          <div class="field"><label>URL (HTTP/HTTPS công khai)</label><input class="input mono" name="url" placeholder="https://example.com/release.tar.gz" required /></div>
+          <div class="field"><label>Tên tệp lưu lại</label><input class="input mono" name="fileName" placeholder="release.tar.gz" required /></div>
+          <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="fm-rdl-sub">Tải về máy chủ</button></div>
+        </form>
+      `, {
+        onMount(body) {
+          body.querySelector('#fm-rdl-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await withBusy(body.querySelector('#fm-rdl-sub'), async () => {
+              const fd = new FormData(e.target);
+              try {
+                await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/remote-download`, {
+                  url: fd.get('url'),
+                  parentDir: currentDir,
+                  fileName: fd.get('fileName'),
+                });
+                closeModal();
+                toast('Đã tải tệp về thư mục an toàn.');
+                await loadAndDraw();
+              } catch (err) { toast(err.message, 'err'); }
+            });
+          });
+        },
+      });
+    });
+
+    document.getElementById('fm-chmod-btn')?.addEventListener('click', () => {
+      const btn = document.getElementById('fm-chmod-btn');
+      confirmAction('Chuẩn hóa quyền thư mục', 'Áp dụng quyền tiêu chuẩn (0755 cho thư mục, 0644 cho tệp) cho toàn bộ website này?', () => withBusy(btn, async () => {
+        try {
+          await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/batch-chmod`, {});
+          toast('Đã chuẩn hóa quyền tệp/thư mục.');
+          await loadAndDraw();
+        } catch (err) { toast(err.message, 'err'); }
+      }), false);
+    });
+
     document.getElementById('fm-upload-input')?.addEventListener('change', async (e) => {
       const file = e.target.files?.[0];
       if (!file) return;
@@ -593,7 +838,7 @@ export async function renderFiles(container) {
               <textarea class="textarea" name="content" style="min-height:320px">${esc(node.content || '')}</textarea>
             </div>
             <div class="row" style="justify-content:flex-end">
-              <button type="submit" class="btn btn-primary">Lưu thay đổi</button>
+              <button type="submit" class="btn btn-primary" id="fm-edit-sub">Lưu thay đổi</button>
             </div>
           </form>
         `, {
@@ -601,15 +846,43 @@ export async function renderFiles(container) {
           onMount(body) {
             body.querySelector('#fm-edit-form')?.addEventListener('submit', async (e) => {
               e.preventDefault();
-              const content = body.querySelector('textarea[name="content"]').value;
-              try {
-                await api('PUT', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(node.id)}`, { content });
-                closeModal();
-                toast(`Đã lưu ${node.name}`);
-                await loadAndDraw();
-              } catch (err) {
-                toast(err.message, 'err');
-              }
+              await withBusy(body.querySelector('#fm-edit-sub'), async () => {
+                const content = body.querySelector('textarea[name="content"]').value;
+                try {
+                  await api('PUT', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(node.id)}`, { content });
+                  closeModal();
+                  toast(`Đã lưu ${node.name}`);
+                  await loadAndDraw();
+                } catch (err) {
+                  toast(err.message, 'err');
+                }
+              });
+            });
+          },
+        });
+      });
+    });
+
+    container.querySelectorAll('[data-rename-file]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        openModal(`Đổi tên: ${btn.dataset.name}`, `
+          <form id="fm-ren-form">
+            <div class="field"><label>Tên mới</label><input class="input mono" name="newName" value="${esc(btn.dataset.name)}" required /></div>
+            <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="fm-ren-sub">Đổi tên</button></div>
+          </form>
+        `, {
+          onMount(body) {
+            body.querySelector('#fm-ren-form')?.addEventListener('submit', async (e) => {
+              e.preventDefault();
+              await withBusy(body.querySelector('#fm-ren-sub'), async () => {
+                const newName = new FormData(e.target).get('newName');
+                try {
+                  await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(btn.dataset.renameFile)}/rename`, { newName });
+                  closeModal();
+                  toast('Đã đổi tên thành công.');
+                  await loadAndDraw();
+                } catch (err) { toast(err.message, 'err'); }
+              });
             });
           },
         });
@@ -617,20 +890,20 @@ export async function renderFiles(container) {
     });
 
     container.querySelectorAll('[data-extract-file]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
+      btn.addEventListener('click', () => withBusy(btn, async () => {
         try {
           await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(btn.dataset.extractFile)}/extract`, { targetDir: currentDir });
-          toast('Đã giải nén lưu trữ.');
+          toast('Đã giải nén lưu trữ an toàn.');
           await loadAndDraw();
         } catch (err) {
           toast(err.message, 'err');
         }
-      });
+      }));
     });
 
     container.querySelectorAll('[data-del-file]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        confirmAction('Xóa tệp / thư mục', `Xác nhận xóa ${btn.dataset.name}?`, async () => {
+        confirmAction('Xóa tệp / thư mục', `Xác nhận xóa vĩnh viễn ${btn.dataset.name}?`, () => withBusy(btn, async () => {
           try {
             await api('DELETE', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(btn.dataset.delFile)}`);
             toast(`Đã xóa ${btn.dataset.name}`);
@@ -638,7 +911,7 @@ export async function renderFiles(container) {
           } catch (err) {
             toast(err.message, 'err');
           }
-        });
+        }));
       });
     });
   }
@@ -652,27 +925,29 @@ export async function renderFiles(container) {
         </div>
         ${nodeType === 'file' ? '<div class="field"><label>Nội dung ban đầu</label><textarea class="textarea" name="content"></textarea></div>' : ''}
         <div class="row" style="justify-content:flex-end">
-          <button type="submit" class="btn btn-primary">Tạo mới</button>
+          <button type="submit" class="btn btn-primary" id="fm-create-sub">Tạo mới</button>
         </div>
       </form>
     `, {
       onMount(body) {
         body.querySelector('#fm-create-form')?.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const fd = new FormData(e.target);
-          try {
-            await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}`, {
-              name: String(fd.get('name') || '').trim(),
-              parentDir: currentDir,
-              type: nodeType,
-              content: nodeType === 'file' ? String(fd.get('content') || '') : null,
-            });
-            closeModal();
-            toast('Đã tạo thành công.');
-            await loadAndDraw();
-          } catch (err) {
-            toast(err.message, 'err');
-          }
+          await withBusy(body.querySelector('#fm-create-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}`, {
+                name: String(fd.get('name') || '').trim(),
+                parentDir: currentDir,
+                type: nodeType,
+                content: nodeType === 'file' ? String(fd.get('content') || '') : null,
+              });
+              closeModal();
+              toast('Đã tạo thành công.');
+              await loadAndDraw();
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          });
         });
       },
     });
@@ -691,13 +966,15 @@ export async function renderDatabases(container) {
     <div class="page-head">
       <div>
         <h1 class="page-title">Cơ sở dữ liệu SQL (Pure-Rust Engine)</h1>
-        <p class="page-desc">Quản lý SQLite 3 (WAL thuần Rust), MariaDB 11.4 và PostgreSQL 17, xuất/nhập SQL streaming tới 64 MiB.</p>
+        <p class="page-desc">Quản lý SQLite 3 (WAL thuần Rust), MariaDB 11.4 và PostgreSQL 17, truyền mật khẩu an toàn qua stdin, xuất/nhập SQL streaming.</p>
       </div>
       <div class="row">
         <a class="btn" href="/phpadmin/" target="_blank" rel="noopener">Mở FerrousAdmin Studio (/phpadmin/)</a>
         <button type="button" class="btn btn-primary" id="db-create-btn">Tạo Database mới</button>
       </div>
     </div>
+
+    ${capBannerHtml(['mariadb', 'postgresql'])}
 
     <section class="surface">
       <div class="table-wrap">
@@ -760,29 +1037,31 @@ export async function renderDatabases(container) {
           </div>
         </div>
         <div class="row" style="justify-content:flex-end;margin-top:12px">
-          <button type="submit" class="btn btn-primary">Tạo Database</button>
+          <button type="submit" class="btn btn-primary" id="db-create-sub">Tạo Database</button>
         </div>
       </form>
     `, {
       onMount(body) {
         body.querySelector('#db-create-form')?.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const fd = new FormData(e.target);
-          try {
-            await api('POST', '/api/databases', {
-              name: String(fd.get('name') || '').trim(),
-              engine: String(fd.get('engine') || 'SQLite 3 (WAL · Pure Rust)'),
-              username: String(fd.get('username') || '').trim(),
-              password: String(fd.get('password') || '').trim() || null,
-              collation: 'UTF-8',
-              linkedAppId: '',
-            });
-            closeModal();
-            toast('Đã tạo database mới.');
-            await renderDatabases(container);
-          } catch (err) {
-            toast(err.message, 'err');
-          }
+          await withBusy(body.querySelector('#db-create-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/databases', {
+                name: String(fd.get('name') || '').trim(),
+                engine: String(fd.get('engine') || 'SQLite 3 (WAL · Pure Rust)'),
+                username: String(fd.get('username') || '').trim(),
+                password: String(fd.get('password') || '').trim() || null,
+                collation: 'UTF-8',
+                linkedAppId: '',
+              });
+              closeModal();
+              toast('Đã tạo database mới.');
+              await renderDatabases(container);
+            } catch (err) {
+              toast(err.message, 'err');
+            }
+          });
         });
       },
     });
@@ -797,7 +1076,7 @@ export async function renderDatabases(container) {
             <textarea class="textarea" name="query" placeholder="SELECT sqlite_version();"></textarea>
           </div>
           <div class="row" style="justify-content:flex-end;margin-bottom:12px">
-            <button type="submit" class="btn btn-primary">Thực thi SQL</button>
+            <button type="submit" class="btn btn-primary" id="sql-run-sub">Thực thi SQL</button>
           </div>
         </form>
         <div id="sql-result-box"></div>
@@ -806,33 +1085,35 @@ export async function renderDatabases(container) {
         onMount(body) {
           body.querySelector('#sql-run-form')?.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const query = body.querySelector('textarea[name="query"]').value;
-            const out = body.querySelector('#sql-result-box');
-            out.innerHTML = '<div class="empty-state">Đang thực thi…</div>';
-            try {
-              const res = await api('POST', `/api/databases/${encodeURIComponent(btn.dataset.dbSql)}/query`, { query });
-              const cols = res.columns || [];
-              const rows = res.rows || [];
-              out.innerHTML = `
-                <div class="meta-line" style="margin-bottom:8px">
-                  <span class="${res.success ? 'st-ok' : 'st-err'}">${esc(res.commandTag || 'OK')}</span>
-                  <span>·</span>
-                  <span class="mono">${Number(res.executionTimeMs || 0).toFixed(2)} ms</span>
-                  <span>·</span>
-                  <span class="mono">${rows.length} dòng</span>
-                </div>
-                ${cols.length ? `
-                  <div class="table-wrap">
-                    <table class="data-table">
-                      <thead><tr>${cols.map((c) => `<th class="mono">${esc(c)}</th>`).join('')}</tr></thead>
-                      <tbody>${rows.map((r) => `<tr>${cols.map((c) => `<td class="mono">${esc(r[c] ?? 'NULL')}</td>`).join('')}</tr>`).join('')}</tbody>
-                    </table>
+            await withBusy(body.querySelector('#sql-run-sub'), async () => {
+              const query = body.querySelector('textarea[name="query"]').value;
+              const out = body.querySelector('#sql-result-box');
+              out.innerHTML = '<div class="empty-state">Đang thực thi…</div>';
+              try {
+                const res = await api('POST', `/api/databases/${encodeURIComponent(btn.dataset.dbSql)}/query`, { query });
+                const cols = res.columns || [];
+                const rows = res.rows || [];
+                out.innerHTML = `
+                  <div class="meta-line" style="margin-bottom:8px">
+                    <span class="${res.success ? 'st-ok' : 'st-err'}">${esc(res.commandTag || 'OK')}</span>
+                    <span>·</span>
+                    <span class="mono">${Number(res.executionTimeMs || 0).toFixed(2)} ms</span>
+                    <span>·</span>
+                    <span class="mono">${rows.length} dòng</span>
                   </div>
-                ` : '<div class="empty-state">Thực thi thành công (không có tập kết quả trả về).</div>'}
-              `;
-            } catch (err) {
-              out.innerHTML = `<div class="alert-err">${esc(err.message)}</div>`;
-            }
+                  ${cols.length ? `
+                    <div class="table-wrap">
+                      <table class="data-table">
+                        <thead><tr>${cols.map((c) => `<th class="mono">${esc(c)}</th>`).join('')}</tr></thead>
+                        <tbody>${rows.map((r) => `<tr>${cols.map((c) => `<td class="mono">${esc(r[c] ?? 'NULL')}</td>`).join('')}</tr>`).join('')}</tbody>
+                      </table>
+                    </div>
+                  ` : '<div class="empty-state">Thực thi thành công (không có tập kết quả trả về).</div>'}
+                `;
+              } catch (err) {
+                out.innerHTML = `<div class="alert-err">${esc(err.message)}</div>`;
+              }
+            });
           });
         },
       });
@@ -840,7 +1121,7 @@ export async function renderDatabases(container) {
   });
 
   container.querySelectorAll('[data-db-export]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => withBusy(btn, async () => {
       try {
         const blob = await api('GET', `/api/databases/${encodeURIComponent(btn.dataset.dbExport)}/export?download=1`, undefined, { responseType: 'blob' });
         const url = URL.createObjectURL(blob);
@@ -853,7 +1134,7 @@ export async function renderDatabases(container) {
       } catch (err) {
         toast(err.message, 'err');
       }
-    });
+    }));
   });
 
   container.querySelectorAll('[data-db-import]').forEach((input) => {
@@ -873,7 +1154,7 @@ export async function renderDatabases(container) {
 
   container.querySelectorAll('[data-db-del]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      confirmAction('Xóa Database', `Xác nhận xóa database ${btn.dataset.name}?`, async () => {
+      confirmAction('Xóa Database', `Xác nhận xóa vĩnh viễn database ${btn.dataset.name}? Dữ liệu sẽ không thể khôi phục.`, () => withBusy(btn, async () => {
         try {
           await api('DELETE', `/api/databases/${encodeURIComponent(btn.dataset.dbDel)}`);
           toast(`Đã xóa database ${btn.dataset.name}`);
@@ -881,7 +1162,7 @@ export async function renderDatabases(container) {
         } catch (err) {
           toast(err.message, 'err');
         }
-      });
+      }));
     });
   });
 }

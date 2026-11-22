@@ -29,8 +29,8 @@ jobs:
           components: clippy, rustfmt
           targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 
-      - name: Install ARM64 cross-linker for aarch64 release binary
-        if: github.event_name == 'push'
+      - name: Install ARM64 cross-linker for tagged release build
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           sudo apt-get update -y -q
           sudo apt-get install -y -q gcc-aarch64-linux-gnu
@@ -38,8 +38,8 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Validate shell scripts syntax (install.sh / update.sh / uninstall.sh)
-        run: bash -n install.sh update.sh uninstall.sh
+      - name: Validate shell scripts syntax (install.sh / update.sh / uninstall.sh / smoke-test.sh)
+        run: bash -n install.sh update.sh uninstall.sh scripts/smoke-test.sh
 
       - name: Cargo check (workspace, all targets — Pure-Rust Native UI embedded)
         run: cargo check --workspace --all-targets
@@ -53,14 +53,24 @@ jobs:
       - name: Cargo build --release x86_64 (single Pure-Rust binary + Native UI)
         run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
 
+      - name: Upload x86_64 release binaries for integration smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: ferrous-binaries-x86_64
+          path: |
+            target/x86_64-unknown-linux-gnu/release/ferrous-panel
+            target/x86_64-unknown-linux-gnu/release/ferrousx-bin
+            target/x86_64-unknown-linux-gnu/release/ferrousx-ctl
+          retention-days: 1
+
       - name: Cargo build --release aarch64 (single Pure-Rust binary + Native UI)
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
         run: cargo build --release --workspace --target aarch64-unknown-linux-gnu
 
       - name: Prepare release artifacts (multi-arch Pure-Rust binaries + SHA256SUMS)
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p release-artifacts
           cp target/x86_64-unknown-linux-gnu/release/ferrous-panel release-artifacts/ferrous-panel-linux-x86_64
@@ -72,12 +82,12 @@ jobs:
           cp install.sh update.sh uninstall.sh release-artifacts/
           (cd release-artifacts && sha256sum ferrous-panel-linux-* ferrousx-bin-linux-* ferrousx-ctl-linux-* > SHA256SUMS.txt)
 
-      - name: Publish GitHub Release (powers 1-command install.sh)
-        if: github.event_name == 'push'
+      - name: Publish GitHub Release (tagged releases v* only)
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v2.5.0' }}
-          name: "FerrousPanel ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'v2.5.0 (Latest)' }}"
+          tag_name: ${{ github.ref_name }}
+          name: "FerrousPanel ${{ github.ref_name }}"
           make_latest: "true"
           files: |
             release-artifacts/ferrous-panel-linux-x86_64
@@ -90,3 +100,31 @@ jobs:
             release-artifacts/install.sh
             release-artifacts/update.sh
             release-artifacts/uninstall.sh
+
+  integration-smoke-test:
+    name: Ubuntu 24.04 Integration Smoke Test (Nginx + PHP-FPM + MariaDB + UFW)
+    runs-on: ubuntu-24.04
+    needs: build-and-test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download x86_64 release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: ferrous-binaries-x86_64
+          path: ./bin
+
+      - name: Install real Ubuntu 24.04 host services (nginx, php-fpm, mariadb-server, ufw)
+        run: |
+          sudo apt-get update -y -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q nginx php-fpm mariadb-server ufw curl openssl dnsutils
+          sudo systemctl start mariadb || sudo service mariadb start || true
+          sudo systemctl start nginx || sudo service nginx start || true
+          sudo install -m 0755 ./bin/ferrous-panel /usr/local/bin/ferrous-panel
+          sudo install -m 0755 ./bin/ferrousx-bin /usr/local/bin/ferrousx-bin
+          sudo install -m 0755 ./bin/ferrousx-ctl /usr/local/bin/ferrousx-ctl
+
+      - name: Run scripts/smoke-test.sh against live ferrous-panel daemon
+        run: sudo PANEL_BIN=/usr/local/bin/ferrous-panel bash scripts/smoke-test.sh

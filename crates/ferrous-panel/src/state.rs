@@ -5,7 +5,8 @@ use crate::auth::store::AuthStore;
 use crate::config::Config;
 use crate::error::PanelError;
 use crate::modules::ModuleStore;
-use crate::webserver::WebServerManager;
+use crate::system::cmd::AllowedBinary;
+use crate::webserver::{CommandExecutor, WebServerManager};
 use chrono::{Local, Utc};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -69,6 +70,7 @@ pub struct TelemetryCollector {
     inner: Mutex<TelemetryInner>,
     total_requests: AtomicU64,
     active_connections: AtomicU64,
+    nginx_version: RwLock<String>,
 }
 
 impl TelemetryCollector {
@@ -78,6 +80,11 @@ impl TelemetryCollector {
         system.refresh_cpu_usage();
         system.refresh_memory();
         let networks = Networks::new_with_refreshed_list();
+        let initial_nginx = if AllowedBinary::Nginx.is_available() {
+            "installed".to_string()
+        } else {
+            "not installed".to_string()
+        };
         Self {
             inner: Mutex::new(TelemetryInner {
                 system,
@@ -87,6 +94,43 @@ impl TelemetryCollector {
             }),
             total_requests: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
+            nginx_version: RwLock::new(initial_nginx),
+        }
+    }
+
+    /// Asynchronously probes the Nginx version via the allowlisted `CommandExecutor` (never blocking).
+    pub async fn refresh_nginx_version(&self, executor: &dyn CommandExecutor) {
+        if !executor.is_binary_available(AllowedBinary::Nginx) {
+            if let Ok(mut guard) = self.nginx_version.write() {
+                *guard = "not installed".to_string();
+            }
+            return;
+        }
+        if let Ok(out) = executor
+            .run(
+                AllowedBinary::Nginx,
+                &["-v"],
+                std::time::Duration::from_secs(3),
+            )
+            .await
+        {
+            let raw = if !out.stderr.is_empty() {
+                out.stderr
+            } else {
+                out.stdout
+            };
+            let parsed = raw
+                .lines()
+                .next()
+                .map(str::trim)
+                .and_then(|line| line.strip_prefix("nginx version:"))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| "installed".to_string());
+            if let Ok(mut guard) = self.nginx_version.write() {
+                *guard = parsed;
+            }
         }
     }
 
@@ -229,7 +273,17 @@ impl TelemetryCollector {
             .or(public_v4)
             .or(fallback_v4)
             .unwrap_or_else(|| config.bind.clone());
-        let nginx_version = detect_nginx_presence();
+        let nginx_version = self
+            .nginx_version
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| {
+                if AllowedBinary::Nginx.is_available() {
+                    "installed".to_string()
+                } else {
+                    "not installed".to_string()
+                }
+            });
 
         Ok(TelemetrySnapshot {
             hostname,
@@ -314,38 +368,7 @@ fn collect_disk_bytes(disks: &Disks) -> (u64, u64) {
     (total, used)
 }
 
-fn detect_nginx_presence() -> String {
-    let bin = if std::path::Path::new("/usr/sbin/nginx").is_file() {
-        Some("/usr/sbin/nginx")
-    } else if std::path::Path::new("/usr/bin/nginx").is_file() {
-        Some("/usr/bin/nginx")
-    } else {
-        None
-    };
 
-    let Some(nginx_bin) = bin else {
-        return "not installed".to_string();
-    };
-
-    if let Ok(out) = std::process::Command::new(nginx_bin).arg("-v").output() {
-        // `nginx -v` prints version info to stderr (e.g. "nginx version: nginx/1.24.0 (Ubuntu)")
-        let raw = if !out.stderr.is_empty() {
-            String::from_utf8_lossy(&out.stderr).to_string()
-        } else {
-            String::from_utf8_lossy(&out.stdout).to_string()
-        };
-        if let Some(trimmed) = raw.lines().next().map(str::trim) {
-            if let Some(ver) = trimmed.strip_prefix("nginx version:") {
-                let clean = ver.trim();
-                if !clean.is_empty() {
-                    return clean.to_string();
-                }
-            }
-        }
-    }
-
-    "installed".to_string()
-}
 
 fn round1(v: f64) -> f64 {
     if v.is_finite() {

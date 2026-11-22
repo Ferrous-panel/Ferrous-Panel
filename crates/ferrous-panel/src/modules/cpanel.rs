@@ -954,38 +954,64 @@ async fn sync_sftp_sshd_dropin(
         0o644,
     )?;
 
-    if config.data_dir == Path::new("/var/lib/ferrous-panel")
-        && Path::new("/etc/ssh/sshd_config.d").is_dir()
-    {
-        let dropin_path = Path::new("/etc/ssh/sshd_config.d/90-ferrous-sftp.conf");
-        let prev = std::fs::read(dropin_path).ok();
-        crate::webserver::atomic_write_file(dropin_path, conf.as_bytes(), 0o644)?;
-
-        if executor.is_binary_available(AllowedBinary::Sshd) {
-            let check = executor
-                .run(AllowedBinary::Sshd, &["-t"], CRON_TIMEOUT)
-                .await;
-            let valid = check.as_ref().is_ok_and(|o| o.success);
-            if !valid {
-                if let Some(old_bytes) = prev {
-                    let _ = crate::webserver::atomic_write_file(dropin_path, &old_bytes, 0o644);
-                } else {
-                    let _ = std::fs::remove_file(dropin_path);
-                }
-                return Err(PanelError::Validation(
-                    "sshd -t rejected SFTP chroot drop-in configuration; rolled back safely"
-                        .to_string(),
-                ));
-            }
+    if config.is_production() {
+        if !executor.is_binary_available(AllowedBinary::Sshd) {
+            return Err(PanelError::Conflict(
+                "sshd binary is not installed on this host (install openssh-server)".to_string(),
+            ));
         }
-        if executor.is_binary_available(AllowedBinary::Systemctl) {
-            let reload = executor
-                .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CRON_TIMEOUT)
-                .await;
-            if reload.as_ref().is_err() || reload.as_ref().is_ok_and(|o| !o.success) {
-                let _ = executor
-                    .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CRON_TIMEOUT)
-                    .await;
+        let dropin_dir = Path::new("/etc/ssh/sshd_config.d");
+        std::fs::create_dir_all(dropin_dir)?;
+        let dropin_path = dropin_dir.join("90-ferrous-sftp.conf");
+        let prev = std::fs::read(&dropin_path).ok();
+        crate::webserver::atomic_write_file(&dropin_path, conf.as_bytes(), 0o644)?;
+
+        let check = executor
+            .run(AllowedBinary::Sshd, &["-t"], CRON_TIMEOUT)
+            .await?;
+        if !check.success {
+            if let Some(old_bytes) = prev {
+                let _ = crate::webserver::atomic_write_file(&dropin_path, &old_bytes, 0o644);
+            } else {
+                let _ = std::fs::remove_file(&dropin_path);
+            }
+            return Err(PanelError::Validation(format!(
+                "sshd -t rejected SFTP chroot drop-in configuration (rolled back): {}",
+                if check.stderr.is_empty() {
+                    check.stdout
+                } else {
+                    check.stderr
+                }
+            )));
+        }
+
+        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+            return Err(PanelError::Conflict(
+                "systemctl is not available to reload sshd".to_string(),
+            ));
+        }
+        let reload = executor
+            .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CRON_TIMEOUT)
+            .await?;
+        if !reload.success {
+            let reload2 = executor
+                .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CRON_TIMEOUT)
+                .await?;
+            if !reload2.success {
+                if let Some(old_bytes) = prev {
+                    let _ = crate::webserver::atomic_write_file(&dropin_path, &old_bytes, 0o644);
+                } else {
+                    let _ = std::fs::remove_file(&dropin_path);
+                }
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: reload2.exit_code,
+                    stderr: if reload2.stderr.is_empty() {
+                        reload.stderr
+                    } else {
+                        reload2.stderr
+                    },
+                });
             }
         }
     }
@@ -1023,12 +1049,17 @@ pub async fn add_sftp_account(
     }
 
     let chroot_str = safe_chroot.as_path().display().to_string();
-    if config.data_dir == Path::new("/var/lib/ferrous-panel")
-        && executor.is_binary_available(AllowedBinary::Useradd)
-    {
+    if config.is_production() {
+        if !executor.is_binary_available(AllowedBinary::Useradd) {
+            return Err(PanelError::Conflict(
+                "useradd binary is not available on this host".to_string(),
+            ));
+        }
+        let safe_user =
+            crate::system::cmd::validate_no_flag_injection(clean_user.as_str(), "sftp username")?;
         let exists = executor.is_binary_available(AllowedBinary::Id)
             && executor
-                .run(AllowedBinary::Id, &["-u", clean_user.as_str()], CRON_TIMEOUT)
+                .run(AllowedBinary::Id, &["-u", "--", safe_user], CRON_TIMEOUT)
                 .await
                 .is_ok_and(|o| o.success);
         if !exists {
@@ -1042,7 +1073,8 @@ pub async fn add_sftp_account(
                         &chroot_str,
                         "--shell",
                         "/usr/sbin/nologin",
-                        clean_user.as_str(),
+                        "--",
+                        safe_user,
                     ],
                     CRON_TIMEOUT,
                 )
@@ -1104,15 +1136,24 @@ pub async fn delete_sftp_account(
         )));
     }
     sync_sftp_sshd_dropin(config, &accounts, executor).await?;
-    if config.data_dir == Path::new("/var/lib/ferrous-panel")
-        && executor.is_binary_available(AllowedBinary::Userdel)
-    {
+    if config.is_production() && executor.is_binary_available(AllowedBinary::Userdel) {
         if let Some(ref uname) = removed_user {
             if let Ok(valid_u) = SafeLinuxUser::parse(uname) {
                 if !matches!(valid_u.as_str(), "root" | "www-data" | "ubuntu" | "admin") {
-                    let _ = executor
-                        .run(AllowedBinary::Userdel, &[valid_u.as_str()], CRON_TIMEOUT)
-                        .await;
+                    let del_out = executor
+                        .run(AllowedBinary::Userdel, &["--", valid_u.as_str()], CRON_TIMEOUT)
+                        .await?;
+                    if !del_out.success && !del_out.stderr.contains("does not exist") {
+                        return Err(PanelError::CommandFailed {
+                            binary: "userdel",
+                            exit_code: del_out.exit_code,
+                            stderr: if del_out.stderr.is_empty() {
+                                del_out.stdout
+                            } else {
+                                del_out.stderr
+                            },
+                        });
+                    }
                 }
             }
         }

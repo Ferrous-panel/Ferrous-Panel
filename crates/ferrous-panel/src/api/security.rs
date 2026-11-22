@@ -39,6 +39,13 @@ pub struct AuditLogsQuery {
     pub limit: usize,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteUfwQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
 fn default_audit_limit() -> usize {
     100
 }
@@ -123,22 +130,38 @@ pub async fn toggle_ufw_rule(
     Ok(HttpResponse::Ok().json(rules))
 }
 
-/// `DELETE /api/security/ufw/{id}` — removes UFW numbered rule (`ufw --force delete <num>`).
+/// `DELETE /api/security/ufw/{id}` — removes UFW numbered rule (`ufw --force delete <num>`),
+/// guarding active SSH and panel ports unless `?force=true` is explicitly provided.
 pub async fn delete_ufw_rule(
     req: HttpRequest,
     state: web::Data<AppState>,
     path: web::Path<String>,
+    query: web::Query<DeleteUfwQuery>,
 ) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let rules = sec_mod::delete_ufw_rule(state.webserver.executor().as_ref(), &id).await?;
+    let force = query.into_inner().force;
+    let ssh_port = crate::modules::extended::ssh_admin::get_ssh_overview(&state.modules, &state.config)
+        .map(|o| o.config.port)
+        .unwrap_or(22);
+    let protected_ports = [ssh_port, state.config.port];
+    let rules = sec_mod::delete_ufw_rule_guarded(
+        state.webserver.executor().as_ref(),
+        &id,
+        &protected_ports,
+        force,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req, &state);
-    state
-        .auth_store
-        .append_audit_log(Some(&actor), &ip, "security.ufw.delete", &format!("id={id}"))?;
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "security.ufw.delete",
+        &format!("id={id} force={force}"),
+    )?;
     Ok(HttpResponse::Ok().json(rules))
 }
 

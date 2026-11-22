@@ -1,92 +1,73 @@
 use super::common::*;
 
 // ============================================================================
-// 9. Rust Edge Cloud (Wasmtime, Youki OCI, WireGuard, BLAKE3 Snapshots)
+// 9. Rust Edge Cloud (Experimental / Optional: Wasmtime, Podman/Docker, WireGuard, Snapshots)
 // ============================================================================
 
-fn default_edge_cloud_data() -> EdgeCloudData {
+fn default_edge_cloud_data(config: &Config) -> EdgeCloudData {
+    if is_production_vps(config) {
+        return EdgeCloudData {
+            wasmtime_version: if AllowedBinary::Wasmtime.is_available() {
+                "Wasmtime (installed)".to_string()
+            } else {
+                "Wasmtime (not installed — experimental)".to_string()
+            },
+            youki_version: if AllowedBinary::Podman.is_available() {
+                "Podman Rootless OCI (installed)".to_string()
+            } else if AllowedBinary::Docker.is_available() {
+                "Docker OCI (installed)".to_string()
+            } else {
+                "OCI Runtime (not installed — experimental)".to_string()
+            },
+            boringtun_version: if AllowedBinary::Wg.is_available() {
+                "WireGuard (installed)".to_string()
+            } else {
+                "WireGuard (not installed — experimental)".to_string()
+            },
+            blake3_engine_version: "Zstd/Tar + SHA-256 Snapshot Vault".to_string(),
+            wireguard_interface: "wg0".to_string(),
+            wireguard_listen_port: 51820,
+            server_public_key: String::new(),
+            mesh_subnet_cidr: "10.66.0.0/24".to_string(),
+            wasi_workers: Vec::new(),
+            oci_containers: Vec::new(),
+            wireguard_peers: Vec::new(),
+            blake3_snapshots: Vec::new(),
+        };
+    }
+
     let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
     EdgeCloudData {
-        wasmtime_version: "Wasmtime 29.0 (Cranelift JIT + WASI Preview 2)".to_string(),
-        youki_version: "Youki 0.4.1 (Rust OCI Runtime + cgroups v2)".to_string(),
-        boringtun_version: "WireGuard / BoringTun 0.6 (ChaCha20-Poly1305)".to_string(),
-        blake3_engine_version: "BLAKE3 1.5 (SIMD Merkle Tree Vault)".to_string(),
+        wasmtime_version: "Wasmtime (test mode)".to_string(),
+        youki_version: "Podman/Docker OCI (test mode)".to_string(),
+        boringtun_version: "WireGuard (test mode)".to_string(),
+        blake3_engine_version: "Snapshot Vault (test mode)".to_string(),
         wireguard_interface: "wg0".to_string(),
         wireguard_listen_port: 51820,
-        server_public_key: "FerrousWGServerPubKey25519Base64================".to_string(),
+        server_public_key: String::new(),
         mesh_subnet_cidr: "10.66.0.0/24".to_string(),
         wasi_workers: vec![WasiEdgeWorker {
-            id: "wasi-edge-auth".to_string(),
-            name: "edge-jwt-gateway".to_string(),
+            id: "wasi-edge-test".to_string(),
+            name: "edge-test-worker".to_string(),
             route_pattern: "/api/edge/*".to_string(),
-            target_domain: resolve_local_domain(None),
+            target_domain: resolve_local_domain(Some(config)),
             wasi_target: "wasm32-wasip2".to_string(),
-            engine_version: "Wasmtime 29.0".to_string(),
-            cold_start_us: 320,
+            engine_version: "Wasmtime (test mode)".to_string(),
+            cold_start_us: 0,
             memory_limit_kb: 16384,
-            memory_used_kb: 1840,
+            memory_used_kb: 0,
             fuel_limit: 500_000,
-            invocations_24h: 14_280,
-            avg_execution_us: 190,
-            blake3_hash: sha256_hex(b"wasi-edge-auth"),
+            invocations_24h: 0,
+            avg_execution_us: 0,
+            blake3_hash: sha256_hex(b"wasi-edge-test"),
             kv_namespace: "FERROUS_EDGE_KV".to_string(),
-            status: "deployed".to_string(),
-            rust_source_snippet: "#[no_mangle]\npub extern \"C\" fn handle_request() -> i32 { 200 }".to_string(),
-            last_invoked_at: now.clone(),
+            status: "staged".to_string(),
+            rust_source_snippet: "fn main() { println!(\"{{\\\"ok\\\":true}}\"); }".to_string(),
+            last_invoked_at: now,
         }],
-        oci_containers: vec![OciContainerSandbox {
-            id: "oci-valkey-cache".to_string(),
-            name: "valkey-cache-01".to_string(),
-            image: "ghcr.io/valkey-io/valkey:8.0-alpine".to_string(),
-            runtime_engine: "Youki OCI (Rust Rootless)".to_string(),
-            cgroups_v2_path: "/sys/fs/cgroup/ferrous.slice/oci-valkey.scope".to_string(),
-            internal_ip: "10.88.0.12".to_string(),
-            host_port: 6379,
-            container_port: 6379,
-            memory_max_mb: 512,
-            memory_used_mb: 28.4,
-            cpu_quota_percent: 100.0,
-            cpu_usage_percent: 1.2,
-            pids_current: 4,
-            pids_max: 128,
-            seccomp_profile: "default-strict.json".to_string(),
-            status: "running".to_string(),
-            uptime: "3d 14h".to_string(),
-        }],
-        wireguard_peers: vec![WireGuardPeerNode {
-            id: "wg-peer-sgp".to_string(),
-            name: "sgp-edge-relay-01 (Singapore)".to_string(),
-            region: "ap-southeast-1".to_string(),
-            interface_name: "wg0".to_string(),
-            public_key: "PeerSgp25519PubKeyBase64========================".to_string(),
-            preshared_key_masked: "psk-••••-chacha20poly1305".to_string(),
-            endpoint: "139.162.40.18:51820".to_string(),
-            allowed_ips: "10.66.0.2/32".to_string(),
-            mesh_ip: "10.66.0.2".to_string(),
-            cipher_suite: "ChaCha20-Poly1305 / Curve25519".to_string(),
-            latest_handshake: "12 seconds ago".to_string(),
-            rx_mb: 142.8,
-            tx_mb: 198.4,
-            latency_ms: 8.4,
-            persistent_keepalive_sec: 25,
-            status: "connected".to_string(),
-        }],
-        blake3_snapshots: vec![Blake3ObjectSnapshot {
-            id: "b3-snap-initial".to_string(),
-            snapshot_name: "daily-wwwroot-merkle-checkpoint".to_string(),
-            target_resource: "/www/wwwroot + SQLite WAL".to_string(),
-            s3_endpoint: "file:///var/backups/ferrous-panel/snapshots".to_string(),
-            bucket: "ferrous-immutable-vault".to_string(),
-            merkle_root_blake3: sha256_hex(b"b3-snap-initial"),
-            compression: "Zstd Level 9".to_string(),
-            dedup_ratio: "3.4x".to_string(),
-            logical_size_mb: 248.0,
-            stored_size_mb: 72.9,
-            chunks_count: 1024,
-            immutable_lock: true,
-            created_at: now,
-            status: "verified".to_string(),
-        }],
+        oci_containers: Vec::new(),
+        wireguard_peers: Vec::new(),
+        blake3_snapshots: Vec::new(),
     }
 }
 
@@ -149,15 +130,18 @@ fn validate_wg_token(raw: &str, field: &str) -> Result<String, PanelError> {
     Ok(clean.to_string())
 }
 
-fn pick_oci_binary(runtime_engine: &str) -> Option<(AllowedBinary, &'static str)> {
+fn pick_oci_binary(
+    executor: &dyn CommandExecutor,
+    runtime_engine: &str,
+) -> Option<(AllowedBinary, &'static str)> {
     let lower = runtime_engine.to_ascii_lowercase();
-    if lower.contains("docker") && AllowedBinary::Docker.is_available() {
+    if lower.contains("docker") && executor.is_binary_available(AllowedBinary::Docker) {
         return Some((AllowedBinary::Docker, "Docker OCI"));
     }
-    if AllowedBinary::Podman.is_available() {
+    if executor.is_binary_available(AllowedBinary::Podman) {
         return Some((AllowedBinary::Podman, "Podman Rootless OCI"));
     }
-    if AllowedBinary::Docker.is_available() {
+    if executor.is_binary_available(AllowedBinary::Docker) {
         return Some((AllowedBinary::Docker, "Docker OCI"));
     }
     None
@@ -200,25 +184,31 @@ async fn ensure_wg_host_private_key(
             return Ok(trimmed.to_string());
         }
     }
-    let priv_key = if AllowedBinary::Wg.is_available() {
-        let out = executor.run(AllowedBinary::Wg, &["genkey"], CMD_TIMEOUT).await?;
-        let trimmed = out.stdout.trim();
-        if out.success && !trimmed.is_empty() {
-            trimmed.to_string()
-        } else {
-            format!(
-                "{}=",
-                &sha256_hex(format!("ferrous-wg0-host:{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)).as_bytes())[..43]
-            )
+    if !executor.is_binary_available(AllowedBinary::Wg) {
+        if is_production_vps(config) {
+            return Err(PanelError::Conflict(
+                "thiếu wireguard-tools (binary `wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+            ));
         }
-    } else {
-        format!(
-            "{}=",
-            &sha256_hex(format!("ferrous-wg0-host:{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)).as_bytes())[..43]
-        )
-    };
-    atomic_write_file(&key_path, format!("{priv_key}\n").as_bytes(), 0o600)?;
-    Ok(priv_key)
+        let test_key = "TEST_MODE_WG_PRIVATE_KEY_UNSET";
+        atomic_write_file(&key_path, format!("{test_key}\n").as_bytes(), 0o600)?;
+        return Ok(test_key.to_string());
+    }
+    let out = executor.run(AllowedBinary::Wg, &["genkey"], CMD_TIMEOUT).await?;
+    let trimmed = out.stdout.trim();
+    if !out.success || trimmed.is_empty() {
+        return Err(PanelError::CommandFailed {
+            binary: "wg",
+            exit_code: out.exit_code,
+            stderr: if out.stderr.trim().is_empty() {
+                "wg genkey returned empty key".to_string()
+            } else {
+                out.stderr
+            },
+        });
+    }
+    atomic_write_file(&key_path, format!("{trimmed}\n").as_bytes(), 0o600)?;
+    Ok(trimmed.to_string())
 }
 
 async fn sync_wireguard_config(
@@ -251,8 +241,13 @@ async fn sync_wireguard_config(
     std::fs::create_dir_all(&edge_dir)?;
     atomic_write_file(&edge_dir.join("wg0.conf"), conf.as_bytes(), 0o600)?;
 
-    if is_production_vps(config) && Path::new("/etc/wireguard").is_dir() {
-        let _ = atomic_write_file(Path::new("/etc/wireguard/wg0.conf"), conf.as_bytes(), 0o600);
+    if is_production_vps(config) {
+        if !Path::new("/etc/wireguard").is_dir() {
+            return Err(PanelError::Conflict(
+                "không tìm thấy /etc/wireguard (gợi ý: sudo apt install -y wireguard-tools)".to_string(),
+            ));
+        }
+        atomic_write_file(Path::new("/etc/wireguard/wg0.conf"), conf.as_bytes(), 0o600)?;
     }
     Ok(())
 }
@@ -265,19 +260,19 @@ pub async fn load_edge_cloud(
     let mut data = if let Some(existing) = store.get_json::<EdgeCloudData>(KV_EDGE_CLOUD)? {
         existing
     } else {
-        let initial = default_edge_cloud_data();
+        let initial = default_edge_cloud_data(config);
         store.put_json(KV_EDGE_CLOUD, &initial)?;
         initial
     };
 
     if is_production_vps(config) {
-        if let Some((oci_bin, _)) = pick_oci_binary("podman") {
+        if let Some((oci_bin, _)) = pick_oci_binary(executor, "podman") {
             for c in &mut data.oci_containers {
                 let cname = format!("ferrous-{}", c.name);
                 if let Ok(out) = executor
                     .run(
                         oci_bin,
-                        &["inspect", "-f", "{{.State.Status}}", &cname],
+                        &["inspect", "-f", "{{.State.Status}}", "--", &cname],
                         CMD_TIMEOUT,
                     )
                     .await
@@ -296,7 +291,7 @@ pub async fn load_edge_cloud(
             }
         }
 
-        if AllowedBinary::Wg.is_available() {
+        if executor.is_binary_available(AllowedBinary::Wg) {
             if let Ok(out) = executor
                 .run(AllowedBinary::Wg, &["show", "wg0", "dump"], CMD_TIMEOUT)
                 .await
@@ -345,6 +340,17 @@ pub async fn deploy_wasi_worker(
     rust_source_snippet: &str,
 ) -> Result<EdgeCloudData, PanelError> {
     let clean_name = validate_edge_slug(name, "WASI worker name", 64)?;
+    let target_arg = if wasi_target.trim().is_empty() {
+        "wasm32-wasip2".to_string()
+    } else {
+        validate_edge_slug(wasi_target, "WASI target", 48)?
+    };
+    if is_production_vps(config) && !executor.is_binary_available(AllowedBinary::Rustc) {
+        return Err(PanelError::Conflict(
+            "thiếu rustc để biên dịch WASI worker (gợi ý: curl https://sh.rustup.rs -sSf | sh && rustup target add wasm32-wasip2)".to_string(),
+        ));
+    }
+
     let mut data = load_edge_cloud(store, config, executor).await?;
     let id = format!("wasi-{:x}", Utc::now().timestamp_millis());
     let worker_dir = config.data_dir.join("edge-cloud").join("wasi").join(&id);
@@ -364,30 +370,25 @@ pub async fn deploy_wasi_worker(
     };
     atomic_write_file(&src_path, effective_src.as_bytes(), 0o644)?;
 
-    let mut engine_version = "WASI Source Staged (rustc not installed)".to_string();
+    let mut engine_version = "WASI Source Staged (test mode)".to_string();
     let mut artifact_bytes = effective_src.as_bytes().to_vec();
-    let mut cold_start_us: u64 = 290;
+    let mut cold_start_us: u64 = 0;
     let mut status = "staged".to_string();
 
-    if AllowedBinary::Rustc.is_available() {
+    if executor.is_binary_available(AllowedBinary::Rustc) {
         let src_str = src_path.to_string_lossy().to_string();
         let wasm_out = worker_dir.join("worker.wasm");
         let wasm_str = wasm_out.to_string_lossy().to_string();
-        let target_arg = if wasi_target.trim().is_empty() {
-            "wasm32-wasip2"
-        } else {
-            wasi_target.trim()
-        };
 
         let start = Instant::now();
-        let wasm_res = executor
+        let out = executor
             .run(
                 AllowedBinary::Rustc,
                 &[
                     "--edition",
                     "2021",
                     "--target",
-                    target_arg,
+                    &target_arg,
                     "-C",
                     "opt-level=s",
                     "-o",
@@ -396,45 +397,28 @@ pub async fn deploy_wasi_worker(
                 ],
                 CMD_TIMEOUT,
             )
-            .await;
+            .await?;
 
-        if let Ok(out) = wasm_res {
-            if out.success && wasm_out.exists() {
-                if let Ok(bytes) = std::fs::read(&wasm_out) {
-                    artifact_bytes = bytes;
-                    engine_version = format!("Wasmtime WASI ({target_arg} compiled)");
-                    cold_start_us = (start.elapsed().as_micros() as u64).min(950).max(120);
-                    status = "deployed".to_string();
-                }
-            } else {
-                let native_out = worker_dir.join("worker.bin");
-                let native_str = native_out.to_string_lossy().to_string();
-                if let Ok(nat) = executor
-                    .run(
-                        AllowedBinary::Rustc,
-                        &["--edition", "2021", "-C", "opt-level=3", "-o", &native_str, &src_str],
-                        CMD_TIMEOUT,
-                    )
-                    .await
-                {
-                    if nat.success && native_out.exists() {
-                        if let Ok(bytes) = std::fs::read(&native_out) {
-                            artifact_bytes = bytes;
-                            engine_version = "Rust Native Edge Binary (rustc -O3)".to_string();
-                            cold_start_us = 180;
-                            status = "deployed".to_string();
-                        }
-                    } else {
-                        engine_version = "Rust Source Verified (install wasm32-wasip2 target)".to_string();
-                        status = "deployed".to_string();
-                    }
-                }
-            }
+        if out.success && wasm_out.exists() {
+            artifact_bytes = std::fs::read(&wasm_out)?;
+            engine_version = format!("Wasmtime WASI ({target_arg} compiled)");
+            cold_start_us = start.elapsed().as_micros() as u64;
+            status = "deployed".to_string();
+        } else if is_production_vps(config) {
+            return Err(PanelError::CommandFailed {
+                binary: "rustc",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
         }
     }
 
     let hash = sha256_hex(&artifact_bytes);
-    let mem_used_kb = ((artifact_bytes.len() as u64) / 1024).max(256);
+    let mem_used_kb = ((artifact_bytes.len() as u64) / 1024).max(1);
 
     data.wasi_workers.insert(
         0,
@@ -451,18 +435,14 @@ pub async fn deploy_wasi_worker(
             } else {
                 target_domain.trim().to_string()
             },
-            wasi_target: if wasi_target.trim().is_empty() {
-                "wasm32-wasip2".to_string()
-            } else {
-                wasi_target.trim().to_string()
-            },
+            wasi_target: target_arg,
             engine_version,
             cold_start_us,
             memory_limit_kb: memory_limit_kb.max(1024),
             memory_used_kb: mem_used_kb,
             fuel_limit: fuel_limit.max(10_000),
-            invocations_24h: 1,
-            avg_execution_us: 180,
+            invocations_24h: 0,
+            avg_execution_us: 0,
             blake3_hash: hash,
             kv_namespace: kv_namespace.trim().to_string(),
             status,
@@ -490,27 +470,44 @@ pub async fn invoke_wasi_worker(
     let src_path = worker_dir.join("worker.rs");
 
     let start = Instant::now();
-    let mut exec_mode = "artifact-verified";
-    let mut real_stdout: Option<String> = None;
-    let mut status_code: u16 = 200;
-
-    if wasm_path.exists() && AllowedBinary::Wasmtime.is_available() {
+    let (exec_mode, status_code, response_body) = if wasm_path.exists()
+        && executor.is_binary_available(AllowedBinary::Wasmtime)
+    {
         let wasm_str = wasm_path.to_string_lossy().to_string();
-        if let Ok(out) = executor
-            .run(AllowedBinary::Wasmtime, &[&wasm_str], CMD_TIMEOUT)
-            .await
-        {
-            exec_mode = "wasmtime-real";
-            if out.success {
-                real_stdout = Some(out.stdout.trim().to_string());
-            } else {
-                status_code = 500;
-                real_stdout = Some(out.stderr.trim().to_string());
-            }
+        let out = executor
+            .run(AllowedBinary::Wasmtime, &["--", &wasm_str], CMD_TIMEOUT)
+            .await?;
+        if out.success {
+            ("wasmtime-real", 200u16, out.stdout.trim().to_string())
+        } else {
+            return Err(PanelError::CommandFailed {
+                binary: "wasmtime",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
         }
-    }
+    } else if is_production_vps(config) {
+        return Err(PanelError::Conflict(
+            "không thể thực thi WASI worker: thiếu binary `wasmtime` hoặc chưa biên dịch artifact worker.wasm (tính năng thử nghiệm — cài đặt wasmtime từ https://wasmtime.dev)".to_string(),
+        ));
+    } else {
+        (
+            "test-mode",
+            200u16,
+            serde_json::json!({
+                "ok": true,
+                "worker": worker.name,
+                "mode": "test-mode",
+            })
+            .to_string(),
+        )
+    };
 
-    let elapsed_us = (start.elapsed().as_micros() as u64).max(12);
+    let elapsed_us = (start.elapsed().as_micros() as u64).max(1);
     let verified_hash = if let Ok(bytes) = std::fs::read(&wasm_path).or_else(|_| std::fs::read(&src_path)) {
         sha256_hex(&bytes)
     } else {
@@ -526,21 +523,7 @@ pub async fn invoke_wasi_worker(
     headers.insert("content-type".to_string(), "application/json".to_string());
     headers.insert("x-wasi-engine".to_string(), worker.engine_version.clone());
     headers.insert("x-execution-mode".to_string(), exec_mode.to_string());
-    headers.insert("x-blake3-digest".to_string(), verified_hash.clone());
-
-    let response_body = if let Some(stdout) = real_stdout.filter(|s| !s.is_empty()) {
-        stdout
-    } else {
-        serde_json::json!({
-            "ok": status_code == 200,
-            "worker": worker.name,
-            "target": worker.wasi_target,
-            "executionMode": exec_mode,
-            "kvNamespace": worker.kv_namespace,
-            "invocations24h": worker.invocations_24h
-        })
-        .to_string()
-    };
+    headers.insert("x-sha256-digest".to_string(), verified_hash.clone());
 
     let res = WasiWorkerInvokeResult {
         worker_id: worker.id.clone(),
@@ -590,7 +573,7 @@ pub async fn delete_wasi_worker(
     data.wasi_workers.retain(|w| w.id != id);
     let worker_dir = config.data_dir.join("edge-cloud").join("wasi").join(id);
     if worker_dir.exists() {
-        let _ = std::fs::remove_dir_all(&worker_dir);
+        std::fs::remove_dir_all(&worker_dir)?;
     }
     store.put_json(KV_EDGE_CLOUD, &data)?;
     Ok(data)
@@ -629,47 +612,51 @@ pub async fn deploy_oci_container(
         runtime_engine.trim().to_string()
     };
     let mut status = "staged".to_string();
-    let mut uptime = "Staged (install podman or docker to run)".to_string();
+    let mut uptime = "test-mode".to_string();
 
     if is_production_vps(config) {
-        if let Some((oci_bin, label)) = pick_oci_binary(runtime_engine) {
-            let port_map = format!("127.0.0.1:{h_port}:{c_port}");
-            let mem_arg = format!("{mem_mb}m");
-            let out = executor
-                .run(
-                    oci_bin,
-                    &[
-                        "run",
-                        "-d",
-                        "--name",
-                        &cname,
-                        "--restart",
-                        "unless-stopped",
-                        "-p",
-                        &port_map,
-                        "--memory",
-                        &mem_arg,
-                        &clean_image,
-                    ],
-                    APT_TIMEOUT,
-                )
-                .await?;
-            if !out.success {
-                let err = if out.stderr.trim().is_empty() {
-                    out.stdout.trim().to_string()
-                } else {
-                    out.stderr.trim().to_string()
-                };
-                return Err(PanelError::CommandFailed {
-                    binary: oci_bin.label(),
-                    exit_code: out.exit_code,
-                    stderr: err,
-                });
-            }
-            resolved_engine = label.to_string();
-            status = "running".to_string();
-            uptime = "Just started".to_string();
+        let Some((oci_bin, label)) = pick_oci_binary(executor, runtime_engine) else {
+            return Err(PanelError::Conflict(
+                "thiếu container runtime (podman hoặc docker) — gợi ý: sudo apt install -y podman".to_string(),
+            ));
+        };
+        let port_map = format!("127.0.0.1:{h_port}:{c_port}");
+        let mem_arg = format!("{mem_mb}m");
+        let out = executor
+            .run(
+                oci_bin,
+                &[
+                    "run",
+                    "-d",
+                    "--name",
+                    &cname,
+                    "--restart",
+                    "unless-stopped",
+                    "-p",
+                    &port_map,
+                    "--memory",
+                    &mem_arg,
+                    "--",
+                    &clean_image,
+                ],
+                APT_TIMEOUT,
+            )
+            .await?;
+        if !out.success {
+            let err = if out.stderr.trim().is_empty() {
+                out.stdout.trim().to_string()
+            } else {
+                out.stderr.trim().to_string()
+            };
+            return Err(PanelError::CommandFailed {
+                binary: oci_bin.label(),
+                exit_code: out.exit_code,
+                stderr: err,
+            });
         }
+        resolved_engine = label.to_string();
+        status = "running".to_string();
+        uptime = "Just started".to_string();
     }
 
     let oci_dir = config.data_dir.join("edge-cloud").join("oci");
@@ -700,10 +687,10 @@ pub async fn deploy_oci_container(
             host_port: h_port,
             container_port: c_port,
             memory_max_mb: mem_mb,
-            memory_used_mb: if status == "running" { 16.2 } else { 0.0 },
+            memory_used_mb: 0.0,
             cpu_quota_percent: cpu_quota_percent.clamp(10.0, 800.0),
-            cpu_usage_percent: if status == "running" { 0.8 } else { 0.0 },
-            pids_current: if status == "running" { 2 } else { 0 },
+            cpu_usage_percent: 0.0,
+            pids_current: 0,
             pids_max: 256,
             seccomp_profile: "default-strict.json".to_string(),
             status,
@@ -734,19 +721,33 @@ pub async fn oci_container_action(
     let cname = format!("ferrous-{name}");
 
     if is_production_vps(config) {
-        if let Some((oci_bin, _)) = pick_oci_binary(&engine) {
-            let args: Vec<&str> = match action {
-                "start" => vec!["start", &cname],
-                "stop" => vec!["stop", &cname],
-                "restart" => vec!["restart", &cname],
-                "delete" => vec!["rm", "-f", &cname],
-                other => {
-                    return Err(PanelError::Validation(format!(
-                        "unsupported container action '{other}'"
-                    )));
-                }
-            };
-            let _ = executor.run(oci_bin, &args, CMD_TIMEOUT).await;
+        let Some((oci_bin, _)) = pick_oci_binary(executor, &engine) else {
+            return Err(PanelError::Conflict(
+                "thiếu container runtime (podman hoặc docker) — gợi ý: sudo apt install -y podman".to_string(),
+            ));
+        };
+        let args: Vec<&str> = match action {
+            "start" => vec!["start", "--", &cname],
+            "stop" => vec!["stop", "--", &cname],
+            "restart" => vec!["restart", "--", &cname],
+            "delete" => vec!["rm", "-f", "--", &cname],
+            other => {
+                return Err(PanelError::Validation(format!(
+                    "unsupported container action '{other}'"
+                )));
+            }
+        };
+        let out = executor.run(oci_bin, &args, CMD_TIMEOUT).await?;
+        if !out.success {
+            return Err(PanelError::CommandFailed {
+                binary: oci_bin.label(),
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
         }
     }
 
@@ -758,7 +759,7 @@ pub async fn oci_container_action(
             .join("oci")
             .join(format!("{cname}.json"));
         if spec.exists() {
-            let _ = std::fs::remove_file(&spec);
+            std::fs::remove_file(&spec)?;
         }
         store.put_json(KV_EDGE_CLOUD, &data)?;
         return Ok(data);
@@ -769,11 +770,7 @@ pub async fn oci_container_action(
     };
     match action {
         "start" | "restart" => {
-            c.status = if is_production_vps(config) && pick_oci_binary(&c.runtime_engine).is_none() {
-                "staged".to_string()
-            } else {
-                "running".to_string()
-            };
+            c.status = "running".to_string();
             c.uptime = "0m".to_string();
         }
         "stop" => {
@@ -818,6 +815,12 @@ pub async fn add_wireguard_peer(
         validate_wg_token(allowed_ips, "allowed IPs")?
     };
 
+    if is_production_vps(config) && !executor.is_binary_available(AllowedBinary::Wg) {
+        return Err(PanelError::Conflict(
+            "thiếu wireguard-tools (`wg`) để tạo khóa Curve25519 thật (gợi ý: sudo apt install -y wireguard-tools)".to_string(),
+        ));
+    }
+
     let mut data = load_edge_cloud(store, config, executor).await?;
     let id = format!("wg-{:x}", Utc::now().timestamp_millis());
     let mesh_ip = clean_allowed
@@ -827,39 +830,43 @@ pub async fn add_wireguard_peer(
         .trim()
         .to_string();
 
-    let mut public_key = format!(
-        "WG25519{}=",
-        &sha256_hex(format!("{clean_name}:{clean_endpoint}:{id}").as_bytes())[..36]
-    );
-
-    if AllowedBinary::Wg.is_available() {
-        if let Ok(priv_out) = executor.run(AllowedBinary::Wg, &["genkey"], CMD_TIMEOUT).await {
-            let priv_key = priv_out.stdout.trim();
-            if priv_out.success && !priv_key.is_empty() {
-                if let Ok(pub_out) = executor
-                    .run_with_stdin(
-                        AllowedBinary::Wg,
-                        &["pubkey"],
-                        format!("{priv_key}\n").as_bytes(),
-                        CMD_TIMEOUT,
-                    )
-                    .await
-                {
-                    let derived = pub_out.stdout.trim();
-                    if pub_out.success && !derived.is_empty() {
-                        public_key = derived.to_string();
-                        let peers_dir = config.data_dir.join("edge-cloud").join("peers");
-                        std::fs::create_dir_all(&peers_dir)?;
-                        let _ = atomic_write_file(
-                            &peers_dir.join(format!("{id}.key")),
-                            format!("{priv_key}\n").as_bytes(),
-                            0o600,
-                        );
-                    }
-                }
-            }
+    let public_key = if executor.is_binary_available(AllowedBinary::Wg) {
+        let priv_out = executor.run(AllowedBinary::Wg, &["genkey"], CMD_TIMEOUT).await?;
+        let priv_key = priv_out.stdout.trim();
+        if !priv_out.success || priv_key.is_empty() {
+            return Err(PanelError::CommandFailed {
+                binary: "wg",
+                exit_code: priv_out.exit_code,
+                stderr: priv_out.stderr,
+            });
         }
-    }
+        let pub_out = executor
+            .run_with_stdin(
+                AllowedBinary::Wg,
+                &["pubkey"],
+                format!("{priv_key}\n").as_bytes(),
+                CMD_TIMEOUT,
+            )
+            .await?;
+        let derived = pub_out.stdout.trim();
+        if !pub_out.success || derived.is_empty() {
+            return Err(PanelError::CommandFailed {
+                binary: "wg",
+                exit_code: pub_out.exit_code,
+                stderr: pub_out.stderr,
+            });
+        }
+        let peers_dir = config.data_dir.join("edge-cloud").join("peers");
+        std::fs::create_dir_all(&peers_dir)?;
+        atomic_write_file(
+            &peers_dir.join(format!("{id}.key")),
+            format!("{priv_key}\n").as_bytes(),
+            0o600,
+        )?;
+        derived.to_string()
+    } else {
+        "TEST_MODE_WG_PUBKEY".to_string()
+    };
 
     data.wireguard_peers.insert(
         0,
@@ -869,7 +876,7 @@ pub async fn add_wireguard_peer(
             region: clean_region,
             interface_name: "wg0".to_string(),
             public_key: public_key.clone(),
-            preshared_key_masked: "psk-••••-chacha20poly1305".to_string(),
+            preshared_key_masked: "unset".to_string(),
             endpoint: clean_endpoint,
             allowed_ips: clean_allowed.clone(),
             mesh_ip,
@@ -884,8 +891,8 @@ pub async fn add_wireguard_peer(
     );
 
     sync_wireguard_config(config, &data, executor).await?;
-    if is_production_vps(config) && AllowedBinary::Wg.is_available() {
-        let _ = executor
+    if is_production_vps(config) {
+        let out = executor
             .run(
                 AllowedBinary::Wg,
                 &[
@@ -900,7 +907,18 @@ pub async fn add_wireguard_peer(
                 ],
                 CMD_TIMEOUT,
             )
-            .await;
+            .await?;
+        if !out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "wg",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
+        }
     }
 
     store.put_json(KV_EDGE_CLOUD, &data)?;
@@ -927,9 +945,14 @@ pub async fn toggle_wireguard_peer(
     };
 
     sync_wireguard_config(config, &data, executor).await?;
-    if is_production_vps(config) && AllowedBinary::Wg.is_available() {
-        if now_connected {
-            let _ = executor
+    if is_production_vps(config) {
+        if !executor.is_binary_available(AllowedBinary::Wg) {
+            return Err(PanelError::Conflict(
+                "thiếu wireguard-tools (`wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+            ));
+        }
+        let out = if now_connected {
+            executor
                 .run(
                     AllowedBinary::Wg,
                     &[
@@ -944,15 +967,26 @@ pub async fn toggle_wireguard_peer(
                     ],
                     CMD_TIMEOUT,
                 )
-                .await;
+                .await?
         } else {
-            let _ = executor
+            executor
                 .run(
                     AllowedBinary::Wg,
                     &["set", "wg0", "peer", &pubkey, "remove"],
                     CMD_TIMEOUT,
                 )
-                .await;
+                .await?
+        };
+        if !out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "wg",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
         }
     }
 
@@ -975,15 +1009,31 @@ pub async fn delete_wireguard_peer(
     data.wireguard_peers.retain(|p| p.id != id);
 
     sync_wireguard_config(config, &data, executor).await?;
-    if is_production_vps(config) && AllowedBinary::Wg.is_available() {
+    if is_production_vps(config) {
+        if !executor.is_binary_available(AllowedBinary::Wg) {
+            return Err(PanelError::Conflict(
+                "thiếu wireguard-tools (`wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+            ));
+        }
         if let Some(pubkey) = removed_pubkey {
-            let _ = executor
+            let out = executor
                 .run(
                     AllowedBinary::Wg,
                     &["set", "wg0", "peer", &pubkey, "remove"],
                     CMD_TIMEOUT,
                 )
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "wg",
+                    exit_code: out.exit_code,
+                    stderr: if out.stderr.trim().is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    },
+                });
+            }
         }
     }
     let key_file = config
@@ -992,7 +1042,7 @@ pub async fn delete_wireguard_peer(
         .join("peers")
         .join(format!("{id}.key"));
     if key_file.exists() {
-        let _ = std::fs::remove_file(&key_file);
+        std::fs::remove_file(&key_file)?;
     }
 
     store.put_json(KV_EDGE_CLOUD, &data)?;
@@ -1042,7 +1092,7 @@ pub async fn create_blake3_snapshot(
     std::fs::create_dir_all(&source_dir)?;
     let logical_bytes = dir_size_bytes(&source_dir).max(4096);
 
-    let use_zstd = AllowedBinary::Zstd.is_available();
+    let use_zstd = executor.is_binary_available(AllowedBinary::Zstd);
     let (archive_path, compression_label) = if use_zstd {
         (snap_dir.join(format!("{id}.tar.zst")), "Zstd (tar --zstd)")
     } else {
@@ -1054,7 +1104,13 @@ pub async fn create_blake3_snapshot(
         format!("{clean_name}:{}:{id}", source_dir.display()).as_bytes(),
     );
 
-    if AllowedBinary::Tar.is_available() {
+    if !executor.is_binary_available(AllowedBinary::Tar) {
+        if is_production_vps(config) {
+            return Err(PanelError::Conflict(
+                "thiếu binary `tar` để tạo snapshot (gợi ý: sudo apt install -y tar zstd)".to_string(),
+            ));
+        }
+    } else {
         let archive_str = archive_path.to_string_lossy().to_string();
         let src_str = source_dir.to_string_lossy().to_string();
         let tar_args: Vec<&str> = if use_zstd {
@@ -1063,11 +1119,21 @@ pub async fn create_blake3_snapshot(
             vec!["-czf", &archive_str, "-C", &src_str, "."]
         };
         let out = executor.run(AllowedBinary::Tar, &tar_args, APT_TIMEOUT).await?;
-        if out.success && archive_path.exists() {
-            if let Ok(bytes) = std::fs::read(&archive_path) {
-                stored_bytes = (bytes.len() as u64).max(1);
-                merkle = sha256_hex(&bytes);
-            }
+        if !out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "tar",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
+        }
+        if archive_path.exists() {
+            let bytes = std::fs::read(&archive_path)?;
+            stored_bytes = (bytes.len() as u64).max(1);
+            merkle = sha256_hex(&bytes);
         }
     }
 
@@ -1115,7 +1181,7 @@ pub async fn delete_blake3_snapshot(
     for ext in ["tar.zst", "tar.gz"] {
         let p = snap_dir.join(format!("{id}.{ext}"));
         if p.exists() {
-            let _ = std::fs::remove_file(&p);
+            std::fs::remove_file(&p)?;
         }
     }
     store.put_json(KV_EDGE_CLOUD, &data)?;

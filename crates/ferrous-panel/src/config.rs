@@ -1,6 +1,23 @@
 use crate::cli::PanelCommand;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+/// Explicit runtime mode replacing fragile path-based production detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RuntimeMode {
+    Production,
+    Test,
+}
+
+impl RuntimeMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Production => "production",
+            Self::Test => "test",
+        }
+    }
+}
 
 /// Runtime configuration parsed from CLI flags and environment variables.
 #[derive(Debug, Clone, Parser)]
@@ -10,6 +27,10 @@ use std::path::PathBuf;
     about = "FerrousPanel pure-Rust VPS control plane server"
 )]
 pub struct Config {
+    /// Explicit execution mode (`production` enforces real host binaries & verification; `test` is for isolated unit/integration tests).
+    #[arg(long, env = "FERROUS_MODE", value_enum, default_value_t = RuntimeMode::Production)]
+    pub mode: RuntimeMode,
+
     /// Listen host address (defaults strictly to loopback 127.0.0.1).
     #[arg(long, env = "FERROUS_BIND", default_value = "127.0.0.1")]
     pub bind: String,
@@ -69,6 +90,11 @@ pub struct Config {
 
 impl Config {
     #[must_use]
+    pub const fn is_production(&self) -> bool {
+        matches!(self.mode, RuntimeMode::Production)
+    }
+
+    #[must_use]
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("panel.db")
     }
@@ -97,6 +123,7 @@ impl Config {
         let backups_dir = data_dir.join("backups");
         let systemd_unit_dir = data_dir.join("systemd");
         Self {
+            mode: RuntimeMode::Test,
             bind: "127.0.0.1".to_string(),
             port: 8443,
             pma_port: 0,

@@ -1,6 +1,7 @@
 // FerrousPanel Pure-Rust UI — Security, Optimizer/Diagnostics, SSH/Terminal, Jobs & Panel Settings
 import {
-  api, esc, fmtTime, statusClass, toast, openModal, closeModal, openJobDrawer, handleLogout,
+  api, esc, fmtTime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer, handleLogout,
+  capBannerHtml, capDisabledAttr, withBusy,
 } from './app.js';
 
 // ============================================================================
@@ -16,19 +17,25 @@ export async function renderSecurity(container) {
   const jails = sec.fail2banJails || [];
   const hardening = sec.hardeningChecks || [];
   const waf = sec.wafRules || [];
-  const ddosMode = sec.ddosShield?.mode || 'normal';
+  const ddosMode = sec.ddosShield?.protectionMode || sec.ddosShield?.mode || 'normal';
+  const ufwDis = capDisabledAttr('ufw');
+  const f2bDis = capDisabledAttr('fail2ban');
+
+  const bannedRows = jails.flatMap((j) => (j.bannedIps || []).map((ip) => ({ jail: j.name, ip })));
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Bảo mật, Tường lửa UFW & Nhật ký kiểm toán</h1>
-        <p class="page-desc">Quản lý quy tắc UFW, Fail2ban, bảo vệ DDoS, WAF L7, quét toàn vẹn SHA-256 FIM và lịch sử thao tác quản trị.</p>
+        <p class="page-desc">Quản lý quy tắc UFW thật (kèm chống tự khóa cổng SSH/Panel), Fail2ban ban/unban, bảo vệ DDoS, WAF L7 và SHA-256 FIM.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="sec-fim-btn">Quét SHA-256 FIM</button>
-        <button type="button" class="btn btn-primary" id="sec-add-ufw">Thêm luật UFW</button>
+        <button type="button" class="btn btn-primary" id="sec-add-ufw" ${ufwDis}>Thêm luật UFW</button>
       </div>
     </div>
+
+    ${capBannerHtml(['ufw', 'fail2ban', 'ebpf_xdp'])}
 
     <div class="grid-2">
       <section class="surface">
@@ -53,8 +60,8 @@ export async function renderSecurity(container) {
                       <td>${esc(r.comment || r.source || '—')}</td>
                       <td class="right">
                         <div class="row" style="justify-content:flex-end">
-                          <button type="button" class="btn btn-sm" data-ufw-toggle="${esc(r.id)}">${r.enabled ? 'Tắt' : 'Bật'}</button>
-                          <button type="button" class="btn btn-sm btn-danger" data-ufw-del="${esc(r.id)}">Xóa</button>
+                          <button type="button" class="btn btn-sm" data-ufw-toggle="${esc(r.id)}" data-port="${esc(r.port)}" ${ufwDis}>${r.enabled ? 'Tắt' : 'Bật'}</button>
+                          <button type="button" class="btn btn-sm btn-danger" data-ufw-del="${esc(r.id)}" data-port="${esc(r.port)}" ${ufwDis}>Xóa</button>
                         </div>
                       </td>
                     </tr>`).join('')
@@ -67,12 +74,21 @@ export async function renderSecurity(container) {
 
       <section class="surface">
         <div class="surface-head">
-          <h2 class="surface-title">Fail2ban & Hardening (${hardening.length})</h2>
-          <button type="button" class="btn btn-sm" id="sec-ban-ip">Chặn IP</button>
+          <h2 class="surface-title">Fail2ban (${bannedRows.length} IP đang bị chặn) & Hardening</h2>
+          <button type="button" class="btn btn-sm" id="sec-ban-ip" ${f2bDis}>Chặn IP</button>
         </div>
         <div class="meta-line" style="margin-bottom:10px">
-          ${jails.map((j) => `<span>${esc(j.name)}: <strong class="mono">${esc((j.bannedIps || []).length)}</strong> IP bị chặn</span>`).join('<span>·</span>') || '<span>Fail2ban sẵn sàng</span>'}
+          ${jails.map((j) => `<span>${esc(j.name)}: <strong class="mono">${esc((j.bannedIps || []).length)}</strong> IP</span>`).join('<span>·</span>') || '<span>Fail2ban sẵn sàng</span>'}
         </div>
+        ${bannedRows.length ? `
+          <div class="row" style="margin-bottom:12px">
+            ${bannedRows.map((b) => `
+              <button type="button" class="btn btn-sm btn-danger" data-unban-ip="${esc(b.ip)}" data-unban-jail="${esc(b.jail)}" ${f2bDis}>
+                Gỡ chặn ${esc(b.ip)} (${esc(b.jail)})
+              </button>
+            `).join('')}
+          </div>
+        ` : ''}
         <div class="table-wrap">
           <table class="data-table">
             <thead><tr><th>Cấu hình bảo mật hệ thống</th><th>Trạng thái</th><th class="right">Chuyển đổi</th></tr></thead>
@@ -92,9 +108,7 @@ export async function renderSecurity(container) {
     </div>
 
     <section class="surface">
-      <div class="surface-head">
-        <h2 class="surface-title">L7 WAF Rules (${waf.length})</h2>
-      </div>
+      <div class="surface-head"><h2 class="surface-title">L7 WAF Rules (${waf.length})</h2></div>
       <div class="row">
         ${waf.map((w) => `
           <button type="button" class="btn btn-sm" data-waf-toggle="${esc(w.id)}">
@@ -104,9 +118,7 @@ export async function renderSecurity(container) {
     </section>
 
     <section class="surface">
-      <div class="surface-head">
-        <h2 class="surface-title">Nhật ký kiểm toán bảo mật (${auditLogs.length} sự kiện gần nhất)</h2>
-      </div>
+      <div class="surface-head"><h2 class="surface-title">Nhật ký kiểm toán bảo mật (${auditLogs.length} sự kiện gần nhất)</h2></div>
       <div class="table-wrap">
         <table class="data-table">
           <thead><tr><th>Thời gian</th><th>Tài khoản</th><th>IP</th><th>Hành động</th><th>Chi tiết</th></tr></thead>
@@ -129,13 +141,14 @@ export async function renderSecurity(container) {
     </section>
   `;
 
-  document.getElementById('sec-fim-btn')?.addEventListener('click', async () => {
+  const fimBtn = document.getElementById('sec-fim-btn');
+  fimBtn?.addEventListener('click', () => withBusy(fimBtn, async () => {
     try {
       await api('POST', '/api/security/fim-scan', {});
       toast('Đã hoàn tất quét toàn vẹn SHA-256 FIM.');
       await renderSecurity(container);
     } catch (err) { toast(err.message, 'err'); }
-  });
+  }));
 
   document.getElementById('sec-add-ufw')?.addEventListener('click', () => {
     openModal('Thêm quy tắc tường lửa UFW', `
@@ -146,25 +159,27 @@ export async function renderSecurity(container) {
           <div class="field"><label>Hành động</label><select class="select" name="action"><option value="ALLOW">ALLOW</option><option value="DENY">DENY</option></select></div>
           <div class="field"><label>Ghi chú</label><input class="input" name="comment" placeholder="Custom service" /></div>
         </div>
-        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary">Áp dụng luật</button></div>
+        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="ufw-sub">Áp dụng luật</button></div>
       </form>
     `, {
       onMount(body) {
         body.querySelector('#ufw-form')?.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const fd = new FormData(e.target);
-          try {
-            await api('POST', '/api/security/ufw', {
-              port: fd.get('port'),
-              protocol: fd.get('protocol'),
-              action: fd.get('action'),
-              source: 'Anywhere',
-              comment: fd.get('comment') || '',
-            });
-            closeModal();
-            toast('Đã thêm quy tắc UFW.');
-            await renderSecurity(container);
-          } catch (err) { toast(err.message, 'err'); }
+          await withBusy(body.querySelector('#ufw-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/security/ufw', {
+                port: fd.get('port'),
+                protocol: fd.get('protocol'),
+                action: fd.get('action'),
+                source: 'Anywhere',
+                comment: fd.get('comment') || '',
+              });
+              closeModal();
+              toast('Đã thêm quy tắc UFW và xác nhận qua ufw status.');
+              await renderSecurity(container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
         });
       },
     });
@@ -175,48 +190,89 @@ export async function renderSecurity(container) {
       <form id="ban-form">
         <div class="field"><label>Địa chỉ IP</label><input class="input mono" name="ip" placeholder="203.0.113.10" required /></div>
         <div class="field"><label>Jail</label><input class="input mono" name="jailName" value="sshd" required /></div>
-        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-danger">Chặn IP ngay</button></div>
+        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-danger" id="ban-sub">Chặn IP ngay</button></div>
       </form>
     `, {
       onMount(body) {
         body.querySelector('#ban-form')?.addEventListener('submit', async (e) => {
           e.preventDefault();
-          const fd = new FormData(e.target);
-          try {
-            await api('POST', '/api/security/fail2ban/ban', { jailName: fd.get('jailName'), ip: fd.get('ip') });
-            closeModal();
-            toast('Đã chặn IP.');
-            await renderSecurity(container);
-          } catch (err) { toast(err.message, 'err'); }
+          await withBusy(body.querySelector('#ban-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/security/fail2ban/ban', { jailName: fd.get('jailName'), ip: fd.get('ip') });
+              closeModal();
+              toast('Đã chặn IP qua fail2ban-client.');
+              await renderSecurity(container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
         });
       },
     });
   });
 
-  container.querySelectorAll('[data-ddos-mode]').forEach((b) => b.addEventListener('click', async () => {
+  container.querySelectorAll('[data-unban-ip]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Gỡ chặn IP Fail2ban', `Xác nhận gỡ chặn IP ${b.dataset.unbanIp} khỏi jail ${b.dataset.unbanJail}?`, () => withBusy(b, async () => {
+      try {
+        await api('POST', '/api/security/fail2ban/unban', { jailName: b.dataset.unbanJail, ip: b.dataset.unbanIp });
+        toast(`Đã gỡ chặn ${b.dataset.unbanIp}.`);
+        await renderSecurity(container);
+      } catch (err) { toast(err.message, 'err'); }
+    }), false);
+  }));
+
+  container.querySelectorAll('[data-ddos-mode]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
     try { await api('POST', '/api/security/ddos-mode', { mode: b.dataset.ddosMode }); toast(`Đã chuyển Anti-DDoS sang ${b.dataset.ddosMode}`); await renderSecurity(container); }
     catch (err) { toast(err.message, 'err'); }
+  })));
+
+  container.querySelectorAll('[data-ufw-toggle]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Thay đổi luật UFW', `Xác nhận bật/tắt quy tắc cổng ${b.dataset.port}?`, () => withBusy(b, async () => {
+      try { await api('PUT', `/api/security/ufw/${encodeURIComponent(b.dataset.ufwToggle)}/toggle`, {}); await renderSecurity(container); }
+      catch (err) { toast(err.message, 'err'); }
+    }));
   }));
-  container.querySelectorAll('[data-ufw-toggle]').forEach((b) => b.addEventListener('click', async () => {
-    try { await api('PUT', `/api/security/ufw/${encodeURIComponent(b.dataset.ufwToggle)}/toggle`, {}); await renderSecurity(container); }
-    catch (err) { toast(err.message, 'err'); }
+
+  container.querySelectorAll('[data-ufw-del]').forEach((b) => b.addEventListener('click', () => {
+    const id = b.dataset.ufwDel;
+    const port = b.dataset.port;
+    confirmAction('Xóa luật tường lửa UFW', `Xác nhận xóa quy tắc UFW cho cổng ${port}?`, () => withBusy(b, async () => {
+      try {
+        await api('DELETE', `/api/security/ufw/${encodeURIComponent(id)}`);
+        toast(`Đã xóa luật UFW cổng ${port}.`);
+        await renderSecurity(container);
+      } catch (err) {
+        if (err.status === 409) {
+          confirmAction(
+            'Cảnh báo chống tự khóa máy chủ!',
+            `${err.message}\n\nBạn có CHẮC CHẮN muốn ép xóa (force=true) quy tắc bảo vệ cổng ${port} này không?`,
+            async () => {
+              try {
+                await api('DELETE', `/api/security/ufw/${encodeURIComponent(id)}?force=true`);
+                toast(`Đã ép xóa luật UFW cổng ${port}.`);
+                await renderSecurity(container);
+              } catch (err2) { toast(err2.message, 'err'); }
+            },
+          );
+        } else {
+          toast(err.message, 'err');
+        }
+      }
+    }));
   }));
-  container.querySelectorAll('[data-ufw-del]').forEach((b) => b.addEventListener('click', async () => {
-    try { await api('DELETE', `/api/security/ufw/${encodeURIComponent(b.dataset.ufwDel)}`); await renderSecurity(container); }
-    catch (err) { toast(err.message, 'err'); }
-  }));
-  container.querySelectorAll('[data-harden-id]').forEach((b) => b.addEventListener('click', async () => {
+
+  container.querySelectorAll('[data-harden-id]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
     try { await api('PUT', `/api/security/hardening/${encodeURIComponent(b.dataset.hardenId)}`, {}); await renderSecurity(container); }
     catch (err) { toast(err.message, 'err'); }
-  }));
-  container.querySelectorAll('[data-waf-toggle]').forEach((b) => b.addEventListener('click', async () => {
+  })));
+
+  container.querySelectorAll('[data-waf-toggle]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
     try { await api('PUT', `/api/security/waf/${encodeURIComponent(b.dataset.wafToggle)}/toggle`, {}); await renderSecurity(container); }
     catch (err) { toast(err.message, 'err'); }
-  }));
+  })));
 }
 
 // ============================================================================
-// 10. SYSTEM OPTIMIZER & DIAGNOSTICS
+// 10. SYSTEM OPTIMIZER, KERNEL SYSCTL, ANTI-CRASH GUARD & DIAGNOSTICS
 // ============================================================================
 export async function renderOptimizer(container) {
   const [opt, diag] = await Promise.all([
@@ -226,18 +282,23 @@ export async function renderOptimizer(container) {
 
   const profiles = opt.profiles || [];
   const activeId = opt.activeProfileId || '';
+  const sysctls = opt.sysctlParams || [];
+  const guard = opt.antiCrashGuard || {};
+  const optDis = capDisabledAttr('optimizer_sysctl');
 
   container.innerHTML = `
     <div class="page-head">
       <div>
-        <h1 class="page-title">Tối ưu hệ thống & Chẩn đoán VPS</h1>
-        <p class="page-desc">Áp dụng cấu hình sysctl tối ưu, giải phóng bộ nhớ đệm, tự phục hồi watchdog và kiểm tra sức khỏe hạ tầng.</p>
+        <h1 class="page-title">Tối ưu hệ thống, Kernel Sysctl & Chẩn đoán VPS</h1>
+        <p class="page-desc">Áp dụng /etc/sysctl.d/99-ferrous-optimizer.conf kèm đọc lại /proc/sys + rollback, Anti-Crash Guard và Watchdog.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="opt-reclaim">Giải phóng RAM</button>
         <button type="button" class="btn btn-primary" id="opt-heal">Chạy Watchdog Heal</button>
       </div>
     </div>
+
+    ${capBannerHtml(['optimizer_sysctl'])}
 
     <div class="grid-3">
       ${profiles.map((p) => `
@@ -247,10 +308,52 @@ export async function renderOptimizer(container) {
             <span class="${p.id === activeId ? 'st-ok' : 'st-muted'}">${p.id === activeId ? 'Đang dùng' : esc(p.badge || '')}</span>
           </div>
           <p class="page-desc" style="margin-bottom:12px">${esc(p.description || '')}</p>
-          <button type="button" class="btn btn-sm ${p.id === activeId ? '' : 'btn-primary'}" data-opt-profile="${esc(p.id)}" ${p.id === activeId ? 'disabled' : ''}>
+          <button type="button" class="btn btn-sm ${p.id === activeId ? '' : 'btn-primary'}" data-opt-profile="${esc(p.id)}" ${p.id === activeId ? 'disabled' : optDis}>
             ${p.id === activeId ? 'Đã kích hoạt' : 'Áp dụng hồ sơ'}
           </button>
         </section>`).join('')}
+    </div>
+
+    <div class="grid-2">
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">Tham số Kernel Sysctl (đọc thật từ /proc/sys)</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Key</th><th>Giá trị thật</th><th>Khuyến nghị</th><th class="right">Bật/Tắt</th></tr></thead>
+            <tbody>
+              ${
+                sysctls.map((s) => `
+                  <tr>
+                    <td class="mono"><strong>${esc(s.key)}</strong></td>
+                    <td class="mono">${esc(s.currentValue)}</td>
+                    <td class="mono">${esc(s.recommendedValue)}</td>
+                    <td class="right"><button type="button" class="btn btn-sm" data-sysctl-toggle="${esc(s.id)}" ${optDis}>${s.enabled ? 'Đang bật' : 'Đã tắt'}</button></td>
+                  </tr>`).join('')
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">Anti-Crash Guard & Cứu hộ khẩn cấp</h2></div>
+        <form id="opt-ac-form" style="margin-bottom:14px">
+          <div class="form-grid">
+            <div class="field"><label>Ngưỡng xả tải CPU (%)</label><input class="input mono" name="cpuShedThresholdPercent" type="number" min="50" max="99" value="${esc(guard.cpuShedThresholdPercent || 92)}" /></div>
+            <div class="field"><label>Ngưỡng xả tải RAM (%)</label><input class="input mono" name="ramShedThresholdPercent" type="number" min="50" max="99" value="${esc(guard.ramShedThresholdPercent || 90)}" /></div>
+          </div>
+          <div class="row" style="justify-content:space-between">
+            <label class="checkbox-row"><input type="checkbox" name="loadSheddingEnabled" ${guard.loadSheddingEnabled !== false ? 'checked' : ''} /><span>Bật Load Shedding</span></label>
+            <button type="submit" class="btn btn-sm btn-primary" id="opt-ac-sub">Lưu ngưỡng</button>
+          </div>
+        </form>
+        <hr class="divider" />
+        <div class="row">
+          <button type="button" class="btn btn-sm btn-danger" data-mitigate="purge_syn_backlog" ${optDis}>Chống SYN Backlog</button>
+          <button type="button" class="btn btn-sm btn-danger" data-mitigate="isolate_leaking_workers">Giải phóng & Reload PHP</button>
+          <button type="button" class="btn btn-sm btn-danger" data-mitigate="reset_hung_db_queries">Reload DB Engine</button>
+        </div>
+      </section>
     </div>
 
     <section class="surface">
@@ -275,99 +378,177 @@ export async function renderOptimizer(container) {
     </section>
   `;
 
-  document.getElementById('opt-reclaim')?.addEventListener('click', async () => {
-    try { await api('POST', '/api/optimizer/reclaim-memory', {}); toast('Đã giải phóng bộ nhớ đệm.'); await renderOptimizer(container); }
+  const recBtn = document.getElementById('opt-reclaim');
+  recBtn?.addEventListener('click', () => withBusy(recBtn, async () => {
+    try { const r = await api('POST', '/api/optimizer/reclaim-memory', {}); toast(r.message || 'Đã giải phóng bộ nhớ đệm.'); await renderOptimizer(container); }
     catch (err) { toast(err.message, 'err'); }
+  }));
+
+  const healBtn = document.getElementById('opt-heal');
+  healBtn?.addEventListener('click', () => withBusy(healBtn, async () => {
+    try { await api('POST', '/api/optimizer/watchdog-heal', {}); toast('Đã hoàn tất kiểm tra & phục hồi dịch vụ.'); await renderOptimizer(container); }
+    catch (err) { toast(err.message, 'err'); }
+  }));
+
+  container.querySelectorAll('[data-opt-profile]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
+    try { await api('POST', '/api/optimizer/apply-profile', { profileId: b.dataset.optProfile }); toast('Đã áp dụng hồ sơ sysctl và xác nhận qua /proc/sys.'); await renderOptimizer(container); }
+    catch (err) { toast(err.message, 'err'); }
+  })));
+
+  container.querySelectorAll('[data-sysctl-toggle]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
+    try { await api('PUT', `/api/optimizer/sysctl/${encodeURIComponent(b.dataset.sysctlToggle)}`, {}); toast('Đã cập nhật sysctl.'); await renderOptimizer(container); }
+    catch (err) { toast(err.message, 'err'); }
+  })));
+
+  document.getElementById('opt-ac-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await withBusy(document.getElementById('opt-ac-sub'), async () => {
+      const fd = new FormData(e.target);
+      try {
+        await api('PUT', '/api/optimizer/anti-crash', {
+          loadSheddingEnabled: fd.get('loadSheddingEnabled') === 'on',
+          cpuShedThresholdPercent: Number(fd.get('cpuShedThresholdPercent') || 92),
+          ramShedThresholdPercent: Number(fd.get('ramShedThresholdPercent') || 90),
+        });
+        toast('Đã lưu ngưỡng Anti-Crash Guard.');
+      } catch (err) { toast(err.message, 'err'); }
+    });
   });
-  document.getElementById('opt-heal')?.addEventListener('click', async () => {
-    try { await api('POST', '/api/optimizer/watchdog-heal', {}); toast('Đã chạy chu kỳ kiểm tra & phục hồi dịch vụ.'); await renderOptimizer(container); }
-    catch (err) { toast(err.message, 'err'); }
-  });
-  container.querySelectorAll('[data-opt-profile]').forEach((b) => b.addEventListener('click', async () => {
-    try { await api('POST', '/api/optimizer/apply-profile', { profileId: b.dataset.optProfile }); toast('Đã áp dụng hồ sơ tối ưu.'); await renderOptimizer(container); }
-    catch (err) { toast(err.message, 'err'); }
+
+  container.querySelectorAll('[data-mitigate]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Thực thi cứu hộ khẩn cấp', `Xác nhận chạy biện pháp "${b.textContent.trim()}" trên VPS?`, () => withBusy(b, async () => {
+      try {
+        const res = await api('POST', '/api/optimizer/emergency-mitigate', { action: b.dataset.mitigate });
+        toast(res.message || 'Đã thực thi biện pháp cứu hộ.');
+        await renderOptimizer(container);
+      } catch (err) { toast(err.message, 'err'); }
+    }));
   }));
 }
 
 // ============================================================================
-// 11. SSH & WEB TERMINAL
+// 11. SSH & WEB TERMINAL (PORT CONFIRM + REAL OUTPUT + ACTIVE SESSIONS)
 // ============================================================================
 export async function renderSsh(container) {
   const ssh = await api('GET', '/api/ssh');
   const cfg = ssh.config || {};
   const keys = ssh.authorizedKeys || [];
+  const sessions = ssh.activeSessions || [];
+  const sshDis = capDisabledAttr('ssh_manager');
+  const origPort = Number(cfg.port || 22);
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Quản trị SSH & Web Terminal</h1>
-        <p class="page-desc">Cấu hình OpenSSH daemon, tạo khóa Ed25519 và thực thi lệnh kiểm tra hệ thống an toàn qua allowlist.</p>
+        <p class="page-desc">Cấu hình OpenSSH daemon (kiểm tra sshd -t + rollback + xác nhận đổi cổng), khóa Ed25519 thật và lệnh chẩn đoán allowlist.</p>
       </div>
       <div class="row">
-        <button type="button" class="btn btn-primary" id="ssh-gen-key">Sinh cặp khóa Ed25519</button>
+        <button type="button" class="btn btn-primary" id="ssh-gen-key" ${sshDis}>Sinh cặp khóa Ed25519</button>
       </div>
     </div>
+
+    ${capBannerHtml(['ssh_manager'])}
 
     <div class="grid-2">
       <section class="surface">
         <div class="surface-head"><h2 class="surface-title">Cấu hình SSHD (${esc(ssh.serverHost || 'localhost')})</h2></div>
         <form id="ssh-cfg-form">
           <div class="form-grid">
-            <div class="field"><label>Cổng SSH</label><input class="input mono" name="port" type="number" value="${esc(cfg.port || 22)}" /></div>
+            <div class="field"><label>Cổng SSH</label><input class="input mono" name="port" type="number" min="1" max="65535" value="${esc(origPort)}" /></div>
             <div class="field"><label>PermitRootLogin</label><input class="input mono" name="permitRootLogin" value="${esc(cfg.permitRootLogin || 'prohibit-password')}" /></div>
           </div>
           <div class="row" style="margin-bottom:14px">
             <label class="checkbox-row"><input type="checkbox" name="passwordAuthentication" ${cfg.passwordAuthentication ? 'checked' : ''} /><span>Cho phép đăng nhập mật khẩu</span></label>
             <label class="checkbox-row"><input type="checkbox" name="pubkeyAuthentication" ${cfg.pubkeyAuthentication !== false ? 'checked' : ''} /><span>Xác thực Public Key</span></label>
           </div>
-          <button type="submit" class="btn btn-primary">Lưu cấu hình SSH</button>
+          <button type="submit" class="btn btn-primary" id="ssh-cfg-sub" ${sshDis}>Lưu cấu hình SSH</button>
         </form>
       </section>
 
       <section class="surface">
         <div class="surface-head"><h2 class="surface-title">Web Terminal (Allowlist Command Runner)</h2></div>
         <form id="ssh-exec-form" class="row" style="margin-bottom:10px">
-          <input class="input mono" id="ssh-cmd-input" style="flex:1" placeholder="uname -a | df -h | systemctl status ferrous-panel" required />
-          <button type="submit" class="btn btn-primary">Thực thi</button>
+          <input class="input mono" id="ssh-cmd-input" style="flex:1" placeholder="uname -a | df -h | ip -brief addr | ss -tulpn | sysctl net.core.somaxconn" required />
+          <button type="submit" class="btn btn-primary" id="ssh-exec-sub">Thực thi</button>
         </form>
-        <pre class="terminal-box" id="ssh-exec-out">Sẵn sàng nhận lệnh kiểm tra hệ thống.</pre>
+        <pre class="terminal-box" id="ssh-exec-out">Sẵn sàng nhận lệnh kiểm tra hệ thống (chỉ cho phép lệnh trong allowlist, không shell).</pre>
       </section>
     </div>
 
-    <section class="surface">
-      <div class="surface-head"><h2 class="surface-title">Khóa SSH được ủy quyền (${keys.length})</h2></div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead><tr><th>Nhãn</th><th>Fingerprint</th><th class="right">Xóa</th></tr></thead>
-          <tbody>
-            ${
-              keys.length
-                ? keys.map((k) => `
-                  <tr>
-                    <td><strong>${esc(k.label)}</strong></td>
-                    <td class="mono">${esc(k.fingerprint || k.publicKey?.slice(0, 48) || '')}</td>
-                    <td class="right"><button type="button" class="btn btn-sm btn-danger" data-ssh-del="${esc(k.id)}">Thu hồi</button></td>
-                  </tr>`).join('')
-                : '<tr><td colspan="3" class="empty-state">Chưa có khóa SSH nào trong authorized_keys.</td></tr>'
-            }
-          </tbody>
-        </table>
-      </div>
-    </section>
+    <div class="grid-2">
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">Khóa SSH được ủy quyền (${keys.length})</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Nhãn</th><th>Fingerprint</th><th class="right">Xóa</th></tr></thead>
+            <tbody>
+              ${
+                keys.length
+                  ? keys.map((k) => `
+                    <tr>
+                      <td><strong>${esc(k.label)}</strong></td>
+                      <td class="mono">${esc(k.fingerprint || k.publicKey?.slice(0, 48) || '')}</td>
+                      <td class="right"><button type="button" class="btn btn-sm btn-danger" data-ssh-del="${esc(k.id)}" data-label="${esc(k.label)}">Thu hồi</button></td>
+                    </tr>`).join('')
+                  : '<tr><td colspan="3" class="empty-state">Chưa có khóa SSH nào trong authorized_keys.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">Phiên SSH đang hoạt động (${sessions.length})</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>User & TTY</th><th>IP nguồn</th><th class="right">Ngắt phiên</th></tr></thead>
+            <tbody>
+              ${
+                sessions.length
+                  ? sessions.map((s) => `
+                    <tr>
+                      <td class="mono"><strong>${esc(s.user || 'root')}</strong> · ${esc(s.tty || 'pts/0')}</td>
+                      <td class="mono">${esc(s.remoteIp || '—')}</td>
+                      <td class="right"><button type="button" class="btn btn-sm btn-danger" data-ssh-kick="${esc(s.id)}">Ngắt</button></td>
+                    </tr>`).join('')
+                  : '<tr><td colspan="3" class="empty-state">Không có phiên SSH nào đang kết nối.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   `;
 
   document.getElementById('ssh-cfg-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    try {
-      await api('PUT', '/api/ssh/config', {
-        port: Number(fd.get('port') || 22),
-        permitRootLogin: fd.get('permitRootLogin'),
-        passwordAuthentication: fd.get('passwordAuthentication') === 'on',
-        pubkeyAuthentication: fd.get('pubkeyAuthentication') === 'on',
-      });
-      toast('Đã cập nhật cấu hình SSH.');
-    } catch (err) { toast(err.message, 'err'); }
+    const newPort = Number(fd.get('port') || 22);
+    const payload = {
+      port: newPort,
+      permitRootLogin: fd.get('permitRootLogin'),
+      passwordAuthentication: fd.get('passwordAuthentication') === 'on',
+      pubkeyAuthentication: fd.get('pubkeyAuthentication') === 'on',
+      confirmPortChange: false,
+    };
+    const submitBtn = document.getElementById('ssh-cfg-sub');
+    const doSave = (confirmed) => withBusy(submitBtn, async () => {
+      try {
+        await api('PUT', '/api/ssh/config', { ...payload, confirmPortChange: confirmed });
+        toast('Đã kiểm tra sshd -t và cập nhật cấu hình SSH.');
+        await renderSsh(container);
+      } catch (err) { toast(err.message, 'err'); }
+    });
+    if (newPort !== origPort) {
+      confirmAction(
+        'Xác nhận đổi cổng SSH',
+        `Bạn sắp đổi cổng SSH từ ${origPort} sang ${newPort}. Đảm bảo tường lửa đã mở cổng ${newPort} để tránh mất quyền truy cập máy chủ!`,
+        () => doSave(true),
+      );
+    } else {
+      await doSave(false);
+    }
   });
 
   document.getElementById('ssh-exec-form')?.addEventListener('submit', async (e) => {
@@ -375,29 +556,43 @@ export async function renderSsh(container) {
     const cmd = document.getElementById('ssh-cmd-input')?.value.trim();
     const outEl = document.getElementById('ssh-exec-out');
     if (!cmd || !outEl) return;
-    outEl.textContent = `$ ${cmd}\nĐang chạy…`;
-    try {
-      const res = await api('POST', '/api/ssh/exec', { command: cmd, cwd: '/root' });
-      outEl.textContent = `$ ${cmd}\n${res.stdout || ''}${res.stderr ? `\n[stderr]\n${res.stderr}` : ''}\n(exit ${res.exitCode ?? 0})`;
-    } catch (err) {
-      outEl.textContent = `[LỖI] ${err.message}`;
-    }
+    await withBusy(document.getElementById('ssh-exec-sub'), async () => {
+      outEl.textContent = `$ ${cmd}\nĐang chạy…`;
+      try {
+        const res = await api('POST', '/api/ssh/exec', { command: cmd, cwd: '/www/wwwroot' });
+        const body = res.output ?? res.stdout ?? '';
+        outEl.textContent = `$ ${cmd}\n${body}\n(exit ${res.exitCode ?? 0})`;
+      } catch (err) {
+        outEl.textContent = `[LỖI] ${err.message}`;
+        toast(err.message, 'err');
+      }
+    });
   });
 
-  document.getElementById('ssh-gen-key')?.addEventListener('click', async () => {
+  const genBtn = document.getElementById('ssh-gen-key');
+  genBtn?.addEventListener('click', () => withBusy(genBtn, async () => {
     try {
       const kp = await api('POST', '/api/ssh/keys/generate', { label: 'ferrous-admin-key', clientHint: 'web-ui' });
-      openModal('Cặp khóa Ed25519 mới', `
+      openModal('Cặp khóa Ed25519 mới (ssh-keygen)', `
         <p class="page-desc" style="margin-bottom:10px">Lưu lại khóa riêng tư ngay bây giờ (chỉ hiển thị một lần).</p>
         <pre class="terminal-box">${esc(kp.privateKey || '')}</pre>
       `, { large: true });
       await renderSsh(container);
     } catch (err) { toast(err.message, 'err'); }
-  });
+  }));
 
-  container.querySelectorAll('[data-ssh-del]').forEach((b) => b.addEventListener('click', async () => {
-    try { await api('DELETE', `/api/ssh/keys/${encodeURIComponent(b.dataset.sshDel)}`); await renderSsh(container); }
-    catch (err) { toast(err.message, 'err'); }
+  container.querySelectorAll('[data-ssh-del]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Thu hồi khóa SSH', `Xác nhận xóa khóa "${b.dataset.label}" khỏi authorized_keys?`, () => withBusy(b, async () => {
+      try { await api('DELETE', `/api/ssh/keys/${encodeURIComponent(b.dataset.sshDel)}`); await renderSsh(container); }
+      catch (err) { toast(err.message, 'err'); }
+    }));
+  }));
+
+  container.querySelectorAll('[data-ssh-kick]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Ngắt phiên SSH', 'Xác nhận chấm dứt phiên SSH đang hoạt động này?', () => withBusy(b, async () => {
+      try { await api('DELETE', `/api/ssh/sessions/${encodeURIComponent(b.dataset.sshKick)}`); toast('Đã ngắt phiên SSH.'); await renderSsh(container); }
+      catch (err) { toast(err.message, 'err'); }
+    }));
   }));
 }
 
@@ -409,6 +604,8 @@ export async function renderSettingsJobs(container) {
     api('GET', '/api/panel-admin'),
     api('GET', '/api/jobs?limit=30').catch(() => []),
   ]);
+
+  const origPort = Number(admin.panelPort || 8443);
 
   container.innerHTML = `
     <div class="page-head">
@@ -427,7 +624,7 @@ export async function renderSettingsJobs(container) {
         <div class="form-grid">
           <div class="field">
             <label>Cổng Panel (1–65535, cấm 80 & 443, mặc định 8443)</label>
-            <input class="input mono" name="panelPort" type="number" min="1" max="65535" value="${esc(admin.panelPort || 8443)}" required />
+            <input class="input mono" name="panelPort" type="number" min="1" max="65535" value="${esc(origPort)}" required />
           </div>
           <div class="field">
             <label>Đường dẫn bảo mật (Security Entrance)</label>
@@ -447,7 +644,7 @@ export async function renderSettingsJobs(container) {
           </div>
         </div>
         <div class="row" style="justify-content:flex-end;margin-top:8px">
-          <button type="submit" class="btn btn-primary">Lưu & Áp dụng cấu hình</button>
+          <button type="submit" class="btn btn-primary" id="panel-admin-sub">Lưu & Áp dụng cấu hình</button>
         </div>
       </form>
     </section>
@@ -501,11 +698,22 @@ export async function renderSettingsJobs(container) {
     const pw = String(fd.get('adminPassword') || '');
     if (pw) payload.adminPassword = pw;
 
-    try {
-      await api('PUT', '/api/panel-admin', payload);
-      toast('Đã lưu cài đặt FerrousPanel. Nếu đổi cổng, dịch vụ sẽ tự khởi động lại trên cổng mới.');
-    } catch (err) {
-      toast(err.message, 'err');
+    const sub = document.getElementById('panel-admin-sub');
+    const doSave = () => withBusy(sub, async () => {
+      try {
+        await api('PUT', '/api/panel-admin', payload);
+        toast('Đã lưu cài đặt FerrousPanel. Nếu đổi cổng, dịch vụ sẽ tự khởi động lại trên cổng mới.');
+      } catch (err) { toast(err.message, 'err'); }
+    });
+
+    if (port !== origPort) {
+      confirmAction(
+        'Xác nhận đổi cổng FerrousPanel',
+        `Bạn sắp đổi cổng Panel từ ${origPort} sang ${port}. Dịch vụ sẽ tự mở cổng UFW và khởi động lại trên cổng mới.`,
+        doSave,
+      );
+    } else {
+      await doSave();
     }
   });
 }

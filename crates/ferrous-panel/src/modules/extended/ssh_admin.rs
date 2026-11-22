@@ -289,34 +289,8 @@ pub async fn load_ssh_panel(
         let initial = SshPanelData {
             server_host: live_host.clone(),
             config: ssh_cfg,
-            authorized_keys: if prod {
-                Vec::new()
-            } else {
-                vec![SshAuthorizedKey {
-                    id: "key-ed25519-primary".to_string(),
-                    label: "Primary Admin Ed25519 Key".to_string(),
-                    algorithm: "ssh-ed25519".to_string(),
-                    fingerprint: "SHA256:FerrousPanelEd25519AdminKeyFingerprint".to_string(),
-                    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFerrousPanelPrimaryAdminKey root@ferrous-vps".to_string(),
-                    added_at: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-                    client_hint: "OpenSSH / VS Code Remote-SSH".to_string(),
-                }]
-            },
-            active_sessions: if prod {
-                Vec::new()
-            } else {
-                vec![SshActiveSession {
-                    id: "sess-pts-0".to_string(),
-                    pts: "pts/0".to_string(),
-                    user: "root".to_string(),
-                    client_ip: "127.0.0.1".to_string(),
-                    client_software: "OpenSSH_9.6p1 Ubuntu-3ubuntu13".to_string(),
-                    auth_method: "publickey (ed25519)".to_string(),
-                    connected_at: Utc::now().format("%H:%M:%S UTC").to_string(),
-                    idle_time: "00:00s".to_string(),
-                    pid: std::process::id(),
-                }]
-            },
+            authorized_keys: Vec::new(),
+            active_sessions: Vec::new(),
             rust_modules: vec![
                 RustModuleConversionItem {
                     id: "rm-actix-core".to_string(),
@@ -375,6 +349,19 @@ pub struct SshConfigPatch {
     pub sftp_chroot_enabled: Option<bool>,
     pub allow_users: Option<Vec<String>>,
     pub kex_algorithms: Option<String>,
+    #[serde(default)]
+    pub confirm_port_change: bool,
+}
+
+fn rollback_sshd_dropin(dropin_path: &Path, prev: &Option<Vec<u8>>) {
+    match prev {
+        Some(old_bytes) => {
+            let _ = atomic_write_file(dropin_path, old_bytes, 0o600);
+        }
+        None => {
+            let _ = std::fs::remove_file(dropin_path);
+        }
+    }
 }
 
 pub async fn update_ssh_config(
@@ -385,9 +372,15 @@ pub async fn update_ssh_config(
     patch: SshConfigPatch,
 ) -> Result<SshPanelData, PanelError> {
     let mut data = load_ssh_panel(store, config, auth_store, executor).await?;
+    let prev_port = data.config.port;
     if let Some(p) = patch.port {
         if p == 0 {
             return Err(PanelError::Validation("SSH port cannot be 0".to_string()));
+        }
+        if p != prev_port && !patch.confirm_port_change {
+            return Err(PanelError::Conflict(format!(
+                "Changing SSH port from {prev_port} to {p} risks locking out remote access. Confirm explicitly with confirmPortChange=true."
+            )));
         }
         data.config.port = p;
     }
@@ -439,58 +432,83 @@ pub async fn update_ssh_config(
     data.config.sshd_config_preview = render_sshd_preview(&data.config);
 
     if is_production_vps(config) {
+        if !executor.is_binary_available(AllowedBinary::Sshd) {
+            return Err(PanelError::Conflict(
+                "sshd binary is not installed on this host (install openssh-server)".to_string(),
+            ));
+        }
         let dropin_dir = Path::new("/etc/ssh/sshd_config.d");
-        if dropin_dir.is_dir() {
-            let dropin_path = dropin_dir.join("99-ferrous.conf");
-            let prev = std::fs::read(&dropin_path).ok();
-            atomic_write_file(&dropin_path, data.config.sshd_config_preview.as_bytes(), 0o600)?;
+        std::fs::create_dir_all(dropin_dir)?;
+        let dropin_path = dropin_dir.join("99-ferrous.conf");
+        let prev = std::fs::read(&dropin_path).ok();
+        atomic_write_file(&dropin_path, data.config.sshd_config_preview.as_bytes(), 0o600)?;
 
-            if executor.is_binary_available(AllowedBinary::Sshd) {
-                let test_out = executor
-                    .run(AllowedBinary::Sshd, &["-t"], CMD_TIMEOUT)
-                    .await?;
-                if !test_out.success {
-                    match prev {
-                        Some(old_bytes) => {
-                            let _ = atomic_write_file(&dropin_path, &old_bytes, 0o600);
-                        }
-                        None => {
-                            let _ = std::fs::remove_file(&dropin_path);
-                        }
-                    }
-                    return Err(PanelError::Validation(format!(
-                        "sshd -t validation failed (rolled back): {}",
-                        if test_out.stderr.is_empty() {
-                            test_out.stdout
+        let test_out = executor
+            .run(AllowedBinary::Sshd, &["-t"], CMD_TIMEOUT)
+            .await?;
+        if !test_out.success {
+            rollback_sshd_dropin(&dropin_path, &prev);
+            return Err(PanelError::Validation(format!(
+                "sshd -t validation failed (rolled back): {}",
+                if test_out.stderr.is_empty() {
+                    test_out.stdout
+                } else {
+                    test_out.stderr
+                }
+            )));
+        }
+
+        if executor.is_binary_available(AllowedBinary::Ufw) {
+            let port_rule = format!("{}/tcp", data.config.port);
+            let ufw_out = executor
+                .run(
+                    AllowedBinary::Ufw,
+                    &["allow", &port_rule, "comment", "SSH"],
+                    CMD_TIMEOUT,
+                )
+                .await?;
+            if !ufw_out.success {
+                rollback_sshd_dropin(&dropin_path, &prev);
+                return Err(PanelError::CommandFailed {
+                    binary: "ufw",
+                    exit_code: ufw_out.exit_code,
+                    stderr: if ufw_out.stderr.is_empty() {
+                        ufw_out.stdout
+                    } else {
+                        ufw_out.stderr
+                    },
+                });
+            }
+        }
+
+        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+            rollback_sshd_dropin(&dropin_path, &prev);
+            return Err(PanelError::Conflict(
+                "systemctl is not available to reload sshd (config rolled back)".to_string(),
+            ));
+        }
+
+        let first_reload = executor
+            .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CMD_TIMEOUT)
+            .await?;
+        if !first_reload.success {
+            let second_reload = executor
+                .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CMD_TIMEOUT)
+                .await?;
+            if !second_reload.success {
+                rollback_sshd_dropin(&dropin_path, &prev);
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: second_reload.exit_code,
+                    stderr: format!(
+                        "failed to reload ssh.service/sshd.service (rolled back): {}",
+                        if second_reload.stderr.is_empty() {
+                            first_reload.stderr
                         } else {
-                            test_out.stderr
+                            second_reload.stderr
                         }
-                    )));
-                }
-            }
-
-            if executor.is_binary_available(AllowedBinary::Ufw) {
-                let port_rule = format!("{}/tcp", data.config.port);
-                let _ = executor
-                    .run(
-                        AllowedBinary::Ufw,
-                        &["allow", &port_rule, "comment", "SSH"],
-                        CMD_TIMEOUT,
-                    )
-                    .await;
-            }
-
-            if executor.is_binary_available(AllowedBinary::Systemctl) {
-                let reloaded_ssh = executor
-                    .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CMD_TIMEOUT)
-                    .await
-                    .map(|o| o.success)
-                    .unwrap_or(false);
-                if !reloaded_ssh {
-                    let _ = executor
-                        .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CMD_TIMEOUT)
-                        .await;
-                }
+                    ),
+                });
             }
         }
     }
@@ -563,53 +581,46 @@ pub async fn generate_ssh_keypair(
         label.trim()
     };
 
-    let (pub_key, priv_pem, fingerprint) = if is_production_vps(config)
-        && executor.is_binary_available(AllowedBinary::SshKeygen)
-    {
-        let tmp_dir = config.data_dir.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)?;
-        let key_file = tmp_dir.join(format!("keygen-{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
-        let pub_file = PathBuf::from(format!("{}.pub", key_file.display()));
-        let key_path_str = key_file.display().to_string();
-        let out = executor
-            .run(
-                AllowedBinary::SshKeygen,
-                &["-t", "ed25519", "-N", "", "-C", clean_label, "-f", &key_path_str],
-                CMD_TIMEOUT,
-            )
-            .await?;
-        let priv_res = std::fs::read_to_string(&key_file);
-        let pub_res = std::fs::read_to_string(&pub_file);
-        let _ = std::fs::remove_file(&key_file);
-        let _ = std::fs::remove_file(&pub_file);
+    if !executor.is_binary_available(AllowedBinary::SshKeygen) {
+        return Err(PanelError::Conflict(
+            "ssh-keygen binary is not installed on this host (install openssh-client)".to_string(),
+        ));
+    }
+    let tmp_dir = config.data_dir.join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let key_file = tmp_dir.join(format!(
+        "keygen-{:x}",
+        Utc::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
+    let pub_file = PathBuf::from(format!("{}.pub", key_file.display()));
+    let key_path_str = key_file.display().to_string();
+    let safe_comment = crate::system::cmd::validate_no_flag_injection(clean_label, "ssh key label")?;
+    let out = executor
+        .run(
+            AllowedBinary::SshKeygen,
+            &["-t", "ed25519", "-N", "", "-C", safe_comment, "-f", &key_path_str],
+            CMD_TIMEOUT,
+        )
+        .await?;
+    let priv_res = std::fs::read_to_string(&key_file);
+    let pub_res = std::fs::read_to_string(&pub_file);
+    let _ = std::fs::remove_file(&key_file);
+    let _ = std::fs::remove_file(&pub_file);
 
-        if out.success {
-            let priv_str = priv_res?;
-            let pub_str = pub_res?.trim().to_string();
-            let fp = format!("SHA256:{}", &sha256_hex(pub_str.as_bytes())[..32]);
-            (pub_str, priv_str, fp)
-        } else {
-            return Err(PanelError::CommandFailed {
-                binary: "ssh-keygen",
-                exit_code: out.exit_code,
-                stderr: if out.stderr.is_empty() { out.stdout } else { out.stderr },
-            });
-        }
-    } else {
-        let seed = format!("{}:{}", clean_label, Utc::now().timestamp_nanos_opt().unwrap_or(0));
-        let digest = sha256_hex(seed.as_bytes());
-        let fp = format!("SHA256:{}", &digest[..32]);
-        let pk = format!(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI{} {}",
-            &digest[..43],
-            clean_label
-        );
-        let sk = format!(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\nQyNTUxOQAAACB{}\n-----END OPENSSH PRIVATE KEY-----\n",
-            &digest
-        );
-        (pk, sk, fp)
-    };
+    if !out.success {
+        return Err(PanelError::CommandFailed {
+            binary: "ssh-keygen",
+            exit_code: out.exit_code,
+            stderr: if out.stderr.is_empty() {
+                out.stdout
+            } else {
+                out.stderr
+            },
+        });
+    }
+    let priv_pem = priv_res?;
+    let pub_key = pub_res?.trim().to_string();
+    let fingerprint = format!("SHA256:{}", &sha256_hex(pub_key.as_bytes())[..32]);
 
     let key_id = format!("key-{:x}", Utc::now().timestamp_millis());
     let data = add_ssh_authorized_key(
@@ -667,15 +678,33 @@ pub async fn terminate_ssh_session(
         .active_sessions
         .iter()
         .find(|s| s.id == id)
-        .map(|s| s.pid);
+        .map(|s| s.pid)
+        .ok_or_else(|| PanelError::NotFound(format!("active SSH session '{id}' not found")))?;
     if is_production_vps(config) {
-        if let Some(pid) = target_pid {
-            if pid > 1 && pid != std::process::id() && executor.is_binary_available(AllowedBinary::Kill) {
-                let pid_str = pid.to_string();
-                let _ = executor
-                    .run(AllowedBinary::Kill, &["-TERM", &pid_str], CMD_TIMEOUT)
-                    .await;
-            }
+        if target_pid <= 1 || target_pid == std::process::id() {
+            return Err(PanelError::Forbidden(
+                "refusing to terminate init or panel control-plane process".to_string(),
+            ));
+        }
+        if !executor.is_binary_available(AllowedBinary::Kill) {
+            return Err(PanelError::Conflict(
+                "kill binary is not available on this host".to_string(),
+            ));
+        }
+        let pid_str = target_pid.to_string();
+        let kill_out = executor
+            .run(AllowedBinary::Kill, &["-TERM", &pid_str], CMD_TIMEOUT)
+            .await?;
+        if !kill_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "kill",
+                exit_code: kill_out.exit_code,
+                stderr: if kill_out.stderr.is_empty() {
+                    kill_out.stdout
+                } else {
+                    kill_out.stderr
+                },
+            });
         }
     }
     data.active_sessions.retain(|s| s.id != id);
@@ -683,12 +712,192 @@ pub async fn terminate_ssh_session(
     Ok(data)
 }
 
+fn is_valid_sysctl_read_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('-')
+        && !key.contains('=')
+        && key.len() <= 128
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+fn validate_web_ssh_args(prog: &str, args: &[&str]) -> Result<(), PanelError> {
+    if args.len() > 8 || !args.iter().all(|a| is_safe_token(a)) {
+        return Err(PanelError::Forbidden(format!(
+            "SafeShell rejected unsafe or excessive arguments for '{prog}'"
+        )));
+    }
+    match prog {
+        "sysctl" => {
+            // Strictly read-only: reject '=', -w, -p, --system, --load, -f, --file at ANY position.
+            for &arg in args {
+                let lower = arg.to_ascii_lowercase();
+                if arg.contains('=')
+                    || matches!(
+                        lower.as_str(),
+                        "-w" | "--write" | "-p" | "--load" | "--system" | "-f" | "--file"
+                    )
+                    || lower.starts_with("-w")
+                    || lower.starts_with("-p")
+                    || lower.starts_with("--load")
+                    || lower.starts_with("--system")
+                {
+                    return Err(PanelError::Forbidden(
+                        "SafeShell only allows read-only sysctl queries (`sysctl <key>`, `sysctl -a`, `sysctl -n <key>`)".to_string(),
+                    ));
+                }
+            }
+            let valid = match args {
+                ["-a"] => true,
+                [key] => is_valid_sysctl_read_key(key),
+                ["-n", key] => is_valid_sysctl_read_key(key),
+                _ => false,
+            };
+            if !valid {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows `sysctl <key>`, `sysctl -a`, or `sysctl -n <key>`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "ip" => {
+            let allowed = matches!(
+                args,
+                []
+                    | ["addr"]
+                    | ["a"]
+                    | ["addr", "show"]
+                    | ["link", "show"]
+                    | ["route", "show"]
+                    | ["-brief", "addr"]
+                    | ["-s", "link"]
+            );
+            if !allowed {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows read-only ip inspection (`ip addr|a|link show|route show|-brief addr|-s link`)".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "ss" => {
+            for &arg in args {
+                let lower = arg.to_ascii_lowercase();
+                if lower == "--kill"
+                    || arg == "-K"
+                    || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('K'))
+                {
+                    return Err(PanelError::Forbidden(
+                        "SafeShell blocks `ss -K/--kill` socket termination".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "journalctl" => {
+            for &arg in args {
+                let lower = arg.to_ascii_lowercase();
+                if lower.starts_with("--vacuum")
+                    || matches!(
+                        lower.as_str(),
+                        "--rotate" | "--flush" | "--relinquish-var" | "--sync" | "--update-catalog"
+                    )
+                {
+                    return Err(PanelError::Forbidden(
+                        "SafeShell blocks mutating journalctl flags (`--vacuum-*`, `--rotate`, `--flush`)".to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        "systemctl" => {
+            if !matches!(
+                args.first().copied(),
+                Some("status" | "is-active" | "is-enabled" | "list-units")
+            ) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows read-only systemctl queries (`status`, `is-active`, `is-enabled`, `list-units`)".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "ufw" => {
+            if !matches!(args.first().copied(), Some("status")) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows `ufw status`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "fail2ban-client" => {
+            if !matches!(args.first().copied(), Some("status")) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows `fail2ban-client status`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "nginx" => {
+            if !matches!(args, ["-t"] | ["-v"] | ["-V"]) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows `nginx -t`, `nginx -v`, or `nginx -V`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "ferrousx-bin" => {
+            if !matches!(args, ["--check-config"] | ["--version"]) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows `ferrousx-bin --check-config` or `--version`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        "ferrousx-ctl" | "fx" => {
+            if !matches!(args, ["status"] | ["--help"]) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell only allows read-only `ferrousx-ctl status` or `--help`".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn resolve_confined_ls_dir(config: &Config, clean_cwd: &str, raw_target: &str) -> Result<PathBuf, PanelError> {
+    let candidate = if Path::new(raw_target).is_absolute() {
+        PathBuf::from(raw_target)
+    } else {
+        Path::new(clean_cwd).join(raw_target)
+    };
+    let canon_target = std::fs::canonicalize(&candidate).map_err(|e| {
+        PanelError::NotFound(format!("cannot access '{}': {e}", raw_target))
+    })?;
+
+    let mut allowed_roots = Vec::new();
+    if let Ok(r) = std::fs::canonicalize(&config.wwwroot) {
+        allowed_roots.push(r);
+    }
+    if let Ok(r) = std::fs::canonicalize(&config.data_dir) {
+        allowed_roots.push(r);
+    }
+    if !allowed_roots.iter().any(|root| canon_target.starts_with(root)) {
+        return Err(PanelError::Forbidden(format!(
+            "SafeShell `ls` is restricted to panel wwwroot ({}) and data_dir ({})",
+            config.wwwroot.display(),
+            config.data_dir.display()
+        )));
+    }
+    Ok(canon_target)
+}
+
 pub async fn exec_web_ssh_command(
     config: &Config,
     executor: &dyn CommandExecutor,
     command: &str,
     cwd: &str,
-) -> WebSshCommandOutput {
+) -> Result<WebSshCommandOutput, PanelError> {
     let clean_cmd = command.trim();
     let clean_cwd = if cwd.trim().is_empty() {
         config.wwwroot.display().to_string()
@@ -698,16 +907,28 @@ pub async fn exec_web_ssh_command(
     let tokens: Vec<&str> = clean_cmd.split_whitespace().collect();
     let prog = tokens.first().copied().unwrap_or("");
     let args: Vec<&str> = tokens.iter().skip(1).copied().collect();
-    let prod = is_production_vps(config);
 
     let (output, exit_code) = match prog {
         "" => (String::new(), 0),
-        "whoami" => ("root".to_string(), 0),
+        "whoami" => {
+            if !executor.is_binary_available(AllowedBinary::Id) {
+                return Err(PanelError::Conflict(
+                    "Binary 'id' is not available on this host".to_string(),
+                ));
+            }
+            let res = executor.run(AllowedBinary::Id, &["-un"], CMD_TIMEOUT).await?;
+            let combined = if res.stdout.is_empty() {
+                res.stderr
+            } else {
+                res.stdout
+            };
+            (combined, res.exit_code.unwrap_or(if res.success { 0 } else { 1 }))
+        }
         "pwd" => (clean_cwd.clone(), 0),
         "hostname" => {
             let h = std::fs::read_to_string("/etc/hostname")
                 .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "ferrous-ubuntu-vps".to_string());
+                .map_err(|e| PanelError::Conflict(format!("unable to read /etc/hostname: {e}")))?;
             (h, 0)
         }
         "uname" => {
@@ -735,7 +956,7 @@ pub async fn exec_web_ssh_command(
             let up = std::fs::read_to_string("/proc/uptime")
                 .ok()
                 .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))
-                .unwrap_or(0.0);
+                .ok_or_else(|| PanelError::Conflict("unable to read /proc/uptime".to_string()))?;
             let hrs = (up as u64) / 3600;
             let mins = ((up as u64) % 3600) / 60;
             let loadavg = std::fs::read_to_string("/proc/loadavg")
@@ -745,29 +966,32 @@ pub async fn exec_web_ssh_command(
                     if cols.len() == 3 {
                         format!("{}, {}, {}", cols[0], cols[1], cols[2])
                     } else {
-                        "0.00, 0.00, 0.00".to_string()
+                        s.trim().to_string()
                     }
                 })
-                .unwrap_or_else(|| "0.00, 0.00, 0.00".to_string());
+                .unwrap_or_default();
             (format!("up {hrs} hours, {mins} minutes, load average: {loadavg}"), 0)
         }
         "ls" => {
-            let target = args
-                .first()
-                .copied()
-                .filter(|a| !a.starts_with('-') && is_safe_token(a))
-                .unwrap_or(&clean_cwd);
-            let dir = Path::new(target);
-            if let Ok(rd) = std::fs::read_dir(dir) {
-                let mut names = rd
-                    .flatten()
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect::<Vec<_>>();
-                names.sort();
-                (names.join("  "), 0)
-            } else {
-                ("wwwroot  acme  data".to_string(), 0)
+            if args.len() > 2 || !args.iter().all(|a| is_safe_token(a)) {
+                return Err(PanelError::Forbidden(
+                    "SafeShell `ls` received invalid arguments".to_string(),
+                ));
             }
+            let target_arg = args
+                .iter()
+                .copied()
+                .find(|a| !a.starts_with('-'))
+                .unwrap_or(&clean_cwd);
+            let dir = resolve_confined_ls_dir(config, &clean_cwd, target_arg)?;
+            let rd = std::fs::read_dir(&dir)
+                .map_err(|e| PanelError::Conflict(format!("ls failed for '{}': {e}", dir.display())))?;
+            let mut names = rd
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            names.sort();
+            (names.join("  "), 0)
         }
         "fp" | "ferrous" => (
             format!(
@@ -781,90 +1005,58 @@ pub async fn exec_web_ssh_command(
             0,
         ),
         "help" => (
-            "Supported WebSSH commands (zero-shell allowlisted): whoami, pwd, hostname, uname, uptime, ls, df, free, ip, ss, who, id, systemctl status/is-active, journalctl, nginx -t, ferrousx-ctl, ufw status, fail2ban-client status, sysctl, fp, echo".to_string(),
+            "Supported WebSSH commands (zero-shell read-only allowlisted): whoami, pwd, hostname, uname, uptime, ls (wwwroot/data_dir only), df, free, ip (addr|link show|route show|-brief addr|-s link), ss (no -K), who, id, systemctl status/is-active/is-enabled/list-units, journalctl (no vacuum/rotate/flush), nginx -t/-v/-V, ferrousx-ctl status, ufw status, fail2ban-client status, sysctl <key>|-a|-n <key>, fp, echo".to_string(),
             0,
         ),
         "echo" => (args.join(" "), 0),
         "df" | "free" | "ip" | "ss" | "who" | "id" | "nginx" | "ferrousx-bin" | "ferrousx-ctl"
         | "fx" | "ufw" | "fail2ban-client" | "sysctl" | "systemctl" | "journalctl" => {
-            let safe_args = args.iter().all(|a| is_safe_token(a)) && args.len() <= 8;
-            let allowed_subcmd = match prog {
-                "systemctl" => matches!(
-                    args.first().copied(),
-                    Some("status" | "is-active" | "is-enabled" | "list-units")
-                ),
-                "ufw" => matches!(args.first().copied(), Some("status")),
-                "fail2ban-client" => matches!(args.first().copied(), Some("status")),
-                "nginx" => matches!(args.first().copied(), Some("-t" | "-v" | "-V")),
-                "ferrousx-bin" => matches!(args.first().copied(), Some("--check-config" | "--version")),
-                "ferrousx-ctl" | "fx" => matches!(
-                    args.first().copied(),
-                    Some("status" | "sync" | "reload" | "--help")
-                ),
-                "sysctl" => args.first().copied().map(|a| a != "-w").unwrap_or(true),
-                _ => true,
-            };
-
-            if prod && safe_args && allowed_subcmd {
-                if let Some(bin) = AllowedBinary::from_token(prog) {
-                    if executor.is_binary_available(bin) {
-                        let run_args: Vec<&str> = match prog {
-                            "df" if args.is_empty() => vec!["-h"],
-                            "free" if args.is_empty() => vec!["-h"],
-                            "ip" if args.is_empty() => vec!["-brief", "addr"],
-                            "ss" if args.is_empty() => vec!["-tulpn"],
-                            "journalctl" if args.is_empty() => {
-                                vec!["-u", "ferrous-panel", "-n", "25", "--no-pager"]
-                            }
-                            _ => args.clone(),
-                        };
-                        match executor.run(bin, &run_args, CMD_TIMEOUT).await {
-                            Ok(res) => {
-                                let combined = if res.stdout.is_empty() {
-                                    res.stderr
-                                } else if res.stderr.is_empty() {
-                                    res.stdout
-                                } else {
-                                    format!("{}\n{}", res.stdout, res.stderr)
-                                };
-                                (combined, res.exit_code.unwrap_or(if res.success { 0 } else { 1 }))
-                            }
-                            Err(e) => (format!("Command error: {e}"), 1),
-                        }
-                    } else {
-                        (format!("Binary '{prog}' is not installed on this VPS."), 127)
-                    }
-                } else {
-                    (format!("Command '{prog}' is not in AllowedBinary allowlist."), 126)
-                }
-            } else if !allowed_subcmd || !safe_args {
-                (
-                    format!("SafeShell blocked non-read-only or invalid arguments for '{prog}'. Use the Panel UI controls or native SSH for mutations."),
-                    126,
-                )
-            } else {
-                (
-                    format!("[FerrousPanel SafeShell] Executed '{prog}' in {clean_cwd} (isolated test mode)"),
-                    0,
-                )
+            validate_web_ssh_args(prog, &args)?;
+            let bin = AllowedBinary::from_token(prog).ok_or_else(|| {
+                PanelError::Forbidden(format!(
+                    "Command '{prog}' is not in AllowedBinary allowlist."
+                ))
+            })?;
+            if !executor.is_binary_available(bin) {
+                return Err(PanelError::Conflict(format!(
+                    "Binary '{prog}' is not available on this host."
+                )));
             }
+            let run_args: Vec<&str> = match prog {
+                "df" if args.is_empty() => vec!["-h"],
+                "free" if args.is_empty() => vec!["-h"],
+                "ip" if args.is_empty() => vec!["-brief", "addr"],
+                "ss" if args.is_empty() => vec!["-tulpn"],
+                "journalctl" if args.is_empty() => {
+                    vec!["-u", "ferrous-panel", "-n", "25", "--no-pager"]
+                }
+                _ => args.clone(),
+            };
+            let res = executor.run(bin, &run_args, CMD_TIMEOUT).await?;
+            let combined = if res.stdout.is_empty() {
+                res.stderr
+            } else if res.stderr.is_empty() {
+                res.stdout
+            } else {
+                format!("{}\n{}", res.stdout, res.stderr)
+            };
+            (combined, res.exit_code.unwrap_or(if res.success { 0 } else { 1 }))
         }
-        other => (
-            format!(
-                "[FerrousPanel SafeShell] Command '{other}' is not allowlisted. Type 'help' to see supported zero-shell VPS diagnostic commands."
-            ),
-            127,
-        ),
+        other => {
+            return Err(PanelError::Forbidden(format!(
+                "Command '{other}' is not allowlisted. Type 'help' to see supported zero-shell diagnostic commands."
+            )));
+        }
     };
 
-    WebSshCommandOutput {
+    Ok(WebSshCommandOutput {
         id: format!("ssh-out-{:x}", Utc::now().timestamp_millis()),
         cwd: clean_cwd,
         command: clean_cmd.to_string(),
         output,
         exit_code,
         timestamp: Utc::now().format("%H:%M:%S").to_string(),
-    }
+    })
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -885,27 +1077,50 @@ async fn sync_panel_network_changes(
     executor: &dyn CommandExecutor,
     new_port: Option<u16>,
     domain_changed: bool,
-) {
+) -> Result<(), PanelError> {
     if !is_production_vps(config) {
-        return;
+        return Ok(());
     }
     if let Some(port) = new_port {
         if executor.is_binary_available(AllowedBinary::Ufw) {
             let rule = format!("{port}/tcp");
-            let _ = executor
+            let out = executor
                 .run(
                     AllowedBinary::Ufw,
                     &["allow", &rule, "comment", "FerrousPanel"],
                     CMD_TIMEOUT,
                 )
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "ufw",
+                    exit_code: out.exit_code,
+                    stderr: if out.stderr.is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    },
+                });
+            }
         }
     }
     if domain_changed && executor.is_binary_available(AllowedBinary::FerrousxCtl) {
-        let _ = executor
+        let out = executor
             .run(AllowedBinary::FerrousxCtl, &["sync"], CMD_TIMEOUT)
-            .await;
+            .await?;
+        if !out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "ferrousx-ctl",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            });
+        }
     }
+    Ok(())
 }
 
 fn schedule_panel_service_restart(config: &Config) {
@@ -942,15 +1157,15 @@ pub async fn update_panel_admin(
             let updated =
                 update_admin_username(&config.credentials_path(), &config.admin_username, u)?;
             admin.admin_username = updated.username.clone();
-            let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username);
-            let _ = auth_store.revoke_all_sessions();
+            upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username)?;
+            auth_store.revoke_all_sessions()?;
         }
     }
     if let Some(ref pw) = patch.admin_password {
         let p = pw.trim();
         if !p.is_empty() && !p.contains('•') {
             update_admin_password(&config.credentials_path(), &config.admin_username, p)?;
-            let _ = auth_store.revoke_all_sessions();
+            auth_store.revoke_all_sessions()?;
         }
     }
     if let Some(port) = patch.panel_port {
@@ -959,7 +1174,7 @@ pub async fn update_panel_admin(
             restart_needed = true;
         }
         admin.panel_port = valid_port.get();
-        let _ = upsert_env_var(&env_file, "FERROUS_PORT", &valid_port.to_string());
+        upsert_env_var(&env_file, "FERROUS_PORT", &valid_port.to_string())?;
         new_port_opened = Some(valid_port.get());
     }
     if let Some(ent) = patch.security_entrance {
@@ -969,7 +1184,7 @@ pub async fn update_panel_admin(
                 restart_needed = true;
             }
             admin.security_entrance = trimmed.to_string();
-            let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", trimmed);
+            upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", trimmed)?;
         }
     }
     if let Some(dom) = patch.custom_domain {
@@ -979,7 +1194,7 @@ pub async fn update_panel_admin(
                 restart_needed = true;
             }
             admin.custom_domain = None;
-            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
+            upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
             domain_changed = true;
         } else {
             let valid = Domain::parse(trimmed)?;
@@ -987,12 +1202,17 @@ pub async fn update_panel_admin(
                 restart_needed = true;
             }
             admin.custom_domain = Some(valid.as_str().to_string());
-            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
+            upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str())?;
             domain_changed = true;
         }
     }
     if let Some(ssl) = patch.ssl_enabled {
         admin.ssl_enabled = Some(ssl);
+        upsert_env_var(
+            &env_file,
+            "FERROUS_SECURE_COOKIE",
+            if ssl { "true" } else { "false" },
+        )?;
     }
     if let Some(tfa) = patch.two_factor_enabled {
         admin.two_factor_enabled = tfa;
@@ -1001,7 +1221,7 @@ pub async fn update_panel_admin(
         admin.allowed_admin_ips = ips;
     }
 
-    sync_panel_network_changes(config, executor, new_port_opened, domain_changed).await;
+    sync_panel_network_changes(config, executor, new_port_opened, domain_changed).await?;
 
     admin.last_modified_at = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
     store.put_json(KV_PANEL_ADMIN, &admin)?;
@@ -1078,8 +1298,8 @@ pub async fn run_panel_cli_action(
                 ),
                 Some(p) if p > 0 => {
                     admin.panel_port = p;
-                    let _ = upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string());
-                    sync_panel_network_changes(config, executor, Some(p), false).await;
+                    upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string())?;
+                    sync_panel_network_changes(config, executor, Some(p), false).await?;
                     schedule_panel_service_restart(config);
                     format!(
                         "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: http://{}:{p}{}).",
@@ -1096,7 +1316,7 @@ pub async fn run_panel_cli_action(
             let ent = value.unwrap_or("/").trim();
             if ent.starts_with('/') {
                 admin.security_entrance = ent.to_string();
-                let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", ent);
+                upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", ent)?;
                 schedule_panel_service_restart(config);
                 format!("Updated FERROUS_SECURITY_ENTRANCE={ent} and scheduled panel restart.")
             } else {
@@ -1105,7 +1325,7 @@ pub async fn run_panel_cli_action(
         }
         9 => {
             admin.security_entrance = "/".to_string();
-            let _ = upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", "/");
+            upsert_env_var(&env_file, "FERROUS_SECURITY_ENTRANCE", "/")?;
             schedule_panel_service_restart(config);
             "Reset security entrance back to '/' and scheduled panel restart.".to_string()
         }
@@ -1113,15 +1333,15 @@ pub async fn run_panel_cli_action(
             let raw = value.unwrap_or("").trim();
             if raw.is_empty() || raw.eq_ignore_ascii_case("clear") || raw.eq_ignore_ascii_case("none") {
                 admin.custom_domain = None;
-                let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
-                sync_panel_network_changes(config, executor, None, true).await;
+                upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+                sync_panel_network_changes(config, executor, None, true).await?;
                 schedule_panel_service_restart(config);
                 "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced reverse proxy.".to_string()
             } else {
                 let valid = Domain::parse(raw)?;
                 admin.custom_domain = Some(valid.as_str().to_string());
-                let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str());
-                sync_panel_network_changes(config, executor, None, true).await;
+                upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str())?;
+                sync_panel_network_changes(config, executor, None, true).await?;
                 schedule_panel_service_restart(config);
                 format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env and synced FerrousX.", valid.as_str())
             }
@@ -1129,7 +1349,7 @@ pub async fn run_panel_cli_action(
         11 => {
             let report = webserver.validate_configured_engine().await?;
             if report.valid {
-                let _ = webserver.reload_or_start_configured_engine().await;
+                webserver.reload_or_start_configured_engine().await?;
                 format!("Web engine ({}) config valid & reloaded: {}", report.engine.as_str(), report.output)
             } else {
                 format!("Web engine ({}) validation FAILED: {}", report.engine.as_str(), report.output)
@@ -1137,8 +1357,8 @@ pub async fn run_panel_cli_action(
         }
         12 => {
             admin.custom_domain = None;
-            let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "");
-            sync_panel_network_changes(config, executor, None, true).await;
+            upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+            sync_panel_network_changes(config, executor, None, true).await?;
             schedule_panel_service_restart(config);
             "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced FerrousX.".to_string()
         }
@@ -1146,7 +1366,7 @@ pub async fn run_panel_cli_action(
             let raw = value.unwrap_or("").trim();
             if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
                 let ip_str = ip.to_string();
-                let _ = upsert_env_var(&env_file, "FERROUS_BIND", &ip_str);
+                upsert_env_var(&env_file, "FERROUS_BIND", &ip_str)?;
                 schedule_panel_service_restart(config);
                 format!("Updated FERROUS_BIND={ip_str} in panel.env and scheduled panel restart.")
             } else {

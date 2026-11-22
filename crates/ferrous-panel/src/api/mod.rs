@@ -1,5 +1,6 @@
 pub mod apps;
 pub mod auth;
+pub mod capabilities;
 pub mod contract;
 pub mod cpanel;
 pub mod databases;
@@ -415,6 +416,7 @@ pub fn configure_api(cfg: &mut web::ServiceConfig) {
             .route("/auth/session", web::get().to(auth::session))
             .route("/auth/logout", web::post().to(auth::logout))
             .route("/telemetry", web::get().to(telemetry::get_telemetry))
+            .route("/capabilities", web::get().to(capabilities::get_capabilities))
             .route("/webserver", web::get().to(webserver::get_webserver))
             .route("/webserver", web::put().to(webserver::put_webserver))
             .route("/webserver/switch", web::post().to(webserver::switch_webserver))

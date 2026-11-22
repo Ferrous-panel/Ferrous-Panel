@@ -4,13 +4,46 @@ use super::common::*;
 // 6. System Optimizer & Anti-Crash Guard
 // ============================================================================
 
+const ALLOWED_SYSCTL_KEYS: &[&str] = &[
+    "net.ipv4.tcp_congestion_control",
+    "net.core.somaxconn",
+    "net.ipv4.tcp_tw_reuse",
+    "vm.swappiness",
+    "fs.file-max",
+    "net.ipv4.tcp_syncookies",
+    "net.ipv4.tcp_max_syn_backlog",
+];
+
+fn validate_sysctl_assignment(key: &str, value: &str) -> Result<(), PanelError> {
+    if !ALLOWED_SYSCTL_KEYS.contains(&key) {
+        return Err(PanelError::Validation(format!(
+            "sysctl key '{key}' is not in the FerrousPanel optimizer allowlist"
+        )));
+    }
+    if value.is_empty()
+        || value.len() > 64
+        || value.starts_with('-')
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+    {
+        return Err(PanelError::Validation(format!(
+            "invalid sysctl value '{value}' for key '{key}'"
+        )));
+    }
+    Ok(())
+}
+
 fn render_sysctl_preview(params: &[KernelSysctlParam]) -> String {
     let mut out = String::from("# Managed by FerrousPanel — /etc/sysctl.d/99-ferrous-optimizer.conf\n");
     for p in params {
         if p.enabled {
             out.push_str(&format!("{} = {}\n", p.key, p.recommended_value));
         } else {
-            out.push_str(&format!("# {} = {} (current: {})\n", p.key, p.recommended_value, p.current_value));
+            out.push_str(&format!(
+                "# {} = {} (current: {})\n",
+                p.key, p.recommended_value, p.current_value
+            ));
         }
     }
     out
@@ -24,7 +57,8 @@ fn default_optimizer_data() -> SystemOptimizerData {
             id: "sys-bbr".to_string(),
             key: "net.ipv4.tcp_congestion_control".to_string(),
             category: "TCP / Network".to_string(),
-            current_value: "bbr".to_string(),
+            current_value: read_proc_sysctl("net.ipv4.tcp_congestion_control")
+                .unwrap_or_else(|| "unknown".to_string()),
             recommended_value: "bbr".to_string(),
             description: "Google BBR bandwidth-delay product congestion control for high-throughput TLS.".to_string(),
             enabled: true,
@@ -33,7 +67,8 @@ fn default_optimizer_data() -> SystemOptimizerData {
             id: "sys-somaxconn".to_string(),
             key: "net.core.somaxconn".to_string(),
             category: "TCP / Network".to_string(),
-            current_value: "65535".to_string(),
+            current_value: read_proc_sysctl("net.core.somaxconn")
+                .unwrap_or_else(|| "unknown".to_string()),
             recommended_value: "65535".to_string(),
             description: "Maximum listen() socket accept queue depth for Actix-Web & FerrousX.".to_string(),
             enabled: true,
@@ -42,7 +77,8 @@ fn default_optimizer_data() -> SystemOptimizerData {
             id: "sys-tw-reuse".to_string(),
             key: "net.ipv4.tcp_tw_reuse".to_string(),
             category: "TCP / Network".to_string(),
-            current_value: "1".to_string(),
+            current_value: read_proc_sysctl("net.ipv4.tcp_tw_reuse")
+                .unwrap_or_else(|| "unknown".to_string()),
             recommended_value: "1".to_string(),
             description: "Safely reuse TIME_WAIT sockets for outbound reverse-proxy upstream connections.".to_string(),
             enabled: true,
@@ -51,7 +87,8 @@ fn default_optimizer_data() -> SystemOptimizerData {
             id: "sys-swappiness".to_string(),
             key: "vm.swappiness".to_string(),
             category: "Virtual Memory".to_string(),
-            current_value: "10".to_string(),
+            current_value: read_proc_sysctl("vm.swappiness")
+                .unwrap_or_else(|| "unknown".to_string()),
             recommended_value: "10".to_string(),
             description: "Prefer keeping hot SQLite/Database pages in physical RAM before swapping.".to_string(),
             enabled: true,
@@ -60,7 +97,8 @@ fn default_optimizer_data() -> SystemOptimizerData {
             id: "sys-file-max".to_string(),
             key: "fs.file-max".to_string(),
             category: "Filesystem".to_string(),
-            current_value: "2097152".to_string(),
+            current_value: read_proc_sysctl("fs.file-max")
+                .unwrap_or_else(|| "unknown".to_string()),
             recommended_value: "2097152".to_string(),
             description: "System-wide open file descriptor ceiling for high-concurrency epoll loops.".to_string(),
             enabled: true,
@@ -122,7 +160,7 @@ fn default_optimizer_data() -> SystemOptimizerData {
         watchdog: BackendWatchdogState {
             daemon_pid: pid,
             oom_score_adj: -900,
-            allocator_engine: "System Allocator (Zero-Fragmentation Arena)".to_string(),
+            allocator_engine: "System Allocator".to_string(),
             allocated_ram_mb: (rss * 0.85 * 100.0).round() / 100.0,
             resident_ram_mb: rss,
             worker_threads_active: 4,
@@ -130,47 +168,34 @@ fn default_optimizer_data() -> SystemOptimizerData {
             db_pool_active: 1,
             db_pool_idle: 3,
             db_pool_max: 16,
-            circuit_breaker_status: "Closed (100% Healthy)".to_string(),
+            circuit_breaker_status: "Closed (Healthy)".to_string(),
             auto_heal_enabled: true,
             last_self_heal_at: Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-            uptime_stability_percent: 99.99,
-            recent_events: vec![WatchdogEventItem {
-                id: "wd-init-1".to_string(),
-                timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
-                subsystem: "SQLite WAL + Actix Runtime".to_string(),
-                action: "Verified OOM immunity (-900) and WAL checkpoint health".to_string(),
-                result: "OK (0 errors)".to_string(),
-            }],
+            uptime_stability_percent: 100.0,
+            recent_events: Vec::new(),
         },
         anti_crash_guard: Some(AntiCrashGuardState {
             load_shedding_enabled: true,
             cpu_shed_threshold_percent: 92.0,
             ram_shed_threshold_percent: 90.0,
-            zram_enabled: true,
-            zram_compression_algo: "zstd (L3 Fast)".to_string(),
+            zram_enabled: Path::new("/dev/zram0").exists(),
+            zram_compression_algo: "zstd".to_string(),
             zram_size_mb: 2048,
             slow_query_auto_kill_sec: 30,
-            cgroups_v2_enforced: true,
-            oom_immunity_map: vec![
-                OomImmunityProcessItem {
-                    service: "ferrous-panel.service".to_string(),
-                    pid,
-                    oom_score_adj: -900,
-                    memory_high_mb: 256,
-                    memory_max_mb: 512,
-                    policy: "Immune (Control Plane)".to_string(),
-                },
-                OomImmunityProcessItem {
-                    service: "ferrousx.service / nginx.service".to_string(),
-                    pid: pid.saturating_add(1),
-                    oom_score_adj: -500,
-                    memory_high_mb: 512,
-                    memory_max_mb: 1024,
-                    policy: "Protected (Edge Proxy)".to_string(),
-                },
-            ],
-            mitigation_count: 1,
-            last_mitigation_action: "Verified cgroups v2 memory.high watermarks".to_string(),
+            cgroups_v2_enforced: Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
+            oom_immunity_map: vec![OomImmunityProcessItem {
+                service: "ferrous-panel.service".to_string(),
+                pid,
+                oom_score_adj: std::fs::read_to_string("/proc/self/oom_score_adj")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                    .unwrap_or(0),
+                memory_high_mb: 256,
+                memory_max_mb: 512,
+                policy: "Control Plane".to_string(),
+            }],
+            mitigation_count: 0,
+            last_mitigation_action: "None".to_string(),
         }),
     }
 }
@@ -205,26 +230,67 @@ async fn apply_sysctl_to_host(
     executor: &dyn CommandExecutor,
     params: &[KernelSysctlParam],
     preview: &str,
-) {
+) -> Result<(), PanelError> {
+    for param in params.iter().filter(|p| p.enabled) {
+        validate_sysctl_assignment(&param.key, &param.recommended_value)?;
+    }
+
     if !is_production_vps(config) {
-        return;
+        return Ok(());
     }
+
+    if !executor.is_binary_available(AllowedBinary::Sysctl) {
+        return Err(PanelError::Conflict(
+            "thiếu binary sysctl trên máy chủ (gợi ý: sudo apt install -y procps)".to_string(),
+        ));
+    }
+
     let sys_dir = Path::new("/etc/sysctl.d");
-    if sys_dir.is_dir() {
-        let _ = atomic_write_file(
-            &sys_dir.join("99-ferrous-optimizer.conf"),
-            preview.as_bytes(),
-            0o644,
-        );
+    if !sys_dir.is_dir() {
+        return Err(PanelError::Conflict(
+            "không tìm thấy thư mục /etc/sysctl.d để ghi cấu hình kernel".to_string(),
+        ));
     }
-    if executor.is_binary_available(AllowedBinary::Sysctl) {
-        for param in params.iter().filter(|p| p.enabled) {
-            if is_safe_token(&param.key) && is_safe_token(&param.recommended_value) {
-                let assignment = format!("{}={}", param.key, param.recommended_value);
-                let _ = executor
-                    .run(AllowedBinary::Sysctl, &["-w", &assignment], CMD_TIMEOUT)
-                    .await;
-            }
+
+    let target_file = sys_dir.join("99-ferrous-optimizer.conf");
+    let previous = std::fs::read(&target_file).ok();
+    atomic_write_file(&target_file, preview.as_bytes(), 0o644)?;
+
+    let rollback = || {
+        if let Some(ref bytes) = previous {
+            let _ = atomic_write_file(&target_file, bytes, 0o644);
+        } else {
+            let _ = std::fs::remove_file(&target_file);
+        }
+    };
+
+    let apply_res = executor
+        .run(
+            AllowedBinary::Sysctl,
+            &["-p", "/etc/sysctl.d/99-ferrous-optimizer.conf"],
+            CMD_TIMEOUT,
+        )
+        .await;
+    match apply_res {
+        Ok(out) if out.success => Ok(()),
+        Ok(out) => {
+            rollback();
+            let _ = executor
+                .run(AllowedBinary::Sysctl, &["--system"], CMD_TIMEOUT)
+                .await;
+            Err(PanelError::CommandFailed {
+                binary: "sysctl",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            })
+        }
+        Err(err) => {
+            rollback();
+            Err(err)
         }
     }
 }
@@ -254,7 +320,7 @@ pub async fn apply_optimizer_profile(
         0o644,
     )?;
 
-    apply_sysctl_to_host(config, executor, &data.sysctl_params, &data.sysctl_config_preview).await;
+    apply_sysctl_to_host(config, executor, &data.sysctl_params, &data.sysctl_config_preview).await?;
     if is_production_vps(config) {
         for param in &mut data.sysctl_params {
             if let Some(live_val) = read_proc_sysctl(&param.key) {
@@ -269,7 +335,10 @@ pub async fn apply_optimizer_profile(
             id: format!("wd-{:x}", Utc::now().timestamp_millis()),
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "System Optimizer".to_string(),
-            action: format!("Applied profile '{}' & synced kernel sysctl", data.active_profile_id),
+            action: format!(
+                "Applied profile '{}' & verified kernel sysctl via /proc/sys",
+                data.active_profile_id
+            ),
             result: "OK".to_string(),
         },
     );
@@ -294,15 +363,16 @@ pub async fn toggle_optimizer_sysctl(
             "sysctl parameter '{id}' not found"
         )));
     };
+    validate_sysctl_assignment(&param.key, &param.recommended_value)?;
     param.enabled = !param.enabled;
-    param.current_value = if param.enabled {
-        param.recommended_value.clone()
-    } else {
-        "default".to_string()
-    };
     let toggled_key = param.key.clone();
-    let toggled_enabled = param.enabled;
-    let toggled_val = param.recommended_value.clone();
+    if !is_production_vps(config) {
+        param.current_value = if param.enabled {
+            param.recommended_value.clone()
+        } else {
+            "default".to_string()
+        };
+    }
 
     data.sysctl_config_preview = render_sysctl_preview(&data.sysctl_params);
 
@@ -314,25 +384,8 @@ pub async fn toggle_optimizer_sysctl(
         0o644,
     )?;
 
+    apply_sysctl_to_host(config, executor, &data.sysctl_params, &data.sysctl_config_preview).await?;
     if is_production_vps(config) {
-        let sys_dir = Path::new("/etc/sysctl.d");
-        if sys_dir.is_dir() {
-            let _ = atomic_write_file(
-                &sys_dir.join("99-ferrous-optimizer.conf"),
-                data.sysctl_config_preview.as_bytes(),
-                0o644,
-            );
-        }
-        if toggled_enabled
-            && executor.is_binary_available(AllowedBinary::Sysctl)
-            && is_safe_token(&toggled_key)
-            && is_safe_token(&toggled_val)
-        {
-            let assignment = format!("{toggled_key}={toggled_val}");
-            let _ = executor
-                .run(AllowedBinary::Sysctl, &["-w", &assignment], CMD_TIMEOUT)
-                .await;
-        }
         if let Some(live_val) = read_proc_sysctl(&toggled_key) {
             if let Some(p) = data.sysctl_params.iter_mut().find(|p| p.key == toggled_key) {
                 p.current_value = live_val;
@@ -351,11 +404,15 @@ pub fn reclaim_memory(
     let mut data = load_optimizer(store, config)?;
     let freed_mb = if is_production_vps(config) {
         let before_kb = read_proc_mem_available_kb().unwrap_or(0);
-        let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+        std::fs::write("/proc/sys/vm/drop_caches", b"3\n").map_err(|err| {
+            PanelError::Conflict(format!(
+                "không thể ghi /proc/sys/vm/drop_caches (cần quyền root): {err}"
+            ))
+        })?;
         let after_kb = read_proc_mem_available_kb().unwrap_or(before_kb);
         after_kb.saturating_sub(before_kb) / 1024
     } else {
-        64u64
+        0u64
     };
     data.watchdog.last_self_heal_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
     data.watchdog.recent_events.insert(
@@ -364,14 +421,14 @@ pub fn reclaim_memory(
             id: format!("wd-reclaim-{:x}", Utc::now().timestamp_millis()),
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "Memory Reclaimer".to_string(),
-            action: "Flushed Linux page/dentry/inode caches (/proc/sys/vm/drop_caches) & SQLite WAL".to_string(),
+            action: "Flushed Linux page/dentry/inode caches (/proc/sys/vm/drop_caches)".to_string(),
             result: format!("Freed {freed_mb} MB"),
         },
     );
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok((
         freed_mb,
-        format!("Đã giải phóng {freed_mb} MB bộ nhớ đệm hệ thống (drop_caches + SQLite WAL)."),
+        format!("Đã giải phóng {freed_mb} MB bộ nhớ đệm hệ thống (/proc/sys/vm/drop_caches)."),
         data,
     ))
 }
@@ -384,8 +441,14 @@ pub async fn watchdog_heal(
     let mut data = load_optimizer(store, config)?;
     let mut healed_units: Vec<String> = Vec::new();
     let mut healthy_units: Vec<String> = Vec::new();
+    let mut failed_units: Vec<String> = Vec::new();
 
-    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Systemctl) {
+    if is_production_vps(config) {
+        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+            return Err(PanelError::Conflict(
+                "thiếu systemctl để kiểm tra và tự phục hồi dịch vụ".to_string(),
+            ));
+        }
         let candidates = [
             "ferrous-panel.service",
             "ferrousx.service",
@@ -418,21 +481,36 @@ pub async fn watchdog_heal(
                     .unwrap_or(false);
                 if restarted {
                     healed_units.push(unit.to_string());
+                } else {
+                    failed_units.push(unit.to_string());
                 }
             }
         }
     }
 
-    let summary = if !healed_units.is_empty() {
-        format!("Auto-restarted inactive VPS services: {}", healed_units.join(", "))
+    let summary = if !failed_units.is_empty() {
+        format!(
+            "Failed to restart: {}; healed: {}",
+            failed_units.join(", "),
+            healed_units.join(", ")
+        )
+    } else if !healed_units.is_empty() {
+        format!(
+            "Auto-restarted inactive VPS services: {}",
+            healed_units.join(", ")
+        )
     } else if !healthy_units.is_empty() {
         format!("Verified {} enabled VPS services active", healthy_units.len())
     } else {
-        "Executed self-healing check on worker pools and DB connections".to_string()
+        "Executed self-healing check (no enabled services required restart)".to_string()
     };
 
     data.watchdog.last_self_heal_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
-    data.watchdog.circuit_breaker_status = "Closed (100% Healthy)".to_string();
+    data.watchdog.circuit_breaker_status = if failed_units.is_empty() {
+        "Closed (Healthy)".to_string()
+    } else {
+        "Degraded (Restart Failures)".to_string()
+    };
     data.watchdog.recent_events.insert(
         0,
         WatchdogEventItem {
@@ -440,7 +518,9 @@ pub async fn watchdog_heal(
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "Watchdog Supervisor".to_string(),
             action: summary,
-            result: if healed_units.is_empty() {
+            result: if !failed_units.is_empty() {
+                format!("Failed ({})", failed_units.len())
+            } else if healed_units.is_empty() {
                 "Healthy".to_string()
             } else {
                 format!("Healed ({})", healed_units.len())
@@ -448,6 +528,12 @@ pub async fn watchdog_heal(
         },
     );
     store.put_json(KV_OPTIMIZER, &data)?;
+    if !failed_units.is_empty() {
+        return Err(PanelError::Conflict(format!(
+            "không thể tự khởi động lại các dịch vụ: {}",
+            failed_units.join(", ")
+        )));
+    }
     Ok(data)
 }
 
@@ -473,19 +559,23 @@ pub fn update_anti_crash(
     let mut guard = data
         .anti_crash_guard
         .take()
-        .unwrap_or_else(|| default_optimizer_data().anti_crash_guard.unwrap_or(AntiCrashGuardState {
-            load_shedding_enabled: true,
-            cpu_shed_threshold_percent: 92.0,
-            ram_shed_threshold_percent: 90.0,
-            zram_enabled: true,
-            zram_compression_algo: "zstd".to_string(),
-            zram_size_mb: 2048,
-            slow_query_auto_kill_sec: 30,
-            cgroups_v2_enforced: true,
-            oom_immunity_map: Vec::new(),
-            mitigation_count: 0,
-            last_mitigation_action: String::new(),
-        }));
+        .unwrap_or_else(|| {
+            default_optimizer_data()
+                .anti_crash_guard
+                .unwrap_or(AntiCrashGuardState {
+                    load_shedding_enabled: true,
+                    cpu_shed_threshold_percent: 92.0,
+                    ram_shed_threshold_percent: 90.0,
+                    zram_enabled: false,
+                    zram_compression_algo: "zstd".to_string(),
+                    zram_size_mb: 2048,
+                    slow_query_auto_kill_sec: 30,
+                    cgroups_v2_enforced: false,
+                    oom_immunity_map: Vec::new(),
+                    mitigation_count: 0,
+                    last_mitigation_action: String::new(),
+                })
+        });
 
     if let Some(v) = patch.load_shedding_enabled {
         guard.load_shedding_enabled = v;
@@ -528,29 +618,82 @@ pub async fn emergency_mitigate(
 
     let msg = match action.trim() {
         "purge_syn_backlog" => {
-            if prod && executor.is_binary_available(AllowedBinary::Sysctl) {
-                let _ = executor
-                    .run(AllowedBinary::Sysctl, &["-w", "net.ipv4.tcp_syncookies=1"], CMD_TIMEOUT)
-                    .await;
-                let _ = executor
-                    .run(AllowedBinary::Sysctl, &["-w", "net.ipv4.tcp_max_syn_backlog=16384"], CMD_TIMEOUT)
-                    .await;
+            if prod {
+                if !executor.is_binary_available(AllowedBinary::Sysctl) {
+                    return Err(PanelError::Conflict(
+                        "thiếu sysctl để bật tcp_syncookies và mở rộng tcp_max_syn_backlog".to_string(),
+                    ));
+                }
+                for kv in [
+                    "net.ipv4.tcp_syncookies=1",
+                    "net.ipv4.tcp_max_syn_backlog=16384",
+                ] {
+                    let out = executor
+                        .run(AllowedBinary::Sysctl, &["-w", kv], CMD_TIMEOUT)
+                        .await?;
+                    if !out.success {
+                        return Err(PanelError::CommandFailed {
+                            binary: "sysctl",
+                            exit_code: out.exit_code,
+                            stderr: if out.stderr.trim().is_empty() {
+                                out.stdout
+                            } else {
+                                out.stderr
+                            },
+                        });
+                    }
+                }
             }
-            "Purged half-open TCP SYN backlog queues and enforced tcp_syncookies=1"
+            "Enforced net.ipv4.tcp_syncookies=1 and net.ipv4.tcp_max_syn_backlog=16384"
         }
         "isolate_leaking_workers" => {
             if prod {
-                let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+                std::fs::write("/proc/sys/vm/drop_caches", b"3\n").map_err(|err| {
+                    PanelError::Conflict(format!(
+                        "không thể ghi /proc/sys/vm/drop_caches: {err}"
+                    ))
+                })?;
                 if executor.is_binary_available(AllowedBinary::Systemctl) {
-                    let _ = executor
-                        .run(AllowedBinary::Systemctl, &["reload", "php8.3-fpm.service"], CMD_TIMEOUT)
-                        .await;
+                    let php_active = executor
+                        .run(
+                            AllowedBinary::Systemctl,
+                            &["is-active", "php8.3-fpm.service"],
+                            CMD_TIMEOUT,
+                        )
+                        .await
+                        .map(|o| o.success && o.stdout.trim() == "active")
+                        .unwrap_or(false);
+                    if php_active {
+                        let out = executor
+                            .run(
+                                AllowedBinary::Systemctl,
+                                &["reload", "php8.3-fpm.service"],
+                                CMD_TIMEOUT,
+                            )
+                            .await?;
+                        if !out.success {
+                            return Err(PanelError::CommandFailed {
+                                binary: "systemctl",
+                                exit_code: out.exit_code,
+                                stderr: if out.stderr.trim().is_empty() {
+                                    out.stdout
+                                } else {
+                                    out.stderr
+                                },
+                            });
+                        }
+                    }
                 }
             }
-            "Recycled idle worker threads, dropped page caches, and enforced cgroups v2 MemoryHigh limits"
+            "Dropped Linux page caches and reloaded active PHP-FPM workers"
         }
         "reset_hung_db_queries" => {
-            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+            if prod {
+                if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                    return Err(PanelError::Conflict(
+                        "thiếu systemctl để reload database engine".to_string(),
+                    ));
+                }
                 for db_unit in ["mariadb.service", "postgresql.service"] {
                     let active = executor
                         .run(AllowedBinary::Systemctl, &["is-active", db_unit], CMD_TIMEOUT)
@@ -558,19 +701,34 @@ pub async fn emergency_mitigate(
                         .map(|o| o.success && o.stdout.trim() == "active")
                         .unwrap_or(false);
                     if active {
-                        let _ = executor
+                        let out = executor
                             .run(AllowedBinary::Systemctl, &["reload", db_unit], CMD_TIMEOUT)
-                            .await;
+                            .await?;
+                        if !out.success {
+                            return Err(PanelError::CommandFailed {
+                                binary: "systemctl",
+                                exit_code: out.exit_code,
+                                stderr: if out.stderr.trim().is_empty() {
+                                    out.stdout
+                                } else {
+                                    out.stderr
+                                },
+                            });
+                        }
                     }
                 }
             }
-            "Reloaded active database engines and terminated stalled transactions exceeding slow_query_auto_kill_sec"
+            "Reloaded active database engines"
         }
         _ => {
             if prod {
-                let _ = std::fs::write("/proc/sys/vm/drop_caches", b"3\n");
+                std::fs::write("/proc/sys/vm/drop_caches", b"3\n").map_err(|err| {
+                    PanelError::Conflict(format!(
+                        "không thể ghi /proc/sys/vm/drop_caches: {err}"
+                    ))
+                })?;
             }
-            "Executed emergency stability mitigation across worker pools"
+            "Executed emergency memory cache drop mitigation"
         }
     };
     if let Some(ref mut guard) = data.anti_crash_guard {
@@ -590,4 +748,3 @@ pub async fn emergency_mitigate(
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok((msg.to_string(), data))
 }
-

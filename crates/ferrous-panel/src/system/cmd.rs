@@ -4,10 +4,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// Strictly allowlisted Ubuntu 22.04/24.04 system binaries.
 /// Shells (`sh`, `bash`, `zsh`, `dash`) are intentionally absent and forbidden.
@@ -17,8 +17,13 @@ pub enum AllowedBinary {
     Nginx,
     Ferrousx,
     FerrousxCtl,
+    PhpFpm74,
+    PhpFpm81,
+    PhpFpm82,
     PhpFpm83,
+    PhpFpm84,
     Php83,
+    Dig,
     Ufw,
     Fail2banClient,
     Mysql,
@@ -78,8 +83,13 @@ impl AllowedBinary {
             Self::Nginx => "nginx",
             Self::Ferrousx => "ferrousx-bin",
             Self::FerrousxCtl => "ferrousx-ctl",
+            Self::PhpFpm74 => "php-fpm7.4",
+            Self::PhpFpm81 => "php-fpm8.1",
+            Self::PhpFpm82 => "php-fpm8.2",
             Self::PhpFpm83 => "php-fpm8.3",
+            Self::PhpFpm84 => "php-fpm8.4",
             Self::Php83 => "php8.3",
+            Self::Dig => "dig",
             Self::Ufw => "ufw",
             Self::Fail2banClient => "fail2ban-client",
             Self::Mysql => "mysql",
@@ -145,8 +155,13 @@ impl AllowedBinary {
             "nginx" => Some(Self::Nginx),
             "ferrousx-bin" | "ferrousx" => Some(Self::Ferrousx),
             "ferrousx-ctl" | "fx" => Some(Self::FerrousxCtl),
+            "php-fpm7.4" => Some(Self::PhpFpm74),
+            "php-fpm8.1" => Some(Self::PhpFpm81),
+            "php-fpm8.2" => Some(Self::PhpFpm82),
             "php-fpm8.3" => Some(Self::PhpFpm83),
+            "php-fpm8.4" => Some(Self::PhpFpm84),
             "php8.3" | "php" => Some(Self::Php83),
+            "dig" => Some(Self::Dig),
             "ufw" => Some(Self::Ufw),
             "fail2ban-client" => Some(Self::Fail2banClient),
             "mysql" | "mariadb" => Some(Self::Mysql),
@@ -207,8 +222,13 @@ impl AllowedBinary {
             Self::Nginx => &["/usr/sbin/nginx", "/usr/bin/nginx"],
             Self::Ferrousx => &["/usr/local/bin/ferrousx-bin", "/usr/local/bin/ferrousx"],
             Self::FerrousxCtl => &["/usr/local/bin/ferrousx-ctl", "/usr/local/bin/fx"],
+            Self::PhpFpm74 => &["/usr/sbin/php-fpm7.4"],
+            Self::PhpFpm81 => &["/usr/sbin/php-fpm8.1"],
+            Self::PhpFpm82 => &["/usr/sbin/php-fpm8.2"],
             Self::PhpFpm83 => &["/usr/sbin/php-fpm8.3"],
+            Self::PhpFpm84 => &["/usr/sbin/php-fpm8.4"],
             Self::Php83 => &["/usr/bin/php8.3", "/usr/bin/php"],
+            Self::Dig => &["/usr/bin/dig", "/bin/dig"],
             Self::Ufw => &["/usr/sbin/ufw", "/sbin/ufw"],
             Self::Fail2banClient => &["/usr/bin/fail2ban-client"],
             Self::Mysql => &["/usr/bin/mysql", "/usr/bin/mariadb"],
@@ -276,6 +296,18 @@ impl AllowedBinary {
         None
     }
 
+    #[must_use]
+    pub fn php_fpm_for_version(version: &str) -> Option<Self> {
+        match version.trim() {
+            "7.4" => Some(Self::PhpFpm74),
+            "8.1" => Some(Self::PhpFpm81),
+            "8.2" => Some(Self::PhpFpm82),
+            "8.3" => Some(Self::PhpFpm83),
+            "8.4" => Some(Self::PhpFpm84),
+            _ => None,
+        }
+    }
+
     fn resolve_path(self) -> Result<&'static Path, PanelError> {
         for candidate in self.candidate_paths() {
             let p = Path::new(candidate);
@@ -303,6 +335,88 @@ fn bounded_utf8(bytes: &[u8]) -> String {
         bytes
     };
     String::from_utf8_lossy(slice).trim().to_string()
+}
+
+/// Validates a user-supplied positional argument passed to external CLIs
+/// (`git`, `docker`, `podman`, `curl`, `tar`, `php`, `bun`, `deno`, `composer`, `wp`, `useradd`).
+/// Rejects leading `-`, control characters, and known option/command-execution injection patterns.
+pub fn validate_no_flag_injection<'a>(arg: &'a str, field: &str) -> Result<&'a str, PanelError> {
+    let trimmed = arg.trim();
+    if trimmed.is_empty() {
+        return Err(PanelError::Validation(format!("{field} cannot be empty")));
+    }
+    if trimmed.contains('\0') || trimmed.contains('\r') || trimmed.contains('\n') {
+        return Err(PanelError::Forbidden(format!(
+            "{field} contains forbidden control character"
+        )));
+    }
+    if trimmed.starts_with('-') {
+        return Err(PanelError::Forbidden(format!(
+            "{field} cannot start with '-' (argument injection guard)"
+        )));
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    for forbidden in [
+        "--config",
+        "--exec",
+        "--to-command",
+        "--checkpoint-action",
+        "--upload-pack",
+        "core.sshcommand",
+        "core.fsmonitor",
+        "proxycommand",
+    ] {
+        if lower.contains(forbidden) {
+            return Err(PanelError::Forbidden(format!(
+                "{field} contains forbidden option pattern '{forbidden}'"
+            )));
+        }
+    }
+    Ok(trimmed)
+}
+
+async fn read_pipe_bounded<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(limit.min(8192));
+    {
+        let mut limited = (&mut reader).take(limit as u64);
+        let _ = limited.read_to_end(&mut buf).await;
+    }
+    // Drain excess bytes into a small stack buffer so the child process cannot deadlock on a full pipe.
+    let mut discard = [0u8; 4096];
+    loop {
+        match reader.read(&mut discard).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    buf
+}
+
+async fn wait_child_bounded(
+    mut child: tokio::process::Child,
+    read_stdout: bool,
+    read_stderr: bool,
+) -> std::io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
+    let stdout_pipe = if read_stdout { child.stdout.take() } else { None };
+    let stderr_pipe = if read_stderr { child.stderr.take() } else { None };
+
+    let stdout_fut = async move {
+        match stdout_pipe {
+            Some(pipe) => read_pipe_bounded(pipe, MAX_OUTPUT_BYTES).await,
+            None => Vec::new(),
+        }
+    };
+    let stderr_fut = async move {
+        match stderr_pipe {
+            Some(pipe) => read_pipe_bounded(pipe, MAX_OUTPUT_BYTES).await,
+            None => Vec::new(),
+        }
+    };
+
+    let (status_res, stdout_bytes, stderr_bytes) =
+        tokio::join!(child.wait(), stdout_fut, stderr_fut);
+    let status = status_res?;
+    Ok((status, stdout_bytes, stderr_bytes))
 }
 
 /// Runs an allowlisted binary directly (`execve`, no shell) with argument NUL checks and timeout.
@@ -361,18 +475,19 @@ pub async fn run_with_env(
     let child = cmd.spawn()?;
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
 
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| PanelError::CommandTimeout {
-            binary: bin.label(),
-            timeout_ms,
-        })??;
+    let (status, stdout_bytes, stderr_bytes) =
+        tokio::time::timeout(timeout, wait_child_bounded(child, true, true))
+            .await
+            .map_err(|_| PanelError::CommandTimeout {
+                binary: bin.label(),
+                timeout_ms,
+            })??;
 
     Ok(CmdOutput {
-        exit_code: output.status.code(),
-        success: output.status.success(),
-        stdout: bounded_utf8(&output.stdout),
-        stderr: bounded_utf8(&output.stderr),
+        exit_code: status.code(),
+        success: status.success(),
+        stdout: bounded_utf8(&stdout_bytes),
+        stderr: bounded_utf8(&stderr_bytes),
     })
 }
 
@@ -410,18 +525,19 @@ pub async fn run_with_stdin(
     }
 
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| PanelError::CommandTimeout {
-            binary: bin.label(),
-            timeout_ms,
-        })??;
+    let (status, stdout_bytes, stderr_bytes) =
+        tokio::time::timeout(timeout, wait_child_bounded(child, true, true))
+            .await
+            .map_err(|_| PanelError::CommandTimeout {
+                binary: bin.label(),
+                timeout_ms,
+            })??;
 
     Ok(CmdOutput {
-        exit_code: output.status.code(),
-        success: output.status.success(),
-        stdout: bounded_utf8(&output.stdout),
-        stderr: bounded_utf8(&output.stderr),
+        exit_code: status.code(),
+        success: status.success(),
+        stdout: bounded_utf8(&stdout_bytes),
+        stderr: bounded_utf8(&stderr_bytes),
     })
 }
 
@@ -468,18 +584,19 @@ pub async fn run_to_file(
 
     let child = cmd.spawn()?;
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-    let output = tokio::time::timeout(timeout, child.wait_with_output())
-        .await
-        .map_err(|_| PanelError::CommandTimeout {
-            binary: bin.label(),
-            timeout_ms,
-        })??;
+    let (status, _stdout_bytes, stderr_bytes) =
+        tokio::time::timeout(timeout, wait_child_bounded(child, false, true))
+            .await
+            .map_err(|_| PanelError::CommandTimeout {
+                binary: bin.label(),
+                timeout_ms,
+            })??;
 
     Ok(CmdOutput {
-        exit_code: output.status.code(),
-        success: output.status.success(),
+        exit_code: status.code(),
+        success: status.success(),
         stdout: String::new(),
-        stderr: bounded_utf8(&output.stderr),
+        stderr: bounded_utf8(&stderr_bytes),
     })
 }
 

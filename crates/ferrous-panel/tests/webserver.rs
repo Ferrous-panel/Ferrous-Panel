@@ -351,6 +351,9 @@ fn sample_static_site() -> Result<SiteSpec> {
         http3_quic: false,
         websocket_enabled: false,
         rate_limit_rps: 0,
+        redirects: Vec::new(),
+        hotlink_protection: None,
+        directory_auth: Vec::new(),
     })
 }
 
@@ -367,6 +370,9 @@ fn sample_proxy_ssl_site() -> Result<SiteSpec> {
         http3_quic: false,
         websocket_enabled: false,
         rate_limit_rps: 0,
+        redirects: Vec::new(),
+        hotlink_protection: None,
+        directory_auth: Vec::new(),
     })
 }
 
@@ -384,6 +390,9 @@ fn sample_php_site() -> Result<SiteSpec> {
         http3_quic: false,
         websocket_enabled: false,
         rate_limit_rps: 0,
+        redirects: Vec::new(),
+        hotlink_protection: None,
+        directory_auth: Vec::new(),
     })
 }
 
@@ -599,15 +608,15 @@ fn unsupported_site_modes_return_501_and_invalid_ssl_redirect_returns_400() -> R
         "unsupported SiteMode must return NotImplemented (501)",
     )?;
 
-    // Supported advanced flag http3Quic renders cleanly
+    // Unsupported HTTP/3 QUIC on stock Nginx (without --with-http_v3_module) => 409 Conflict
     unsupported_mode.mode = SiteMode::StaticSpa {
         index_file: SafeFilename::parse("index.html")?,
         spa_fallback: false,
     };
     unsupported_mode.http3_quic = true;
     ensure(
-        nginx.render_site(&unsupported_mode).is_ok(),
-        "supported http3Quic flag must render without error",
+        matches!(nginx.render_site(&unsupported_mode), Err(PanelError::Conflict(_))),
+        "http3Quic without http_v3_module support must return Conflict (409)",
     )?;
 
     // Invalid redirectHttps=true with sslEnabled=false => 400 Validation

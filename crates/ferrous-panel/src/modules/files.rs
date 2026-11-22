@@ -639,26 +639,137 @@ pub async fn upload_zip(
     })
 }
 
-fn validate_tar_listing(stdout: &str) -> Result<usize, PanelError> {
-    let mut count = 0usize;
-    for line in stdout.lines() {
-        let trimmed = line.trim();
+/// Validates `tar -tf` (exact entry names, preserving spaces) together with `tar -tvf`
+/// (verbose listing used exclusively to detect forbidden entry types: symlinks, hardlinks,
+/// device nodes, FIFOs, and sockets).
+pub fn validate_tar_listings(names_stdout: &str, verbose_stdout: &str) -> Result<usize, PanelError> {
+    for line in verbose_stdout.lines() {
+        let trimmed = line.trim_start();
         if trimmed.is_empty() {
             continue;
         }
-        // Reject symlinks ('l') and hardlinks ('h') in verbose tar listing.
-        if trimmed.starts_with('l') || trimmed.starts_with('h') {
+        let first = trimmed.chars().next().unwrap_or('-');
+        if matches!(first, 'l' | 'h' | 'b' | 'c' | 'p' | 's') {
             return Err(PanelError::Forbidden(format!(
-                "archive contains forbidden symlink/hardlink entry: {trimmed}"
+                "archive contains forbidden symlink/hardlink/special entry: {trimmed}"
             )));
         }
-        // Last whitespace token holds entry path in `tar -tvf` or `tar -tf`.
-        if let Some(entry_path) = trimmed.split_whitespace().last() {
-            let _ = validate_archive_relative_entry(entry_path)?;
+    }
+
+    let mut count = 0usize;
+    for raw_line in names_stdout.lines() {
+        let entry = raw_line.trim_end_matches('\r');
+        if entry.trim().is_empty() {
+            continue;
         }
+        let _ = validate_archive_relative_entry(entry)?;
         count += 1;
     }
     Ok(count)
+}
+
+/// Validates `unzip -Z` (zipinfo permissions column to detect symlink entries) together with
+/// `unzip -Z1` (exact entry names, preserving spaces).
+pub fn validate_zip_listings(zipinfo_stdout: &str, names_stdout: &str) -> Result<usize, PanelError> {
+    for line in zipinfo_stdout.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty()
+            || trimmed.starts_with("Archive:")
+            || trimmed.starts_with("Zip file size:")
+            || trimmed.ends_with("uncompressed")
+        {
+            continue;
+        }
+        if let Some(mode_token) = trimmed.split_whitespace().next() {
+            if mode_token.len() == 10 {
+                let first = mode_token.chars().next().unwrap_or('-');
+                if matches!(first, 'l' | 'b' | 'c' | 'p' | 's') {
+                    return Err(PanelError::Forbidden(format!(
+                        "zip archive contains forbidden symlink or special entry: {trimmed}"
+                    )));
+                }
+            }
+        }
+    }
+
+    let mut count = 0usize;
+    for raw_line in names_stdout.lines() {
+        let entry = raw_line.trim_end_matches('\r');
+        if entry.trim().is_empty() {
+            continue;
+        }
+        let _ = validate_archive_relative_entry(entry)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn verify_tree_contains_no_symlinks(root: &Path) -> Result<(), PanelError> {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = std::fs::read_dir(&dir)?;
+        for entry in rd {
+            let entry = entry?;
+            let path = entry.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() {
+                return Err(PanelError::Forbidden(format!(
+                    "extracted archive contained forbidden symbolic link '{}'",
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                )));
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn move_staged_tree(staging_dir: &Path, target_dir: &Path) -> Result<(), PanelError> {
+    let mut stack = vec![(staging_dir.to_path_buf(), target_dir.to_path_buf())];
+    while let Some((src_dir, dst_dir)) = stack.pop() {
+        std::fs::create_dir_all(&dst_dir)?;
+        for entry in std::fs::read_dir(&src_dir)? {
+            let entry = entry?;
+            let src_path = entry.path();
+            let dst_path = dst_dir.join(entry.file_name());
+            let meta = std::fs::symlink_metadata(&src_path)?;
+            if meta.file_type().is_symlink() {
+                return Err(PanelError::Forbidden(
+                    "symbolic link rejected during staged extraction".to_string(),
+                ));
+            }
+            if meta.is_dir() {
+                if let Ok(dst_meta) = std::fs::symlink_metadata(&dst_path) {
+                    if dst_meta.file_type().is_symlink() {
+                        return Err(PanelError::Forbidden(
+                            "refusing to extract into existing symbolic link".to_string(),
+                        ));
+                    }
+                    if !dst_meta.is_dir() {
+                        std::fs::remove_file(&dst_path)?;
+                    }
+                }
+                stack.push((src_path, dst_path));
+            } else {
+                if let Ok(dst_meta) = std::fs::symlink_metadata(&dst_path) {
+                    if dst_meta.file_type().is_symlink() {
+                        return Err(PanelError::Forbidden(
+                            "refusing to overwrite existing symbolic link".to_string(),
+                        ));
+                    }
+                    if dst_meta.is_dir() {
+                        std::fs::remove_dir_all(&dst_path)?;
+                    }
+                }
+                std::fs::rename(&src_path, &dst_path)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn extract_archive(
@@ -697,43 +808,67 @@ pub async fn extract_archive(
                 "unzip binary is not installed on this host".to_string(),
             ));
         }
-        let inspect = executor
-            .run(
-                AllowedBinary::Unzip,
-                &["-Z1", &arch_str],
-                FILE_CMD_TIMEOUT,
-            )
+        // Inspect entry modes (`unzip -Z`) to reject symlinks AND exact names (`unzip -Z1`) for zip-slip & spaces.
+        let zipinfo = executor
+            .run(AllowedBinary::Unzip, &["-Z", &arch_str], FILE_CMD_TIMEOUT)
             .await?;
-        if !inspect.success {
+        if !zipinfo.success {
             return Err(PanelError::CommandFailed {
                 binary: "unzip",
-                exit_code: inspect.exit_code,
-                stderr: inspect.stderr,
+                exit_code: zipinfo.exit_code,
+                stderr: zipinfo.stderr,
             });
         }
-        let mut count = 0usize;
-        for line in inspect.stdout.lines() {
-            let entry = line.trim();
-            if entry.is_empty() {
-                continue;
-            }
-            let _ = validate_archive_relative_entry(entry)?;
-            count += 1;
+        let names = executor
+            .run(AllowedBinary::Unzip, &["-Z1", &arch_str], FILE_CMD_TIMEOUT)
+            .await?;
+        if !names.success {
+            return Err(PanelError::CommandFailed {
+                binary: "unzip",
+                exit_code: names.exit_code,
+                stderr: names.stderr,
+            });
         }
+        let count = validate_zip_listings(&zipinfo.stdout, &names.stdout)?;
+
+        // Extract into a private staging directory under target_dir, assert zero symlinks on disk, then move.
+        let staging_dir = target_dir.as_path().join(format!(
+            ".ferrous-unzip-stage-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&staging_dir)?;
+        let staging_str = staging_dir.display().to_string();
         let unpack = executor
             .run(
                 AllowedBinary::Unzip,
-                &["-o", "-q", &arch_str, "-d", &target_str],
+                &["-o", "-q", &arch_str, "-d", &staging_str],
                 FILE_CMD_TIMEOUT,
             )
-            .await?;
-        if !unpack.success {
-            return Err(PanelError::CommandFailed {
-                binary: "unzip",
-                exit_code: unpack.exit_code,
-                stderr: unpack.stderr,
-            });
+            .await;
+        let unpack_res = match unpack {
+            Ok(r) if r.success => r,
+            Ok(r) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                return Err(PanelError::CommandFailed {
+                    binary: "unzip",
+                    exit_code: r.exit_code,
+                    stderr: r.stderr,
+                });
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging_dir);
+                return Err(e);
+            }
+        };
+        let _ = unpack_res;
+        if let Err(e) = verify_tree_contains_no_symlinks(&staging_dir) {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return Err(e);
         }
+        let move_res = move_staged_tree(&staging_dir, target_dir.as_path());
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        move_res?;
         count
     } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") || lower.ends_with(".tar.zst") {
         if !executor.is_binary_available(AllowedBinary::Tar) {
@@ -741,40 +876,51 @@ pub async fn extract_archive(
                 "tar binary is not installed on this host".to_string(),
             ));
         }
-        let mut inspect_args = Vec::new();
-        if lower.ends_with(".tar.zst") {
-            inspect_args.push("--zstd");
+        let comp_flag = if lower.ends_with(".tar.zst") {
+            "--zstd"
         } else {
-            inspect_args.push("-z");
-        }
-        inspect_args.push("-tvf");
-        inspect_args.push(&arch_str);
-        let inspect = executor
-            .run(AllowedBinary::Tar, &inspect_args, FILE_CMD_TIMEOUT)
+            "-z"
+        };
+        // Separate exact filename listing (`-tf`) from entry-type listing (`-tvf`) so filenames with spaces are handled accurately.
+        let names_out = executor
+            .run(
+                AllowedBinary::Tar,
+                &[comp_flag, "-tf", &arch_str],
+                FILE_CMD_TIMEOUT,
+            )
             .await?;
-        if !inspect.success {
+        if !names_out.success {
             return Err(PanelError::CommandFailed {
                 binary: "tar",
-                exit_code: inspect.exit_code,
-                stderr: inspect.stderr,
+                exit_code: names_out.exit_code,
+                stderr: names_out.stderr,
             });
         }
-        let count = validate_tar_listing(&inspect.stdout)?;
-
-        let mut unpack_args = Vec::new();
-        if lower.ends_with(".tar.zst") {
-            unpack_args.push("--zstd");
-        } else {
-            unpack_args.push("-z");
+        let verbose_out = executor
+            .run(
+                AllowedBinary::Tar,
+                &[comp_flag, "-tvf", &arch_str],
+                FILE_CMD_TIMEOUT,
+            )
+            .await?;
+        if !verbose_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "tar",
+                exit_code: verbose_out.exit_code,
+                stderr: verbose_out.stderr,
+            });
         }
-        unpack_args.extend_from_slice(&[
+        let count = validate_tar_listings(&names_out.stdout, &verbose_out.stdout)?;
+
+        let unpack_args = [
+            comp_flag,
             "--no-same-owner",
             "--no-same-permissions",
             "-xf",
             &arch_str,
             "-C",
             &target_str,
-        ]);
+        ];
         let unpack = executor
             .run(AllowedBinary::Tar, &unpack_args, FILE_CMD_TIMEOUT)
             .await?;
@@ -863,59 +1009,155 @@ pub async fn compress_dir(
     })
 }
 
-fn is_forbidden_ssrf_ip(ip: IpAddr) -> bool {
+/// Returns `true` if `ip` belongs to any loopback, private, link-local, CGNAT,
+/// cloud metadata, benchmarking, unspecified, multicast, reserved, or IPv4-mapped non-public range.
+#[must_use]
+pub fn is_forbidden_ssrf_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let [a, b, c, d] = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.is_multicast()
+                || v4.is_broadcast()
+                || a == 0 // 0.0.0.0/8
+                || (a == 100 && (b & 0xc0) == 64) // 100.64.0.0/10 (CGNAT)
+                || (a == 169 && b == 254 && c == 169 && d == 254) // cloud metadata
+                || (a == 192 && b == 0 && c == 0) // 192.0.0.0/24
+                || (a == 198 && (b == 18 || b == 19)) // 198.18.0.0/15
+                || a >= 240 // 240.0.0.0/4 reserved
         }
         IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_forbidden_ssrf_ip(IpAddr::V4(mapped));
+            }
+            if let Some(compat) = v6.to_ipv4() {
+                return is_forbidden_ssrf_ip(IpAddr::V4(compat));
+            }
+            let seg0 = v6.segments()[0];
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (v6.segments()[0] & 0xfe00) == 0xfc00
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 ULA
+                || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+                || (seg0 & 0xffc0) == 0xfec0 // fec0::/10 deprecated site-local
         }
     }
 }
 
-pub fn validate_remote_download_url(raw: &str) -> Result<String, PanelError> {
+fn is_numeric_ip_label(label: &str) -> bool {
+    if label.is_empty() {
+        return false;
+    }
+    if let Some(hex) = label
+        .strip_prefix("0x")
+        .or_else(|| label.strip_prefix("0X"))
+    {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    label.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Rejects obfuscated numeric IP encodings (decimal integer `2130706433`, hex `0x7f.1`,
+/// octal `0177.0.0.1`, shorthand `127.1`) that bypass naive `IpAddr::parse`.
+fn is_obfuscated_numeric_host(host: &str) -> bool {
+    let trimmed = host.trim_end_matches('.');
+    if trimmed.is_empty() {
+        return true;
+    }
+    let labels: Vec<&str> = trimmed.split('.').collect();
+    if labels.iter().all(|l| is_numeric_ip_label(l)) {
+        // Only standard 4-label dotted-decimal without leading zeros or hex is allowed as an IP literal.
+        if labels.len() != 4 {
+            return true;
+        }
+        for label in &labels {
+            if label.starts_with("0x")
+                || label.starts_with("0X")
+                || (label.len() > 1 && label.starts_with('0'))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedRemoteUrl {
+    pub url: String,
+    pub host: String,
+    pub port: u16,
+}
+
+pub fn parse_and_validate_remote_url(raw: &str) -> Result<ValidatedRemoteUrl, PanelError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.len() > 2048 {
-        return Err(PanelError::Validation("URL must be 1..=2048 characters".to_string()));
+        return Err(PanelError::Validation(
+            "URL must be 1..=2048 characters".to_string(),
+        ));
     }
     if trimmed.contains('\0') || trimmed.chars().any(char::is_whitespace) {
         return Err(PanelError::Forbidden(
             "URL contains whitespace or NUL byte".to_string(),
         ));
     }
-    let after_scheme = if let Some(rest) = trimmed.strip_prefix("https://") {
-        rest
+    let (default_port, after_scheme) = if let Some(rest) = trimmed.strip_prefix("https://") {
+        (443u16, rest)
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        rest
+        (80u16, rest)
     } else {
         return Err(PanelError::Validation(
             "only http:// and https:// URLs are allowed".to_string(),
         ));
     };
 
-    let authority = after_scheme.split('/').next().unwrap_or("");
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    if authority.is_empty() {
+        return Err(PanelError::Validation("URL is missing host".to_string()));
+    }
     if authority.contains('@') {
         return Err(PanelError::Forbidden(
             "embedded credentials in remote URL are forbidden".to_string(),
         ));
     }
-    let host = if let Some(stripped) = authority.strip_prefix('[') {
-        stripped.split(']').next().unwrap_or("")
+    let (host, port) = if let Some(stripped) = authority.strip_prefix('[') {
+        let Some((ipv6_host, rest)) = stripped.split_once(']') else {
+            return Err(PanelError::Validation("malformed IPv6 host in URL".to_string()));
+        };
+        let port = if let Some(port_str) = rest.strip_prefix(':') {
+            port_str
+                .parse::<u16>()
+                .ok()
+                .filter(|&p| p > 0)
+                .ok_or_else(|| PanelError::Validation("invalid port in URL".to_string()))?
+        } else if rest.is_empty() {
+            default_port
+        } else {
+            return Err(PanelError::Validation("malformed IPv6 authority in URL".to_string()));
+        };
+        (ipv6_host, port)
+    } else if let Some((h, port_str)) = authority.rsplit_once(':') {
+        let port = port_str
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0)
+            .ok_or_else(|| PanelError::Validation("invalid port in URL".to_string()))?;
+        (h, port)
     } else {
-        authority.split(':').next().unwrap_or("")
+        (authority, default_port)
     };
+
     let lower_host = host.to_ascii_lowercase();
     if lower_host.is_empty()
+        || lower_host.starts_with('-')
         || lower_host == "localhost"
+        || lower_host.ends_with(".localhost")
         || lower_host.ends_with(".local")
         || lower_host.ends_with(".internal")
         || lower_host == "metadata.google.internal"
@@ -924,6 +1166,11 @@ pub fn validate_remote_download_url(raw: &str) -> Result<String, PanelError> {
             "downloading from loopback or internal hostnames is forbidden (SSRF guard)".to_string(),
         ));
     }
+    if is_obfuscated_numeric_host(&lower_host) {
+        return Err(PanelError::Forbidden(format!(
+            "downloading from obfuscated decimal/hex/octal host '{host}' is forbidden (SSRF guard)"
+        )));
+    }
     if let Ok(ip) = lower_host.parse::<IpAddr>() {
         if is_forbidden_ssrf_ip(ip) {
             return Err(PanelError::Forbidden(format!(
@@ -931,7 +1178,15 @@ pub fn validate_remote_download_url(raw: &str) -> Result<String, PanelError> {
             )));
         }
     }
-    Ok(trimmed.to_string())
+    Ok(ValidatedRemoteUrl {
+        url: trimmed.to_string(),
+        host: lower_host,
+        port,
+    })
+}
+
+pub fn validate_remote_download_url(raw: &str) -> Result<String, PanelError> {
+    Ok(parse_and_validate_remote_url(raw)?.url)
 }
 
 pub async fn remote_download(
@@ -949,7 +1204,7 @@ pub async fn remote_download(
         ));
     }
     let app_root = resolve_app_root(app_id, store, config)?;
-    let url = validate_remote_download_url(url_raw)?;
+    let parsed = parse_and_validate_remote_url(url_raw)?;
     let clean_name = validate_single_filename(file_name_raw)?;
     let clean_parent = normalize_virtual_dir(parent_dir)?;
     let rel = if clean_parent.is_empty() {
@@ -961,20 +1216,60 @@ pub async fn remote_download(
     if let Some(p) = dest.as_path().parent() {
         std::fs::create_dir_all(p)?;
     }
-    let dest_str = dest.as_path().display().to_string();
 
+    // Pre-resolve DNS and verify EVERY returned IP against SSRF ranges, then pin the verified IP
+    // via `--resolve host:port:ip` to eliminate DNS rebinding windows.
+    let resolved_addrs: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host((parsed.host.as_str(), parsed.port))
+            .await
+            .map_err(|e| {
+                PanelError::Validation(format!(
+                    "DNS lookup failed for '{}': {e}",
+                    parsed.host
+                ))
+            })?
+            .collect();
+    if resolved_addrs.is_empty() {
+        return Err(PanelError::Forbidden(format!(
+            "DNS lookup returned no addresses for '{}'",
+            parsed.host
+        )));
+    }
+    for addr in &resolved_addrs {
+        if is_forbidden_ssrf_ip(addr.ip()) {
+            return Err(PanelError::Forbidden(format!(
+                "host '{}' resolved to forbidden non-public IP '{}' (SSRF guard)",
+                parsed.host,
+                addr.ip()
+            )));
+        }
+    }
+    let pinned_ip = resolved_addrs[0].ip();
+    let resolve_pin = match pinned_ip {
+        IpAddr::V4(v4) => format!("{}:{}:{v4}", parsed.host, parsed.port),
+        IpAddr::V6(v6) => format!("{}:{}:[{v6}]", parsed.host, parsed.port),
+    };
+
+    let dest_str = dest.as_path().display().to_string();
     let out = executor
         .run(
             AllowedBinary::Curl,
             &[
-                "-fsSL",
+                "-fsS",
+                "--max-redirs",
+                "0",
                 "--proto",
                 "=http,https",
+                "--proto-redir",
+                "=http,https",
+                "--resolve",
+                &resolve_pin,
                 "--max-filesize",
                 "104857600",
                 "-o",
                 &dest_str,
-                &url,
+                "--",
+                &parsed.url,
             ],
             FILE_CMD_TIMEOUT,
         )

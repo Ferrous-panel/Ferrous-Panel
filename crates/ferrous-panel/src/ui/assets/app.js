@@ -1,6 +1,6 @@
 // FerrousPanel Pure-Rust Native Frontend Core (Zero Node.js)
 import { renderOverview, renderApps, renderFiles, renderDatabases } from './views-core.js';
-import { renderWebserver, renderPhpSoftware, renderCpanel, renderMail } from './views-infra.js';
+import { renderWebserver, renderPhpSoftware, renderCpanel, renderMail, renderEdgePolyglot } from './views-infra.js';
 import { renderSecurity, renderOptimizer, renderSsh, renderSettingsJobs } from './views-security.js';
 
 const TOKEN_KEY = 'fp_session_token';
@@ -15,6 +15,7 @@ export const state = {
   activeJobPoll: null,
   telemetryHistory: [],
   refreshTimer: null,
+  capabilities: null,
 };
 
 function readBootConfig() {
@@ -63,10 +64,78 @@ export function fmtTime(iso) {
 
 export function statusClass(status) {
   const s = String(status || '').toLowerCase();
-  if (['running', 'active', 'online', 'completed', 'ok', 'healthy', 'installed', 'enabled', 'pass'].includes(s)) return 'st-ok';
-  if (['queued', 'pending', 'building', 'warning', 'warn', 'elevated', 'degraded'].includes(s)) return 'st-warn';
-  if (['failed', 'error', 'stopped', 'critical', 'under_attack', 'offline', 'missing'].includes(s)) return 'st-err';
+  if (['running', 'active', 'online', 'completed', 'ok', 'healthy', 'installed', 'enabled', 'pass', 'ready', 'verified'].includes(s)) return 'st-ok';
+  if (['queued', 'pending', 'building', 'warning', 'warn', 'elevated', 'degraded', 'experimental', 'unverified', 'staged'].includes(s)) return 'st-warn';
+  if (['failed', 'error', 'stopped', 'critical', 'under_attack', 'offline', 'missing', 'unavailable', 'not-installed', 'not_installed'].includes(s)) return 'st-err';
   return 'st-muted';
+}
+
+export async function loadCapabilities(force = false) {
+  if (state.capabilities && !force) return state.capabilities;
+  try {
+    state.capabilities = await api('GET', '/api/capabilities');
+  } catch (_) {
+    state.capabilities = null;
+  }
+  return state.capabilities;
+}
+
+export function capOf(id) {
+  const list = state.capabilities?.capabilities || [];
+  return list.find((c) => c.id === id) || null;
+}
+
+export function isCapUnavailable(id) {
+  const c = capOf(id);
+  return Boolean(c && c.status === 'unavailable');
+}
+
+export function capBannerHtml(ids) {
+  const list = (Array.isArray(ids) ? ids : [ids])
+    .map((id) => capOf(id))
+    .filter((c) => c && c.status !== 'ready');
+  if (!list.length) return '';
+  return list
+    .map((c) => `
+      <div class="cap-banner ${esc(c.status)}">
+        <div class="cap-banner-head">
+          <strong>${esc(c.label || c.id)}</strong>
+          <span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span>
+        </div>
+        <div>${esc(c.reason || 'Tính năng chưa sẵn sàng trên máy chủ này.')}</div>
+        ${c.fixHint ? `<div class="cap-hint">Gợi ý khắc phục: ${esc(c.fixHint)}</div>` : ''}
+      </div>
+    `)
+    .join('');
+}
+
+export function capDisabledAttr(id) {
+  const c = capOf(id);
+  if (!c || c.status !== 'unavailable') return '';
+  const title = `${c.reason || 'Không khả dụng'}${c.fixHint ? ` — ${c.fixHint}` : ''}`;
+  return `disabled title="${esc(title)}"`;
+}
+
+export async function withBusy(btn, fn) {
+  if (!btn) return fn();
+  if (btn.disabled) return;
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.dataset.busy = '1';
+  if (origText && origText.length < 32) {
+    btn.textContent = 'Đang xử lý…';
+  }
+  try {
+    return await fn();
+  } finally {
+    btn.dataset.busy = '';
+    if (document.body.contains(btn)) {
+      btn.disabled = false;
+      if (origText && origText.length < 32) {
+        btn.textContent = origText;
+      }
+    }
+  }
 }
 
 export function toast(message, kind = 'ok') {
@@ -78,7 +147,7 @@ export function toast(message, kind = 'ok') {
   root.appendChild(el);
   setTimeout(() => {
     el.remove();
-  }, 4200);
+  }, 5200);
 }
 
 export function closeModal() {
@@ -245,7 +314,9 @@ export async function api(method, path, body = undefined, { rawBody = false, con
   }
   if (!resp.ok) {
     const msg = (data && (data.error || data.message)) || (typeof data === 'string' && data) || `HTTP ${resp.status}`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = resp.status;
+    throw err;
   }
   return data;
 }
@@ -280,6 +351,7 @@ const NAV_GROUPS = [
       { id: 'software', label: 'PHP-FPM & Phần mềm' },
       { id: 'cpanel', label: 'Cron, Backup & DNS' },
       { id: 'mail', label: 'Máy chủ Mail' },
+      { id: 'edge', label: 'Edge Cloud & Polyglot' },
     ],
   },
   {
@@ -318,7 +390,7 @@ function updateShellChrome() {
   if (sidebar) sidebar.classList.toggle('open', state.mobileNavOpen);
 }
 
-export async function renderCurrentView() {
+export async function renderCurrentView(forceCaps = false) {
   if (state.refreshTimer) {
     clearInterval(state.refreshTimer);
     state.refreshTimer = null;
@@ -328,6 +400,7 @@ export async function renderCurrentView() {
   container.innerHTML = `<div class="surface"><div class="empty-state">Đang tải dữ liệu từ Rust daemon…</div></div>`;
 
   try {
+    await loadCapabilities(forceCaps);
     switch (state.route) {
       case 'overview':
         await renderOverview(container);
@@ -353,6 +426,9 @@ export async function renderCurrentView() {
       case 'mail':
         await renderMail(container);
         break;
+      case 'edge':
+        await renderEdgePolyglot(container);
+        break;
       case 'security':
         await renderSecurity(container);
         break;
@@ -376,7 +452,7 @@ export async function renderCurrentView() {
           <button type="button" class="btn" id="retry-view-btn">Thử tải lại</button>
         </div>
       `;
-      document.getElementById('retry-view-btn')?.addEventListener('click', () => renderCurrentView());
+      document.getElementById('retry-view-btn')?.addEventListener('click', () => renderCurrentView(true));
     }
   }
 }
@@ -389,6 +465,7 @@ export async function handleLogout() {
   }
   state.token = '';
   state.user = null;
+  state.capabilities = null;
   sessionStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(TOKEN_KEY);
   if (state.refreshTimer) {
@@ -476,11 +553,11 @@ function renderShell() {
     state.mobileNavOpen = !state.mobileNavOpen;
     updateShellChrome();
   });
-  document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => renderCurrentView());
+  document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => renderCurrentView(true));
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.getElementById('topbar-logout-btn')?.addEventListener('click', handleLogout);
 
-  renderCurrentView();
+  renderCurrentView(true);
 }
 
 function renderLogin(errorMessage = '') {

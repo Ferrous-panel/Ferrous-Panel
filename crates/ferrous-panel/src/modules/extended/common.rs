@@ -51,7 +51,7 @@ pub(super) fn sha256_hex(input: &[u8]) -> String {
 }
 
 pub(super) fn is_production_vps(config: &Config) -> bool {
-    config.data_dir == Path::new("/var/lib/ferrous-panel")
+    config.is_production()
 }
 
 pub(super) fn read_env_file_value(path: &Path, key: &str) -> Option<String> {
@@ -211,7 +211,7 @@ pub(super) fn resolve_panel_env_path(config: &Config) -> PathBuf {
             return PathBuf::from(trimmed);
         }
     }
-    if config.data_dir == Path::new("/var/lib/ferrous-panel") {
+    if config.is_production() && Path::new("/etc/ferrous-panel").is_dir() {
         PathBuf::from("/etc/ferrous-panel/panel.env")
     } else {
         config.data_dir.join("panel.env")

@@ -57,6 +57,21 @@ fn default_php_extensions() -> Vec<PhpExtensionItem> {
     ]
 }
 
+fn validate_php_ini_value(val: &str, field: &str) -> Result<String, PanelError> {
+    let clean = val.trim();
+    if clean.is_empty()
+        || clean.len() > 64
+        || clean
+            .chars()
+            .any(|c| matches!(c, '\r' | '\n' | '\0' | ';' | '#'))
+    {
+        return Err(PanelError::Validation(format!(
+            "PHP setting '{field}' contains invalid characters"
+        )));
+    }
+    Ok(clean.to_string())
+}
+
 fn render_php_ini(inst: &PhpVersionInstance) -> String {
     format!(
         "; Managed by FerrousPanel — PHP {} FPM php.ini\n\
@@ -105,27 +120,39 @@ fn render_fpm_pool(inst: &PhpVersionInstance) -> String {
     )
 }
 
-fn default_php_versions() -> Vec<PhpVersionInstance> {
+fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
     let specs = [
-        ("8.4", "8.4.4", true, "running", 42.5, 4),
-        ("8.3", "8.3.17", true, "running", 38.2, 6),
-        ("8.2", "8.2.27", true, "stopped", 0.0, 0),
-        ("8.1", "8.1.31", false, "stopped", 0.0, 0),
-        ("7.4", "7.4.33", false, "stopped", 0.0, 0),
+        ("8.4", "8.4.x", !prod),
+        ("8.3", "8.3.x", !prod),
+        ("8.2", "8.2.x", false),
+        ("8.1", "8.1.x", false),
+        ("7.4", "7.4.x", false),
     ];
     let mut list = Vec::with_capacity(specs.len());
-    for (ver, full, installed, status, mem, workers) in specs {
+    for (ver, full, test_installed) in specs {
+        let fpm_bin = format!("/usr/sbin/php-fpm{ver}");
+        let cli_bin = format!("/usr/bin/php{ver}");
         let sock_exists = Path::new(&format!("/run/php/php{ver}-fpm.sock")).exists();
+        let installed = if prod {
+            Path::new(&fpm_bin).is_file() || Path::new(&cli_bin).is_file() || sock_exists
+        } else {
+            test_installed || sock_exists
+        };
+        let status = if sock_exists || (!prod && test_installed) {
+            "running"
+        } else {
+            "stopped"
+        };
         let mut inst = PhpVersionInstance {
             version: ver.to_string(),
-            full_version: format!("PHP {full} (cli/fpm-fcgi) + Zend OPcache JIT"),
-            status: if sock_exists { "running".to_string() } else { status.to_string() },
-            installed: installed || sock_exists,
+            full_version: format!("PHP {full} (cli/fpm-fcgi)"),
+            status: status.to_string(),
+            installed,
             fpm_socket: format!("/run/php/php{ver}-fpm.sock"),
             ini_path: format!("/etc/php/{ver}/fpm/php.ini"),
             pool_path: format!("/etc/php/{ver}/fpm/pool.d/www.conf"),
-            memory_usage_mb: mem,
-            active_workers: workers,
+            memory_usage_mb: 0.0,
+            active_workers: 0,
             max_children: 32,
             memory_limit: "256M".to_string(),
             upload_max_filesize: "64M".to_string(),
@@ -154,20 +181,37 @@ fn default_php_versions() -> Vec<PhpVersionInstance> {
     list
 }
 
+fn require_command_ok(binary: &'static str, out: crate::system::cmd::CommandOutput) -> Result<(), PanelError> {
+    if out.success {
+        return Ok(());
+    }
+    let stderr = if out.stderr.trim().is_empty() {
+        out.stdout
+    } else {
+        out.stderr
+    };
+    Err(PanelError::CommandFailed {
+        binary,
+        exit_code: out.exit_code,
+        stderr,
+    })
+}
+
 pub async fn list_php_versions(
     store: &ModuleStore,
     config: &Config,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<PhpVersionInstance>, PanelError> {
+    let prod = is_production_vps(config);
     let mut list = if let Some(existing) = store.get_json::<Vec<PhpVersionInstance>>(KV_PHP_VERSIONS)? {
         existing
     } else {
-        let initial = default_php_versions();
+        let initial = default_php_versions(prod);
         store.put_json(KV_PHP_VERSIONS, &initial)?;
         initial
     };
 
-    if is_production_vps(config) {
+    if prod {
         let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
         for inst in &mut list {
             let fpm_bin = format!("/usr/sbin/php-fpm{}", inst.version);
@@ -189,16 +233,14 @@ pub async fn list_php_versions(
                 if !active {
                     inst.active_workers = 0;
                     inst.memory_usage_mb = 0.0;
-                } else if inst.active_workers == 0 {
-                    inst.active_workers = 2;
                 }
-            } else if !installed {
+            } else {
                 inst.status = "stopped".to_string();
                 inst.active_workers = 0;
                 inst.memory_usage_mb = 0.0;
             }
         }
-        let _ = store.put_json(KV_PHP_VERSIONS, &list);
+        store.put_json(KV_PHP_VERSIONS, &list)?;
     }
 
     Ok(list)
@@ -223,7 +265,12 @@ pub async fn php_action(
 
     match action {
         "install" => {
-            if prod && executor.is_binary_available(AllowedBinary::AptGet) {
+            if prod {
+                if !executor.is_binary_available(AllowedBinary::AptGet) {
+                    return Err(PanelError::Conflict(format!(
+                        "thiếu binary apt-get để cài PHP {version}; hãy cài thủ công: sudo apt install -y php{version}-fpm php{version}-cli"
+                    )));
+                }
                 let pkg_fpm = format!("php{version}-fpm");
                 let pkg_cli = format!("php{version}-cli");
                 let pkg_common = format!("php{version}-common");
@@ -253,50 +300,62 @@ pub async fn php_action(
                         APT_TIMEOUT,
                     )
                     .await?;
-                if !res.success {
-                    return Err(PanelError::CommandFailed {
-                        binary: "apt-get",
-                        exit_code: res.exit_code,
-                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
-                    });
+                require_command_ok("apt-get", res)?;
+
+                if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                    return Err(PanelError::Conflict(format!(
+                        "đã cài gói php{version}-fpm nhưng thiếu systemctl để bật dịch vụ"
+                    )));
                 }
-                if executor.is_binary_available(AllowedBinary::Systemctl) {
-                    let _ = executor
-                        .run(AllowedBinary::Systemctl, &["enable", "--now", &unit], CMD_TIMEOUT)
-                        .await;
+                let en = executor
+                    .run(AllowedBinary::Systemctl, &["enable", "--now", &unit], CMD_TIMEOUT)
+                    .await?;
+                require_command_ok("systemctl", en)?;
+
+                let active = executor
+                    .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
+                    .await?;
+                if !active.success || active.stdout.trim() != "active" {
+                    return Err(PanelError::Conflict(format!(
+                        "dịch vụ {unit} chưa ở trạng thái active sau khi cài đặt: {}",
+                        active.stdout.trim()
+                    )));
                 }
             }
             inst.installed = true;
             inst.status = "running".to_string();
-            inst.active_workers = 4;
-            inst.memory_usage_mb = 36.4;
         }
         "uninstall" => {
             if prod {
-                if executor.is_binary_available(AllowedBinary::Systemctl) {
-                    let _ = executor
-                        .run(AllowedBinary::Systemctl, &["disable", "--now", &unit], CMD_TIMEOUT)
-                        .await;
+                if !executor.is_binary_available(AllowedBinary::AptGet) {
+                    return Err(PanelError::Conflict(
+                        "thiếu binary apt-get để gỡ cài đặt PHP-FPM".to_string(),
+                    ));
                 }
-                if executor.is_binary_available(AllowedBinary::AptGet) {
-                    let pkg_fpm = format!("php{version}-fpm");
-                    let res = executor
-                        .run_with_env(
-                            AllowedBinary::AptGet,
-                            &["remove", "-y", "-qq", &pkg_fpm],
-                            &[("DEBIAN_FRONTEND", "noninteractive")],
-                            None,
-                            APT_TIMEOUT,
-                        )
-                        .await?;
-                    if !res.success {
-                        return Err(PanelError::CommandFailed {
-                            binary: "apt-get",
-                            exit_code: res.exit_code,
-                            stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
-                        });
+                if executor.is_binary_available(AllowedBinary::Systemctl) {
+                    let is_active = executor
+                        .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
+                        .await
+                        .map(|o| o.success && o.stdout.trim() == "active")
+                        .unwrap_or(false);
+                    if is_active {
+                        let dis = executor
+                            .run(AllowedBinary::Systemctl, &["disable", "--now", &unit], CMD_TIMEOUT)
+                            .await?;
+                        require_command_ok("systemctl", dis)?;
                     }
                 }
+                let pkg_fpm = format!("php{version}-fpm");
+                let res = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["remove", "-y", "-qq", &pkg_fpm],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        None,
+                        APT_TIMEOUT,
+                    )
+                    .await?;
+                require_command_ok("apt-get", res)?;
             }
             inst.installed = false;
             inst.status = "stopped".to_string();
@@ -304,30 +363,52 @@ pub async fn php_action(
             inst.memory_usage_mb = 0.0;
         }
         "start" | "restart" | "reload" => {
-            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+            if prod {
+                if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                    return Err(PanelError::Conflict(format!(
+                        "thiếu systemctl để thực hiện '{action}' trên {unit}"
+                    )));
+                }
+                if !inst.installed {
+                    return Err(PanelError::Conflict(format!(
+                        "PHP {version}-FPM chưa được cài đặt trên máy chủ (gợi ý: sudo apt install -y php{version}-fpm)"
+                    )));
+                }
+                if let Some(fpm_bin) = AllowedBinary::php_fpm_for_version(version) {
+                    if executor.is_binary_available(fpm_bin) {
+                        let check = executor.run(fpm_bin, &["-t"], CMD_TIMEOUT).await?;
+                        require_command_ok(fpm_bin.label(), check)?;
+                    }
+                }
                 let res = executor
                     .run(AllowedBinary::Systemctl, &[action, &unit], CMD_TIMEOUT)
                     .await?;
-                if !res.success {
-                    return Err(PanelError::CommandFailed {
-                        binary: "systemctl",
-                        exit_code: res.exit_code,
-                        stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
-                    });
+                require_command_ok("systemctl", res)?;
+
+                let verify = executor
+                    .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
+                    .await?;
+                if !verify.success || verify.stdout.trim() != "active" {
+                    return Err(PanelError::Conflict(format!(
+                        "kiểm chứng sau '{action}' thất bại: {unit} đang ở trạng thái '{}'",
+                        verify.stdout.trim()
+                    )));
                 }
             }
             inst.installed = true;
             inst.status = "running".to_string();
-            inst.active_workers = 4;
-            if inst.memory_usage_mb == 0.0 {
-                inst.memory_usage_mb = 38.0;
-            }
         }
         "stop" => {
-            if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
-                let _ = executor
+            if prod {
+                if !executor.is_binary_available(AllowedBinary::Systemctl) {
+                    return Err(PanelError::Conflict(format!(
+                        "thiếu systemctl để dừng {unit}"
+                    )));
+                }
+                let res = executor
                     .run(AllowedBinary::Systemctl, &["stop", &unit], CMD_TIMEOUT)
-                    .await;
+                    .await?;
+                require_command_ok("systemctl", res)?;
             }
             inst.status = "stopped".to_string();
             inst.active_workers = 0;
@@ -379,13 +460,13 @@ pub async fn update_php_settings(
         inst.max_children = v.clamp(2, 512);
     }
     if let Some(v) = patch.memory_limit {
-        inst.memory_limit = v;
+        inst.memory_limit = validate_php_ini_value(&v, "memory_limit")?;
     }
     if let Some(v) = patch.upload_max_filesize {
-        inst.upload_max_filesize = v;
+        inst.upload_max_filesize = validate_php_ini_value(&v, "upload_max_filesize")?;
     }
     if let Some(v) = patch.post_max_size {
-        inst.post_max_size = v;
+        inst.post_max_size = validate_php_ini_value(&v, "post_max_size")?;
     }
     if let Some(v) = patch.max_execution_time {
         inst.max_execution_time = v;
@@ -400,9 +481,20 @@ pub async fn update_php_settings(
         inst.opcache_enabled = v;
     }
     if let Some(v) = patch.opcache_jit_buffer {
-        inst.opcache_jit_buffer = v;
+        inst.opcache_jit_buffer = validate_php_ini_value(&v, "opcache_jit_buffer")?;
     }
     if let Some(v) = patch.disable_functions {
+        for fn_name in &v {
+            if fn_name.is_empty()
+                || !fn_name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(PanelError::Validation(format!(
+                    "invalid PHP disable_functions entry '{fn_name}'"
+                )));
+            }
+        }
         inst.disable_functions = v;
     }
 
@@ -422,18 +514,79 @@ pub async fn update_php_settings(
 
     if is_production_vps(config) {
         let sys_conf_dir = PathBuf::from(format!("/etc/php/{version}/fpm/conf.d"));
-        if sys_conf_dir.is_dir() {
-            let _ = atomic_write_file(
-                &sys_conf_dir.join("99-ferrous.ini"),
-                inst.raw_php_ini.as_bytes(),
-                0o644,
-            );
+        if !sys_conf_dir.is_dir() {
+            return Err(PanelError::Conflict(format!(
+                "không tìm thấy thư mục cấu hình {} (gợi ý: sudo apt install -y php{version}-fpm)",
+                sys_conf_dir.display()
+            )));
         }
-        if executor.is_binary_available(AllowedBinary::Systemctl) {
-            let unit = format!("php{version}-fpm.service");
-            let _ = executor
-                .run(AllowedBinary::Systemctl, &["reload-or-restart", &unit], CMD_TIMEOUT)
-                .await;
+        let ini_target = sys_conf_dir.join("99-ferrous.ini");
+        let previous_ini = std::fs::read(&ini_target).ok();
+        atomic_write_file(&ini_target, inst.raw_php_ini.as_bytes(), 0o644)?;
+
+        let rollback_ini = |prev: &Option<Vec<u8>>| {
+            if let Some(bytes) = prev {
+                let _ = atomic_write_file(&ini_target, bytes, 0o644);
+            } else {
+                let _ = std::fs::remove_file(&ini_target);
+            }
+        };
+
+        if let Some(fpm_bin) = AllowedBinary::php_fpm_for_version(version) {
+            if executor.is_binary_available(fpm_bin) {
+                let check = executor.run(fpm_bin, &["-t"], CMD_TIMEOUT).await;
+                match check {
+                    Ok(out) if out.success => {}
+                    Ok(out) => {
+                        rollback_ini(&previous_ini);
+                        let detail = if out.stderr.trim().is_empty() {
+                            out.stdout
+                        } else {
+                            out.stderr
+                        };
+                        return Err(PanelError::Conflict(format!(
+                            "php-fpm{version} -t kiểm tra cấu hình thất bại (đã rollback): {detail}"
+                        )));
+                    }
+                    Err(err) => {
+                        rollback_ini(&previous_ini);
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
+        if !executor.is_binary_available(AllowedBinary::Systemctl) {
+            rollback_ini(&previous_ini);
+            return Err(PanelError::Conflict(format!(
+                "thiếu systemctl để reload php{version}-fpm.service (đã rollback cấu hình)"
+            )));
+        }
+        let unit = format!("php{version}-fpm.service");
+        let reload = executor
+            .run(AllowedBinary::Systemctl, &["reload-or-restart", &unit], CMD_TIMEOUT)
+            .await;
+        match reload {
+            Ok(out) if out.success => {}
+            Ok(out) => {
+                rollback_ini(&previous_ini);
+                let _ = executor
+                    .run(AllowedBinary::Systemctl, &["reload-or-restart", &unit], CMD_TIMEOUT)
+                    .await;
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: out.exit_code,
+                    stderr: if out.stderr.trim().is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    },
+                });
+            }
+            Err(err) => {
+                rollback_ini(&previous_ini);
+                return Err(err);
+            }
         }
     }
 
@@ -465,27 +618,83 @@ pub async fn toggle_php_extension(
     };
     let target_enabled = !ext.enabled;
     let mod_name = ext.name.to_ascii_lowercase();
-
-    if is_production_vps(config)
-        && mod_name
+    if mod_name.is_empty()
+        || mod_name.starts_with('-')
+        || !mod_name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
+        return Err(PanelError::Validation(format!(
+            "invalid PHP extension name '{mod_name}'"
+        )));
+    }
+
+    if is_production_vps(config) {
         let bin = if target_enabled {
             AllowedBinary::Phpenmod
         } else {
             AllowedBinary::Phpdismod
         };
-        if executor.is_binary_available(bin) {
-            let _ = executor
-                .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
-                .await;
+        let rollback_bin = if target_enabled {
+            AllowedBinary::Phpdismod
+        } else {
+            AllowedBinary::Phpenmod
+        };
+        if !executor.is_binary_available(bin) {
+            return Err(PanelError::Conflict(format!(
+                "thiếu công cụ {} (gợi ý: sudo apt install -y php-common php{version}-fpm)",
+                bin.label()
+            )));
         }
-        if executor.is_binary_available(AllowedBinary::Systemctl) {
-            let unit = format!("php{version}-fpm.service");
+        let mod_out = executor
+            .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
+            .await?;
+        require_command_ok(bin.label(), mod_out)?;
+
+        if let Some(fpm_bin) = AllowedBinary::php_fpm_for_version(version) {
+            if executor.is_binary_available(fpm_bin) {
+                let check = executor.run(fpm_bin, &["-t"], CMD_TIMEOUT).await?;
+                if !check.success {
+                    let _ = executor
+                        .run(rollback_bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
+                        .await;
+                    return Err(PanelError::Conflict(format!(
+                        "php-fpm{version} -t thất bại sau khi đổi extension '{mod_name}' (đã rollback): {}",
+                        if check.stderr.trim().is_empty() {
+                            check.stdout
+                        } else {
+                            check.stderr
+                        }
+                    )));
+                }
+            }
+        }
+
+        if !executor.is_binary_available(AllowedBinary::Systemctl) {
             let _ = executor
-                .run(AllowedBinary::Systemctl, &["reload", &unit], CMD_TIMEOUT)
+                .run(rollback_bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
                 .await;
+            return Err(PanelError::Conflict(format!(
+                "thiếu systemctl để reload php{version}-fpm.service (đã rollback)"
+            )));
+        }
+        let unit = format!("php{version}-fpm.service");
+        let rel = executor
+            .run(AllowedBinary::Systemctl, &["reload", &unit], CMD_TIMEOUT)
+            .await?;
+        if !rel.success {
+            let _ = executor
+                .run(rollback_bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
+                .await;
+            return Err(PanelError::CommandFailed {
+                binary: "systemctl",
+                exit_code: rel.exit_code,
+                stderr: if rel.stderr.trim().is_empty() {
+                    rel.stdout
+                } else {
+                    rel.stderr
+                },
+            });
         }
     }
 
@@ -532,12 +741,52 @@ pub async fn switch_site_php_version(
             PhpVersionTag::V81 => PhpFpmVersion::V81,
             PhpVersionTag::V74 => PhpFpmVersion::V74,
         };
+        if is_production_vps(config) {
+            let sock = fpm_ver.socket_path();
+            if !Path::new(sock).exists() {
+                return Err(PanelError::Conflict(format!(
+                    "socket PHP-FPM '{sock}' chưa tồn tại — hãy cài và khởi chạy php{}-fpm trước khi chuyển site",
+                    fpm_ver.version_str()
+                )));
+            }
+        }
         let domain = Domain::parse(&app.domain)?;
         let mut aliases = Vec::new();
         for a in &app.aliases {
             aliases.push(Domain::parse(a)?);
         }
         let root = crate::webserver::WwwRootPath::under_root(&config.wwwroot, &app.working_dir)?;
+        let redirects = app
+            .redirects
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| crate::webserver::SiteRedirectRule {
+                source_path: r.source_path.clone(),
+                target_url: r.target_url.clone(),
+                status_code: r.status_code,
+            })
+            .collect();
+        let hotlink_protection = app.hotlink_protection.as_ref().map(|h| {
+            crate::webserver::SiteHotlinkProtection {
+                enabled: h.enabled,
+                allowed_domains: h.allowed_domains.clone(),
+                extensions: h.extensions.clone(),
+                allow_empty_referer: h.allow_empty_referer,
+            }
+        });
+        let directory_auth = app
+            .directory_privacy
+            .iter()
+            .filter(|d| d.enabled)
+            .map(|d| crate::webserver::SiteDirectoryAuth {
+                path: d.path.clone(),
+                realm: d.realm.clone(),
+                username: d.username.clone(),
+                password_hash: d.password_hash.clone(),
+                password: d.password.clone(),
+            })
+            .collect();
+
         let spec = crate::webserver::SiteSpec {
             domain,
             aliases,
@@ -551,11 +800,13 @@ pub async fn switch_site_php_version(
             http3_quic: app.http3_quic,
             websocket_enabled: app.websocket_enabled,
             rate_limit_rps: app.rate_limit_rps,
+            redirects,
+            hotlink_protection,
+            directory_auth,
         };
-        if let Ok(rendered) = webserver.upsert_and_apply_site(&spec, None).await {
-            app.url_rewrite_rules = rendered.content;
-            app.nginx_vhost = rendered.config_path.display().to_string();
-        }
+        let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
+        app.url_rewrite_rules = rendered.content;
+        app.nginx_vhost = rendered.config_path.display().to_string();
     }
 
     store.upsert_app(&app)?;
@@ -563,4 +814,3 @@ pub async fn switch_site_php_version(
     let php_versions = list_php_versions(store, config, webserver.executor().as_ref()).await?;
     Ok((enriched, php_versions))
 }
-

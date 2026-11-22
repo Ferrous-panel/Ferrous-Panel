@@ -3,11 +3,13 @@ use crate::system::cmd::AllowedBinary;
 use crate::system::paths::SafePath;
 use crate::system::validate::{Domain, ServiceName};
 use crate::webserver::{
-    atomic_symlink, atomic_write_file, parse_systemctl_status, BoxFuture, CommandExecutor,
-    EngineKind, EngineStatus, FileSnapshot, RenderedSite, SiteMode, SiteSpec, SymlinkSnapshot,
-    ValidationReport, WebServerEngine, DEFAULT_ACME_WEBROOT, DEFAULT_LETSENCRYPT_LIVE,
+    atomic_symlink, atomic_write_file, parse_systemctl_status, write_site_htpasswd_file, BoxFuture,
+    CommandExecutor, EngineKind, EngineStatus, FileSnapshot, RenderedSite, SiteMode, SiteSpec,
+    SymlinkSnapshot, ValidationReport, WebServerEngine, DEFAULT_ACME_WEBROOT,
+    DEFAULT_LETSENCRYPT_LIVE,
 };
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,12 +55,37 @@ impl NginxPaths {
 pub struct NginxEngine {
     paths: NginxPaths,
     executor: Arc<dyn CommandExecutor>,
+    http3_supported: Arc<AtomicBool>,
 }
 
 impl NginxEngine {
     #[must_use]
     pub fn new(paths: NginxPaths, executor: Arc<dyn CommandExecutor>) -> Self {
-        Self { paths, executor }
+        Self {
+            paths,
+            executor,
+            http3_supported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Probes `nginx -V` to detect `--with-http_v3_module` and updates cached capability flag.
+    pub async fn detect_http3_support(&self) -> bool {
+        if !self.is_installed() {
+            self.http3_supported.store(false, Ordering::Relaxed);
+            return false;
+        }
+        let supported = match self
+            .executor
+            .run(AllowedBinary::Nginx, &["-V"], Duration::from_secs(5))
+            .await
+        {
+            Ok(out) => {
+                out.stderr.contains("http_v3_module") || out.stdout.contains("http_v3_module")
+            }
+            Err(_) => false,
+        };
+        self.http3_supported.store(supported, Ordering::Relaxed);
+        supported
     }
 
     #[must_use]
@@ -78,6 +105,15 @@ impl NginxEngine {
             .join(format!("{}.conf", domain.as_str()))
     }
 
+    fn htpasswd_path(&self, domain: &Domain) -> PathBuf {
+        self.paths
+            .sites_available
+            .parent()
+            .unwrap_or_else(|| Path::new("/etc/nginx"))
+            .join("htpasswd")
+            .join(format!("{}.htpasswd", domain.as_str()))
+    }
+
     fn ensure_installed(&self) -> Result<(), PanelError> {
         if !self.is_installed() {
             return Err(PanelError::Conflict(
@@ -94,6 +130,10 @@ impl NginxEngine {
         spec: &SiteSpec,
     ) -> Result<(FileSnapshot, SymlinkSnapshot), PanelError> {
         let rendered = self.render_site(spec)?;
+        if spec.directory_auth.iter().any(|d| d.enabled) {
+            let htpasswd_file = self.htpasswd_path(&spec.domain);
+            write_site_htpasswd_file(&htpasswd_file, &spec.directory_auth)?;
+        }
         let avail_path = self.vhost_available_path(&spec.domain);
         let enabled_path = self.vhost_enabled_path(&spec.domain);
 
@@ -161,10 +201,17 @@ impl NginxEngine {
                 return Ok(());
             }
             let unit = self.paths.service_name.as_str();
-            let _ = self
+            let out = self
                 .executor
                 .run(AllowedBinary::Systemctl, &["enable", unit], CMD_TIMEOUT)
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Systemctl.label(),
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
             Ok(())
         })
     }
@@ -175,10 +222,17 @@ impl NginxEngine {
                 return Ok(());
             }
             let unit = self.paths.service_name.as_str();
-            let _ = self
+            let out = self
                 .executor
                 .run(AllowedBinary::Systemctl, &["disable", unit], CMD_TIMEOUT)
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Systemctl.label(),
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
             Ok(())
         })
     }
@@ -195,6 +249,12 @@ impl WebServerEngine for NginxEngine {
 
     fn render_site(&self, spec: &SiteSpec) -> Result<RenderedSite, PanelError> {
         spec.validate_supported()?;
+        if spec.http3_quic && !self.http3_supported.load(Ordering::Relaxed) {
+            return Err(PanelError::Conflict(
+                "HTTP/3 QUIC is not supported by the installed Nginx binary (missing --with-http_v3_module, e.g. Ubuntu 24.04 stock nginx 1.24). Disable http3Quic or build Nginx with http_v3_module."
+                    .to_string(),
+            ));
+        }
 
         let all_domains = spec.all_domains();
         let server_names = all_domains
@@ -217,6 +277,86 @@ impl WebServerEngine for NginxEngine {
             live_root.to_string()
         };
 
+        let zone_slug: String = spec
+            .domain
+            .as_str()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let (rate_zone_header, rate_limit_directive) = if spec.rate_limit_rps > 0 {
+            let burst = spec.rate_limit_rps.saturating_mul(2).max(5);
+            (
+                format!(
+                    "limit_req_zone $binary_remote_addr zone=fp_{zone_slug}:10m rate={}r/s;\n\n",
+                    spec.rate_limit_rps
+                ),
+                format!(
+                    "    limit_req zone=fp_{zone_slug} burst={burst} nodelay;\n    limit_req_status 429;\n"
+                ),
+            )
+        } else {
+            (String::new(), String::new())
+        };
+
+        let mut extra_locations = String::new();
+        for rule in spec.redirects.iter().filter(|r| r.enabled) {
+            let src = rule.source_path.trim();
+            let dst = rule.target_url.trim();
+            let matcher = if src.ends_with('/') { "^~" } else { "=" };
+            let suffix = if rule.keep_query { "$is_args$args" } else { "" };
+            extra_locations.push_str(&format!(
+                "    location {matcher} {src} {{\n        return {} {dst}{suffix};\n    }}\n\n",
+                rule.status_code
+            ));
+        }
+
+        if let Some(ref hl) = spec.hotlink_protection {
+            if hl.enabled {
+                let exts: Vec<String> = hl
+                    .protected_extensions
+                    .split(|c: char| c == ',' || c == '|' || c.is_ascii_whitespace())
+                    .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+                    .collect();
+                if !exts.is_empty() {
+                    let mut referers = String::new();
+                    if !hl.block_empty_referer {
+                        referers.push_str("none ");
+                    }
+                    referers.push_str("blocked server_names");
+                    for dom in &hl.allowed_domains {
+                        let clean = dom.trim();
+                        if !clean.is_empty()
+                            && clean.bytes().all(|b| {
+                                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'*')
+                            })
+                        {
+                            referers.push(' ');
+                            referers.push_str(clean);
+                        }
+                    }
+                    extra_locations.push_str(&format!(
+                        "    location ~* \\.({})$ {{\n        valid_referers {referers};\n        if ($invalid_referer) {{\n            return 403;\n        }}\n        try_files $uri =404;\n    }}\n\n",
+                        exts.join("|")
+                    ));
+                }
+            }
+        }
+
+        let htpasswd_file = self.htpasswd_path(&spec.domain);
+        for auth in spec.directory_auth.iter().filter(|d| d.enabled) {
+            let clean_path = auth.path.trim();
+            let realm = if auth.label.trim().is_empty() {
+                "Restricted Area".to_string()
+            } else {
+                auth.label.trim().replace('"', "'")
+            };
+            extra_locations.push_str(&format!(
+                "    location ^~ {clean_path} {{\n        auth_basic \"{realm}\";\n        auth_basic_user_file {};\n        try_files $uri $uri/ =404;\n    }}\n\n",
+                htpasswd_file.display()
+            ));
+        }
+
         let route_block = render_nginx_route_block(
             &spec.mode,
             &doc_root.to_string(),
@@ -226,17 +366,23 @@ impl WebServerEngine for NginxEngine {
             "    location ^~ /.well-known/acme-challenge/ {{\n        root {acme_str};\n        default_type \"text/plain\";\n        try_files $uri =404;\n    }}"
         );
 
+        let quic_directives = if spec.http3_quic {
+            "    listen 443 quic;\n    listen [::]:443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n"
+        } else {
+            ""
+        };
+
         let content = if spec.ssl_enabled {
             let cert_dir = format!("{live_str}/{}", spec.domain.as_str());
             let http_body = if spec.redirect_https {
                 "    location / {\n        return 301 https://$host$request_uri;\n    }".to_string()
             } else {
-                route_block.clone()
+                format!("{rate_limit_directive}{extra_locations}{route_block}")
             };
 
             format!(
                 "# Managed by FerrousPanel (NginxEngine) — {domain}\n\
-server {{\n\
+{rate_zone_header}server {{\n\
     listen 80;\n\
     listen [::]:80;\n\
     server_name {server_names};\n\
@@ -249,7 +395,7 @@ server {{\n\
 server {{\n\
     listen 443 ssl http2;\n\
     listen [::]:443 ssl http2;\n\
-    server_name {server_names};\n\
+{quic_directives}    server_name {server_names};\n\
 \n\
     ssl_certificate {cert_dir}/fullchain.pem;\n\
     ssl_certificate_key {cert_dir}/privkey.pem;\n\
@@ -259,14 +405,14 @@ server {{\n\
     root {doc_root};\n\
     server_tokens off;\n\
 \n\
-{route_block}\n\
+{rate_limit_directive}{extra_locations}{route_block}\n\
 }}\n",
                 domain = spec.domain.as_str(),
             )
         } else {
             format!(
                 "# Managed by FerrousPanel (NginxEngine) — {domain}\n\
-server {{\n\
+{rate_zone_header}server {{\n\
     listen 80;\n\
     listen [::]:80;\n\
     server_name {server_names};\n\
@@ -276,7 +422,7 @@ server {{\n\
 \n\
 {acme_block}\n\
 \n\
-{route_block}\n\
+{rate_limit_directive}{extra_locations}{route_block}\n\
 }}\n",
                 domain = spec.domain.as_str(),
             )
@@ -293,6 +439,12 @@ server {{\n\
     fn write_site<'a>(&'a self, spec: &'a SiteSpec) -> BoxFuture<'a, Result<(), PanelError>> {
         Box::pin(async move {
             self.ensure_installed()?;
+            if spec.http3_quic && !self.detect_http3_support().await {
+                return Err(PanelError::Conflict(
+                    "HTTP/3 QUIC is not supported by the installed Nginx binary (missing --with-http_v3_module). Disable http3Quic."
+                        .to_string(),
+                ));
+            }
             let (file_snap, link_snap) = self.stage_site_unvalidated(spec)?;
 
             let validation = match self.validate().await {

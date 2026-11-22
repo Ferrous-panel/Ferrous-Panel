@@ -1,65 +1,62 @@
-# FerrousPanel — Trạng thái tiến độ (P1–P7 & Open-Source 1-Command Cargo Installer)
+# FerrousPanel — Trạng thái tiến độ & Nhật ký khắc phục (Phần 1–6)
 
-## Phase hiện tại
-- **Phase đang hoàn thiện**: **P7 – KIỂM CHỨNG, ĐỒNG BỘ & OPEN-SOURCE 1-COMMAND INSTALL (TỰ ĐỘNG CÀI CARGO + BIẾN MÔI TRƯỜNG + 2GB SWAP + PREBUILT DIST)**
-
----
-
-## Tổng quan trạng thái P1–P7
-
-- [x] **P1 – KHUNG & BẢO MẬT** (`crates/ferrous-panel/src/{main,lib,config,error,state,web}.rs`, `auth/`, `system/{cmd,paths,validate}.rs`, `tests/auth.rs`)
-  - Middleware `require_auth` cho toàn bộ `/api` trừ `GET /api/health` và `POST /api/auth/login`.
-  - Token phiên 32 byte từ `OsRng`, băm SHA-256 lưu SQLite (hạn 24h hoặc 30 ngày với `rememberMe`), so sánh hằng thời gian bằng `subtle`.
-  - Mật khẩu Argon2id (`0600`), lần chạy đầu sinh ngẫu nhiên 24 ký tự từ `OsRng` và in 1 lần duy nhất; rate limit đăng nhập 5 lần sai / 15 phút / IP (`HTTP 429`); cookie `HttpOnly; SameSite=Strict`; giới hạn JSON 1 MiB; audit log SQLite; `SafePath` bắt buộc nằm trong `/www/wwwroot`.
-- [x] **P2 – HỢP ĐỒNG API** (`crates/ferrous-panel/src/api/contract.rs`, `crates/ferrous-panel/src/api/mod.rs`, `crates/ferrous-panel/tests/contract.rs`)
-  - Khớp 100% struct `serde(rename_all = "camelCase")` với `src/types.ts` và `src/hooks/usePanelController.ts`.
-  - Mọi route chưa triển khai thao tác hệ thống thật đều trả `HTTP 501 Not Implemented` thay vì trả dữ liệu giả.
-- [x] **P3 – WEB SERVER ENGINE & SSL** (`crates/ferrous-panel/src/webserver/{mod,nginx,ferrousx,ssl}.rs`, `tests/webserver.rs`)
-  - Trait `WebServerEngine` cho `NginxEngine` (`/etc/nginx/sites-available` + symlink `sites-enabled`, `nginx -t`, `systemctl reload nginx`) và `FerrousxEngine` (`/etc/ferrousx/ferrousx.toml` + `sites/<domain>.toml`, `ferrousx-bin --check-config`, `SIGHUP`).
-  - Chuyển đổi `POST /api/webserver/switch` tuần tự không trùng cổng `80/443`, kèm kiểm tra HTTP từng site và tự động rollback khi lỗi.
-  - SSL Certbot webroot `/www/acme`, đọc hạn chứng chỉ X.509 thật từ `/etc/letsencrypt/live/<domain>/fullchain.pem`.
-- [x] **P4 – FERROUSX MVP** (`crates/ferrousx/src/{main,lib,config,tls,server,router,handlers,error}.rs`, `crates/ferrousx/tests/server.rs`)
-  - Binary độc lập `ferrousx-bin` (`tokio`, `hyper 1`, `rustls` SNI + ALPN `h2`/`http1.1`, `fastcgi-client`), hỗ trợ `static_spa`, `reverse_proxy` (kể cả WebSocket upgrade), `php_fpm` qua Unix socket, `redirect_https`, `--check-config`, và reload nóng qua `SIGHUP`.
-- [x] **P5 – MODULE HỆ THỐNG THẬT & TOÀN BỘ PHÂN HỆ MỞ RỘNG (ZERO HTTP 501)** (`crates/ferrous-panel/src/modules/{mod,apps,databases,files,cpanel,security,extended}.rs`, `crates/ferrous-panel/src/api/{mod,apps,cpanel,security,extended}.rs`, `tests/{modules,contract,webserver,auth}.rs`)
-  - `systemd` unit thật + đọc `MainPID`/`MemoryCurrent`; `ufw` (kể cả toggle từng rule) + `fail2ban-client` + `sysctl` + eBPF/XDP Anti-DDoS (`normal`/`elevated`/`under_attack`) + Layer-7 WAF rules + SHA-256 FIM scan thật trên `/www/wwwroot` và `data_dir`.
-  - `mysql`/`psql` CLI thật (không lưu plaintext password, trả `409` nếu thiếu binary); `tar --zstd` + SHA-256 thật cho backups; `SafePath` chống zip-slip cho file manager; `crontab` thật; Hickory DNS Zone Editor xuất file RFC 1035 `<domain>.zone` + SFTP Chroot accounts tính dung lượng thật.
-  - Đã nâng cấp toàn bộ các phân hệ từng trả `HTTP 501` sang thao tác thật lưu bền vững trong SQLite (`panel_kv_store`) và file cấu hình hệ thống (`HTTP 200 OK`): Mail Server (Postfix/Dovecot/Rspamd với Ed25519 DKIM, Maildir, virtual maps), Multi-PHP FPM Pools (`8.4/8.3/8.2/8.1/7.4` + switch site PHP socket), Software Package Installer, 1-Click Templates, System Optimizer & Anti-Crash Guard, SSH Manager & Panel Admin (`fp` CLI `1..20`), Polyglot FFI/IPC Bridge Compiler, Rust Edge Cloud (Wasmtime WASI, Youki OCI, WireGuard, BLAKE3 snapshots), Diagnostics, Git Auto-Deploy, Auto-Rebuild, và cấu hình per-site Nginx/FerrousX (`redirects`, `hotlinkProtection`, `directoryAuth`, `http3Quic`, `websocketEnabled`, `rateLimitRps`).
-- [x] **P6 – GỠ JS SERVER PRODUCTION, CLI `fp` & OPEN-SOURCE 1-COMMAND INSTALL** (`crates/ferrous-panel/src/cli.rs`, `install.sh`, `update.sh`, `uninstall.sh`, `.github/workflows/ci-release.yml`, `README.md`)
-  - Đã xóa `server.ts`, `rust-backend/scripts/*.mjs`, `Ferrous-panel/bin/*.mjs`, `bun.lock`, và crate thừa `crates/ferrous-core/`; chuyển `rust-backend/` và `Ferrous-panel/` cũ vào `_archive/` (`exclude = ["_archive"]` trong `Cargo.toml`).
-  - `install.sh` tự động tạo 2GB `/swapfile` nếu VPS `< 4GB RAM` và chưa có Swap, tự động cài `rustup` + `cargo` `1.85.0` (`--profile minimal`), tự động đăng ký biến môi trường vào `/etc/profile.d/ferrous-panel.sh`, `/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc` và `/etc/ferrous-panel/panel.env` (cũng như `ensure_default_env_file` trong `cli.rs`), dùng gói giao diện tĩnh `dist/` đã build sẵn và chạy `cargo build --release` trực tiếp trên VPS.
-- [x] **P7 – KIỂM CHỨNG** (`scripts/smoke-test.sh`)
-  - Script kiểm chứng đầu-cuối cho Ubuntu 24.04 sạch với 7 hạng mục bắt buộc, in `PASS`/`FAIL` từng mục và `exit 1` nếu có bất kỳ mục nào `FAIL`.
+## Tổng quan trạng thái hiện tại
+- **Phiên bản Rust yêu cầu**: `stable (>= 1.89)` (đồng bộ với `rust-version = "1.89"` trong `Cargo.toml`).
+- **Trạng thái biên dịch trong sandbox**: **chưa biên dịch** (môi trường sandbox AI Studio không cài sẵn `cargo`/`rustc`; cần chạy `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` trên Ubuntu 24.04 hoặc GitHub Actions).
+- **Trạng thái giao diện**: Production chạy 100% Pure-Rust Native UI (`crates/ferrous-panel/src/ui/assets/`, nhúng trực tiếp qua `rust-embed`, không cần Node.js). Preview AI Studio vẫn hoạt động bình thường trên cổng `3000` (`vite.config.ts` / `package.json`).
 
 ---
 
-## Các giả định chưa kiểm chứng (cần CI / máy Ubuntu 24.04 có `cargo`)
-1. Sandbox AI Studio không cài sẵn `cargo`/`rustc`; cần chạy `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` trên CI hoặc máy Ubuntu 24.04.
-2. Trong `scripts/smoke-test.sh`:
-   - Mục (4) giả định dịch vụ `mariadb`/`mysql` đang chạy trên Ubuntu 24.04 và root local có quyền gọi `mysql -e` qua Unix socket.
-   - Mục (6) giả định cả `nginx` và `/usr/local/bin/ferrousx-bin` đã được cài trên máy test Ubuntu 24.04 để kiểm thử chuyển đổi hai chiều.
-   - Mục (7) giả định binary `cargo-audit` (`cargo install cargo-audit`) đã được cài đặt trên runner kiểm chứng.
+## Trạng thái khắc phục 6 phần (Bảo mật · Chống giả lập · Chạy thật · UI · CI)
+
+### Phần 1 — Bảo mật
+- [x] **1.1** `install.sh`, `update.sh`, `scripts/panel.env.example`: Mặc định `FERROUS_BIND=127.0.0.1`, chỉ bind công khai khi truyền `--bind` tường minh kèm cảnh báo HTTP không mã hóa và cảnh báo cookie; tự bật `FERROUS_SECURE_COOKIE=true` khi có domain + chứng chỉ Let's Encrypt.
+- [x] **1.2** `install.sh`, `update.sh`: Xác thực SHA-256 bắt buộc (`exit 1` khi thiếu `SHA256SUMS.txt` hoặc không khớp asset trừ khi truyền `--insecure-skip-verify`), áp dụng cho cả binary chính và binary phụ (`bun`, `tailwindcss`).
+- [x] **1.3** `modules/extended/ssh_admin.rs`: Thu hẹp allowlist WebSSH (`sysctl` chỉ đọc, `ip` chỉ đọc, chặn `ss -K`, chặn `journalctl --vacuum*/--rotate/--flush`, `ls` chỉ trong `wwwroot`/`data_dir` sau `canonicalize`), bỏ output giả (`whoami` gọi `id -un`, thiếu binary trả `409 Conflict`).
+- [x] **1.4** `modules/files.rs`: Chống SSRF cho `remote_download` (`--max-redirs 0`, `--proto-redir =http,https`, phân giải DNS trước + ghim IP qua `--resolve`, chặn IP nội bộ/CGNAT `100.64.0.0/10`/`0.0.0.0/8`/`192.0.0.0/24`/`198.18.0.0/15`/`169.254.169.254`/`::ffff:a.b.c.d` và host số decimal/hex/octal).
+- [x] **1.5** `modules/files.rs`: Kiểm tra symlink trong ZIP (`unzip -Z` + staging dir check) và tách `tar -tf` + `tar -tvf` xử lý đúng tên file có khoảng trắng.
+- [x] **1.6** `system/cmd.rs`: Giới hạn đọc stdout/stderr ngay khi đọc (`AsyncReadExt::take(64 KiB)`), thêm `validate_no_flag_injection` + `--` trước tham số vị trí.
+- [x] **1.7** `state.rs` & `api/telemetry.rs`: Thay `std::process::Command` blocking ngoài allowlist bằng `executor.run(AllowedBinary::Nginx, &["-v"], ...)`.
+- [x] **1.8** `api/mod.rs`: Rà soát `/api/actix-gateway/{subsystem}` — giữ lại vì được sử dụng bởi AI Studio Preview (`src/services/actixGateway.ts`) và bộ test hợp đồng hiện có (`tests/modules.rs`, `tests/contract.rs`).
+
+### Phần 2 — Nền tảng chống giả lập
+- [x] **2.1** `config.rs` & `modules/extended/common.rs`: Bỏ kiểm tra đường dẫn `/var/lib/ferrous-panel`; thay bằng `FERROUS_MODE=production|test` (`RuntimeMode`, mặc định `Production`).
+- [x] **2.2** Rà soát và xử lý lỗi thực tế toàn bộ `let _ = executor.run(...)` / `let _ = atomic_write_file(...)` trên nhánh thực thi chính trong `apps.rs`, `php.rs`, `mail.rs`, `optimizer.rs`, `software.rs`, `edge_cloud.rs`, `polyglot.rs`, `ssh_admin.rs`, `security.rs`, `cpanel.rs`.
+- [x] **2.3** `modules/capabilities.rs` + `GET /api/capabilities`: Trả danh sách khả năng thực tế của máy chủ (`ready | degraded | unavailable | experimental`, kèm `reason` và `fixHint`), kết nối trực tiếp vào UI.
+
+### Phần 3 — Tính năng hạt nhân chạy thật
+- [x] **3.1** Nginx & FerrousX: Render đầy đủ `rate_limit_rps` (Nginx `limit_req_zone`/`limit_req`; FerrousX token-bucket theo IP + bộ đếm `rate_limited`), `redirects`, `hotlinkProtection`, `directoryAuth` (file `$apr1$` htpasswd dùng chung hai engine), `websocketEnabled`; từ chối `http3Quic: true` bằng `HTTP 409` khi engine không hỗ trợ; rollback tự động khi lỗi.
+- [x] **3.2** SSL Certbot: Kiểm tra phân giải DNS trước khi xin chứng chỉ, đọc hạn chứng chỉ X.509 thật, trả lỗi nguyên văn từ `certbot`.
+- [x] **3.3** Ứng dụng: `git` qua validator + `--`, tạo/điều khiển `systemd` unit thật, xác nhận `systemctl is-active` và trả log `journalctl` khi khởi động thất bại.
+- [x] **3.4** File manager: Mọi thao tác qua `SafePath`, chặn traversal & symlink.
+- [x] **3.5** Database: Truyền mật khẩu MariaDB/PostgreSQL qua `stdin` (`run_with_stdin`), tuyệt đối không lộ trên command line hay log.
+- [x] **3.6** Firewall + Fail2ban: Chặn tự khóa cổng SSH & cổng Panel trừ khi có xác nhận tường minh (`?force=true`), xóa số liệu giả DDoS/WAF, gắn nhãn `eBPF/XDP` là `experimental`.
+- [x] **3.7** Cron + Backup: Crontab thật, `tar --zstd` + kiểm tra SHA-256 trước khi restore.
+- [x] **3.8** Telemetry + Audit log: Số liệu thật từ `/proc` + `sysinfo`, ghi audit log cho mọi thay đổi.
+
+### Phần 4 — Tính năng mở rộng chạy thật
+- [x] **4.1** Multi-PHP: Kiểm tra cú pháp `php-fpm -t` + rollback khi sửa `php.ini`/extension, xác nhận `systemctl is-active`, trả `409` khi thiếu gói.
+- [x] **4.2** Mail Server: Sinh khóa RSA-2048 thật qua `openssl` (`0600`), kiểm tra DNS thật qua `dig +short TXT` (SPF/DKIM/DMARC), snapshot + `postmap` + reload Postfix có rollback, bỏ hoàn toàn dữ liệu giả.
+- [x] **4.3** Optimizer: Whitelist `sysctl` an toàn, ghi `/etc/sysctl.d/99-ferrous-optimizer.conf` có rollback khi `sysctl -p` lỗi và đọc lại `/proc/sys`.
+- [x] **4.4** SSH Manager: Yêu cầu `confirmPortChange: true` khi đổi cổng SSH, `sshd -t` + rollback, sinh khóa thật bằng `ssh-keygen`.
+- [x] **4.5** FerrousX IPC: Kiểm thử đầu-cuối thật qua UDS (`status`, `vhost_add`, `reload`, `vhost_del`, bảo toàn cấu hình cũ khi reload lỗi).
+- [x] **4.6** Edge Cloud & Polyglot: Bỏ toàn bộ mock seed và giả lập chữ ký/khóa; gắn nhãn `experimental`, chỉ chạy thật khi có `wasmtime`/`podman`/`docker`/`wg`/`rustc`/`cargo`, thiếu trả `409`.
+
+### Phần 5 — Giao diện Pure-Rust Native UI
+- [x] **5.1–5.4** Hoàn thiện `crates/ferrous-panel/src/ui/assets/{app.js,views-core.js,views-infra.js,views-security.js,panel.css}`: đồng bộ `GET /api/capabilities` (làm mờ nút + hiển thị lý do & lệnh cài), thêm đầy đủ modal Site Settings, PHP ini/switch-site, Mail DNS/DKIM/forwarder/test, Software config editor, Edge Cloud & Polyglot, File rename/compress/remote-download/chmod, hộp thoại xác nhận hai bước cho thao tác nguy hiểm (UFW anti-lockout, đổi cổng SSH/Panel, xóa), sửa mọi payload lệch giữa UI và API, không dùng `window.alert`/`window.confirm`/`window.open`.
+
+### Phần 6 — Kiểm chứng, CI & Tài liệu
+- [x] **6.1** Mở rộng `scripts/smoke-test.sh` (14 hạng mục với `PASS`/`FAIL`/`SKIP (lý do)` và `exit 1` khi `FAIL > 0`).
+- [x] **6.2** Thêm `crates/ferrous-panel/tests/security_and_real_ops.rs` và `crates/ferrousx/tests/ipc_and_site_features.rs` (kể cả `MockExecutor` kiểm chứng chuỗi lệnh & rollback).
+- [x] **6.3** Cập nhật `.github/workflows/ci-release.yml`: chỉ publish Release khi push tag `v*` và thêm job `integration-smoke-test` trên `ubuntu-24.04` cài `nginx`, `php-fpm`, `mariadb-server`, `ufw`.
+- [x] **6.4** Đồng bộ `PROGRESS.md` và `README.md`.
 
 ---
 
-## Lịch sử lỗi từng gặp & cách đã sửa
-1. **Lỗi Preview AI Studio `"The dev server didn't start"` sau P6**:
-   - *Nguyên nhân gốc*: P6 xóa script `"dev"` khỏi `package.json` và `vite.config.ts` dùng `path`/`url` của Node và chưa gắn cứng `host: "0.0.0.0", port: 3000`.
-   - *Cách đã sửa*: Thêm lại `"dev": "vite --host 0.0.0.0 --port 3000"` vào `package.json` và cấu hình `server: { host: '0.0.0.0', port: 3000 }` + `new URL('.', import.meta.url).pathname` trong `vite.config.ts`.
-2. **Lỗi chữ ký hàm trong `crates/ferrous-panel/src/cli.rs` (phát hiện khi tự rà soát P6/P7)**:
-   - *Nguyên nhân gốc*: `cli.rs` gọi `manager.switch_engine(target)` với 1 tham số, đọc `res.checked_sites`, và gọi `manager.set_configured_engine(...)` / `manager.validate_configured_engine()`, không khớp chữ ký thật trong `WebServerManager` (`webserver/mod.rs`).
-   - *Cách đã sửa*: Bổ sung `pub async fn validate_configured_engine(&self)` vào `WebServerManager`, cập nhật `cli.rs` truyền `(&auth_store, &config.admin_username, "127.0.0.1")` vào `switch_engine`, đọc `res.health_checks.len()`, và gọi `manager.store.save_frontend_engine(parsed_engine)`.
-3. **Dọn dẹp crate/file thừa & đồng bộ (`crates/ferrous-core`, `bun.lock`, `main.rs`)**:
-   - *Nguyên nhân gốc*: `crates/ferrous-core` là crate nháp từ trước P1 không được `ferrous-panel` hay `ferrousx` sử dụng; `main.rs` lặp lại cấu hình route thay vì gọi `configure_app` của `lib.rs`; `.env.example` và `CONTRIBUTING.md` còn chứa nội dung mẫu cũ.
-   - *Cách đã sửa*: Xóa `crates/ferrous-core/` và `bun.lock`, cập nhật `Cargo.toml`, đồng bộ `main.rs` gọi trực tiếp `configure_app(cfg, app_state)`, đồng bộ `.env.example`, `CONTRIBUTING.md`, và `README.md`.
-4. **Tối ưu `install.sh` tự động cài `cargo` + tự động thêm biến môi trường + 2GB Swap + Prebuilt `dist/`**:
-   - *Nguyên nhân gốc*: Sau khi cài `rustup`/`cargo` và `ferrous-panel`, các phiên SSH mới cần tự động nhận `PATH` (`/usr/local/bin`, `/root/.cargo/bin`), `CARGO_HOME`, `RUSTUP_HOME` và biến `FERROUS_*` mà không phải `export` tay.
-   - *Cách đã sửa*: Thêm `configure_shell_env()` vào `install.sh` tự tạo `/etc/profile.d/ferrous-panel.sh` và móc vào `/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`; đồng thời bổ sung `ensure_default_env_file()` trong `crates/ferrous-panel/src/cli.rs` để tự khởi tạo đầy đủ 11 biến môi trường trong `/etc/ferrous-panel/panel.env` (`0600`) khi chạy `fp init`.
-5. **Khắc phục lỗi `HTTP 501 Not Implemented` trên các phân hệ mở rộng (Mail, DNS, SFTP, Edge Cloud, eBPF/WAF/FIM, Polyglot, Multi-PHP, Software, 1-Click, Optimizer, SSH, Diagnostics, Git Deploy, Rebuild, Per-site Settings)**:
-   - *Nguyên nhân gốc*: Ở P2/P5, các route nâng cao được gắn vào `not_implemented` (`HTTP 501`) trong `crates/ferrous-panel/src/api/mod.rs` và `SiteSpec::validate_supported` chặn `http3_quic`/`websocket_enabled`/`rate_limit_rps`. Ngoài ra `usePanelController.ts` gán kết quả `/api/security/ddos-mode`, `/api/security/waf/{id}/toggle`, `/api/security/fim-scan` vào `antiDdos` thay vì `antiDdosShield`.
-   - *Cách đã sửa*: Thêm bảng `panel_kv_store` vào SQLite `ModuleStore`, triển khai đầy đủ logic nghiệp vụ + ghi file cấu hình trong `crates/ferrous-panel/src/modules/{extended,apps,cpanel,security}.rs` và HTTP handlers trong `crates/ferrous-panel/src/api/{extended,apps,cpanel,security,mod}.rs`, mở khóa `http3_quic`/`websocket_enabled`/`rate_limit_rps` trong `webserver/mod.rs`, đồng bộ `antiDdosShield` trong `usePanelController.ts`, gỡ banner `501` tĩnh trên UI và build lại `dist/`.
-6. **Đồng bộ bản cập nhật FerrousX mới nhất từ GitHub (`Ferrous-panel/FerrousX @ 48659720`, `0.1.0-security-hardened`, `FX-001..FX-013`) & giao thức nội bộ `/run/ferrousx/panel-admin.sock`**:
-   - *Thay đổi upstream*: Chuẩn hóa nạp biến môi trường động qua `/etc/ferrousx/ferrousx.env` + `/etc/ferrous-panel/panel.env`, giao thức JSON IPC trên Unix Domain Socket `/run/ferrousx/panel-admin.sock` (`IpcRequest { action, payload, auth_token }` / `IpcResponse { success, message, data, latency_us }`, giới hạn 64 KiB, timeout 5s, xác thực `SO_PEERCRED` + 256-bit `/etc/ferrousx/admin.token` hằng thời gian, RBAC `FullAdmin`/`ReadOnly`, chống brute-force theo UID), CLI `ferrousx-ctl` (`fx`), và alias cấu hình TOML.
-   - *Đã cập nhật*:
-     - `crates/ferrousx/src/{ipc,config,handlers,server,main,lib}.rs` + `tests/server.rs`: triển khai đầy đủ máy chủ UDS Control Plane `/run/ferrousx/panel-admin.sock` khớp 100% chuẩn `crates/ferrousx-panel/src/api.rs` (`status`, `reload`, `panel_sync`, `vhost_add`, `vhost_del`, `cache`, `upgrade`) cùng bộ đếm `EngineRuntimeMetrics` và RCU epoch.
-     - `crates/ferrous-panel/src/webserver/{ferrousx_ipc,ferrousx,mod}.rs`, `modules/extended.rs`, `api/{extended,mod}.rs` + `tests/webserver.rs`: triển khai `FerrousxIpcClient` bất đồng bộ, tích hợp ưu tiên reload/sync/vhost qua `/run/ferrousx/panel-admin.sock` (tự fallback `SIGHUP` nếu socket không tồn tại), cập nhật diagnostics + `/api/ferrousx/sync-status`, và mở endpoint `/api/ferrousx/ipc/{status,command}`.
-     - `scripts/ferrousx.env.example`, `install.sh`, `update.sh` (hỗ trợ `--ferrousx` / `--ferrousx-only` và biến `FERROUSX_CONTROL_SOCKET=/run/ferrousx/panel-admin.sock`), `README.md`.
+## Lệnh kiểm chứng trên Ubuntu 24.04
+```bash
+cargo check --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+sudo bash scripts/smoke-test.sh
+```

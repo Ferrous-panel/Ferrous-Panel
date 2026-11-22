@@ -31,6 +31,8 @@ pub struct SshConfigPayload {
     pub allow_users: Option<Vec<String>>,
     #[serde(default)]
     pub kex_algorithms: Option<String>,
+    #[serde(default)]
+    pub confirm_port_change: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -135,6 +137,7 @@ pub async fn put_ssh_config(
             sftp_chroot_enabled: body.sftp_chroot_enabled,
             allow_users: body.allow_users,
             kex_algorithms: body.kex_algorithms,
+            confirm_port_change: body.confirm_port_change,
         },
     )
     .await?;
@@ -159,19 +162,13 @@ pub async fn post_ssh_key(
     let _conn_guard = state.telemetry.connection_guard();
 
     let body = payload.map(web::Json::into_inner).unwrap_or_default();
-    let pubkey = if body.public_key.trim().is_empty() {
-        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFerrousPanelDefaultKey admin@ferrous-panel"
-            .to_string()
-    } else {
-        body.public_key
-    };
     let data = ext::add_ssh_authorized_key(
         &state.modules,
         &state.config,
         &state.auth_store,
         state.webserver.executor().as_ref(),
         &body.label,
-        &pubkey,
+        &body.public_key,
         &body.client_hint,
     )
     .await?;
@@ -290,7 +287,7 @@ pub async fn post_ssh_exec(
         &body.command,
         &body.cwd,
     )
-    .await;
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

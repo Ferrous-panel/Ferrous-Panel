@@ -31,7 +31,11 @@ FERROUSX_REPO="${FERROUSX_REPO:-Ferrous-panel/FerrousX}"
 FERROUSX_BRANCH="${FERROUSX_BRANCH:-main}"
 RELEASE_TAG="${FERROUS_VERSION:-latest}"
 RUST_TOOLCHAIN="${FERROUS_RUST_VERSION:-stable}"
-PANEL_BIND="${FERROUS_BIND:-0.0.0.0}"
+PANEL_BIND="${FERROUS_BIND:-127.0.0.1}"
+BIND_EXPLICIT=false
+if [ -n "${FERROUS_BIND:-}" ] && [ "${FERROUS_BIND}" != "127.0.0.1" ] && [ "${FERROUS_BIND}" != "::1" ]; then
+  BIND_EXPLICIT=true
+fi
 PANEL_PORT="${FERROUS_PORT:-8443}"
 SECURITY_ENTRANCE="${FERROUS_SECURITY_ENTRANCE:-/panel}"
 ADMIN_USER="${FERROUS_ADMIN_USER:-admin_ferrous}"
@@ -44,6 +48,7 @@ UNATTENDED_MODE=false
 AUTO_SWAP=true
 PREBUILT_BINARY_ONLY=false
 INSTALL_JS_TOOLCHAIN=true
+INSECURE_SKIP_VERIFY=false
 
 DATA_DIR="/var/lib/ferrous-panel"
 ENV_FILE="/etc/ferrous-panel/panel.env"
@@ -67,8 +72,8 @@ Usage:
 
 Options:
   --engine <nginx|ferrousx>   Frontend web server engine (default: nginx)
-  --bind <IP>                 Listen address (default: 0.0.0.0 for direct VPS IP access)
-  --local-only                Bind strictly to 127.0.0.1 (access via SSH tunnel only)
+  --bind <IP>                 Listen address (default: 127.0.0.1; pass --bind 0.0.0.0 to expose directly)
+  --local-only                Bind strictly to 127.0.0.1 (default; access via SSH tunnel or HTTPS proxy)
   --port <PORT>               Listen TCP port 1..65535 (default: 8443)
   --entrance <PATH>           Security entrance path (default: /panel)
   --admin-user <USER>         Initial admin username (default: admin_ferrous)
@@ -76,6 +81,7 @@ Options:
   --branch <BRANCH>           Git branch to build from (default: main)
   --version <TAG|latest>      GitHub Release version tag (default: latest)
   --prebuilt-binary           Download prebuilt binary instead of compiling with Cargo
+  --insecure-skip-verify      Bypass SHA-256 verification on downloaded release/tool binaries (NOT recommended)
   --no-js-toolchain           Skip installing Zero-Node.js JS/CSS binaries (bun + tailwindcss)
   --no-swap                   Do not auto-create 2GB /swapfile on low-RAM VPS
   --interactive               Prompt interactively for engine and admin account setup
@@ -93,8 +99,8 @@ while [[ $# -gt 0 ]]; do
       exit 1
       ;;
     --admin-user) ADMIN_USER="$2"; ADMIN_USER_EXPLICIT=true; shift 2 ;;
-    --bind) PANEL_BIND="$2"; shift 2 ;;
-    --local-only) PANEL_BIND="127.0.0.1"; shift ;;
+    --bind) PANEL_BIND="$2"; BIND_EXPLICIT=true; shift 2 ;;
+    --local-only) PANEL_BIND="127.0.0.1"; BIND_EXPLICIT=false; shift ;;
     --port) PANEL_PORT="$2"; shift 2 ;;
     --entrance) SECURITY_ENTRANCE="$2"; shift 2 ;;
     --domain|--custom-domain) CUSTOM_DOMAIN="$2"; shift 2 ;;
@@ -102,6 +108,7 @@ while [[ $# -gt 0 ]]; do
     --branch) GIT_BRANCH="$2"; shift 2 ;;
     --version) RELEASE_TAG="$2"; shift 2 ;;
     --prebuilt-binary) PREBUILT_BINARY_ONLY=true; shift ;;
+    --insecure-skip-verify) INSECURE_SKIP_VERIFY=true; shift ;;
     --no-js-toolchain) INSTALL_JS_TOOLCHAIN=false; shift ;;
     --no-swap) AUTO_SWAP=false; shift ;;
     --interactive) INTERACTIVE_MODE=true; UNATTENDED_MODE=false; shift ;;
@@ -114,6 +121,15 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [ "${PANEL_BIND}" != "127.0.0.1" ] && [ "${PANEL_BIND}" != "::1" ]; then
+  if [ "${BIND_EXPLICIT}" != true ]; then
+    echo -e "${RED}[ERROR] Non-loopback bind '${PANEL_BIND}' requires passing --bind explicitly.${NC}" >&2
+    exit 1
+  fi
+  echo -e "${YELLOW}[WARNING] CẢNH BÁO BẢO MẬT: Panel đang chạy HTTP không mã hóa trên ${PANEL_BIND}:${PANEL_PORT}.${NC}" >&2
+  echo -e "${YELLOW}[WARNING] Nên dùng reverse proxy HTTPS + domain riêng hoặc SSH tunnel tới 127.0.0.1:${PANEL_PORT}.${NC}" >&2
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo -e "${RED}[ERROR] install.sh must be run as root (use sudo).${NC}" >&2
@@ -386,7 +402,47 @@ chown -R www-data:www-data "${WWWROOT}" /www/acme 2>/dev/null || true
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/SHA256SUMS.txt"
+SHA256SUMS_FETCHED=false
+if curl -fsSL --connect-timeout 10 -o "${TMP_DIR}/SHA256SUMS.txt" "${RELEASE_BASE}/SHA256SUMS.txt" 2>/dev/null; then
+  SHA256SUMS_FETCHED=true
+else
+  rm -f "${TMP_DIR}/SHA256SUMS.txt"
+fi
+
+verify_sha256_entry() {
+  local sums_file="$1"
+  local asset_name="$2"
+  local work_dir="$3"
+  local label="$4"
+
+  if [ ! -f "${sums_file}" ]; then
+    if [ "${INSECURE_SKIP_VERIFY}" = true ]; then
+      echo -e "${YELLOW}[WARNING] --insecure-skip-verify active: skipping missing SHA-256 manifest for ${label} (${asset_name}).${NC}" >&2
+      return 0
+    fi
+    echo -e "${RED}[ERROR] Cannot download SHA-256 checksum manifest for ${label} (${asset_name}). Refusing unverified binary install.${NC}" >&2
+    echo -e "${YELLOW}Pass --insecure-skip-verify ONLY if you explicitly accept installing an unverified binary.${NC}" >&2
+    exit 1
+  fi
+
+  local matched_line
+  matched_line="$(grep -E "[[:space:]](\./|\*)?${asset_name}$" "${sums_file}" | head -n 1 || true)"
+  if [ -z "${matched_line}" ]; then
+    if [ "${INSECURE_SKIP_VERIFY}" = true ]; then
+      echo -e "${YELLOW}[WARNING] --insecure-skip-verify active: no SHA-256 entry found for ${asset_name} in ${label}.${NC}" >&2
+      return 0
+    fi
+    echo -e "${RED}[ERROR] No SHA-256 entry matching '${asset_name}' in ${label} checksum manifest. Aborting installation.${NC}" >&2
+    exit 1
+  fi
+
+  local expected_hash
+  expected_hash="$(printf '%s\n' "${matched_line}" | awk '{print $1}')"
+  if ! (cd "${work_dir}" && printf '%s  %s\n' "${expected_hash}" "${asset_name}" | sha256sum -c -); then
+    echo -e "${RED}[ERROR] SHA-256 verification FAILED for ${asset_name} (${label}). Aborting installation.${NC}" >&2
+    exit 1
+  fi
+}
 
 download_release_binary() {
   local asset_name="$1"
@@ -394,12 +450,16 @@ download_release_binary() {
   local url="${RELEASE_BASE}/${asset_name}"
   local tmp_file="${TMP_DIR}/${asset_name}"
 
+  if [ "${SHA256SUMS_FETCHED}" != true ] && [ "${INSECURE_SKIP_VERIFY}" != true ]; then
+    echo -e "${RED}[ERROR] Failed to fetch ${RELEASE_BASE}/SHA256SUMS.txt; refusing unverified binary download (${asset_name}).${NC}" >&2
+    echo -e "${YELLOW}Pass --insecure-skip-verify to bypass checksum verification.${NC}" >&2
+    exit 1
+  fi
+
   echo -e "${CYAN}[*] Downloading prebuilt binary ${url}...${NC}"
   curl -fsSL --retry 3 --connect-timeout 10 -o "$tmp_file" "$url"
 
-  if [ -f "${TMP_DIR}/SHA256SUMS.txt" ] && grep -q " ${asset_name}\$" "${TMP_DIR}/SHA256SUMS.txt"; then
-    (cd "$TMP_DIR" && grep " ${asset_name}\$" SHA256SUMS.txt | sha256sum -c -)
-  fi
+  verify_sha256_entry "${TMP_DIR}/SHA256SUMS.txt" "${asset_name}" "${TMP_DIR}" "FerrousPanel release"
 
   install -m 0755 "$tmp_file" "$dest_path"
 }
@@ -418,12 +478,20 @@ install_zero_node_js_css_toolchain() {
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
     fi
     mkdir -p "${TMP_DIR}/bun-dl"
-    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/bun.zip" \
-      "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${bun_arch}.zip" \
-      && unzip -qo "${TMP_DIR}/bun-dl/bun.zip" -d "${TMP_DIR}/bun-dl" \
-      && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
-      install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
-      echo -e "${GREEN}[+] Installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+    local bun_asset="bun-linux-${bun_arch}.zip"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/${bun_asset}" \
+      "https://github.com/oven-sh/bun/releases/latest/download/${bun_asset}"; then
+      curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/bun-dl/SHASUMS256.txt" \
+        "https://github.com/oven-sh/bun/releases/latest/download/SHASUMS256.txt" 2>/dev/null || rm -f "${TMP_DIR}/bun-dl/SHASUMS256.txt"
+      verify_sha256_entry "${TMP_DIR}/bun-dl/SHASUMS256.txt" "${bun_asset}" "${TMP_DIR}/bun-dl" "Bun release"
+      if unzip -qo "${TMP_DIR}/bun-dl/${bun_asset}" -d "${TMP_DIR}/bun-dl" \
+        && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
+        install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
+        echo -e "${GREEN}[+] Verified & installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+      else
+        echo -e "${RED}[ERROR] Failed to unpack verified Bun archive.${NC}" >&2
+        exit 1
+      fi
     else
       echo -e "${YELLOW}[!] Could not download Bun binary right now (you can install later via Software Store).${NC}"
     fi
@@ -435,10 +503,18 @@ install_zero_node_js_css_toolchain() {
 
   if [ ! -x /usr/local/bin/tailwindcss ]; then
     echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Rust Oxide, Zero-Node.js)...${NC}"
-    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tailwindcss" \
-      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-${tw_arch}"; then
-      install -m 0755 "${TMP_DIR}/tailwindcss" /usr/local/bin/tailwindcss
-      echo -e "${GREEN}[+] Installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
+    mkdir -p "${TMP_DIR}/tw-dl"
+    local tw_asset="tailwindcss-linux-${tw_arch}"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tw-dl/${tw_asset}" \
+      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/${tw_asset}"; then
+      if ! curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" \
+        "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/sha256sums.txt" 2>/dev/null; then
+        curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" \
+          "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/SHA256SUMS.txt" 2>/dev/null || rm -f "${TMP_DIR}/tw-dl/sha256sums.txt"
+      fi
+      verify_sha256_entry "${TMP_DIR}/tw-dl/sha256sums.txt" "${tw_asset}" "${TMP_DIR}/tw-dl" "Tailwind CSS release"
+      install -m 0755 "${TMP_DIR}/tw-dl/${tw_asset}" /usr/local/bin/tailwindcss
+      echo -e "${GREEN}[+] Verified & installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
     else
       echo -e "${YELLOW}[!] Could not download Tailwind CSS standalone binary right now (you can install later via Software Store).${NC}"
     fi
@@ -881,7 +957,16 @@ fi
 # [6/7] Initialize Argon2id 0600 Credentials, SQLite & ferrous-panel.service
 # ==============================================================================
 echo -e "${BLUE}[6/7] Initializing Argon2id credentials, SQLite store, and systemd unit...${NC}"
+SECURE_COOKIE="false"
+if [ -n "${CUSTOM_DOMAIN}" ] && [ -f "/etc/letsencrypt/live/${CUSTOM_DOMAIN}/fullchain.pem" ]; then
+  SECURE_COOKIE="true"
+elif [ "${PANEL_BIND}" != "127.0.0.1" ] && [ "${PANEL_BIND}" != "::1" ]; then
+  echo -e "${YELLOW}[WARNING] FERROUS_SECURE_COOKIE=false vì panel đang lắng nghe HTTP công khai (${PANEL_BIND}:${PANEL_PORT}) chưa có SSL.${NC}" >&2
+  echo -e "${YELLOW}[WARNING] Sau khi cấu hình domain + SSL, đặt FERROUS_SECURE_COOKIE=true trong ${ENV_FILE} và khởi động lại panel.${NC}" >&2
+fi
+
 cat > "${ENV_FILE}" <<EOF_ENV
+FERROUS_MODE=production
 FERROUS_BIND=${PANEL_BIND}
 FERROUS_PORT=${PANEL_PORT}
 FERROUS_DATA_DIR=${DATA_DIR}
@@ -892,7 +977,7 @@ FERROUS_ADMIN_USER=${ADMIN_USER}
 FERROUS_SECURITY_ENTRANCE=${SECURITY_ENTRANCE}
 FERROUS_CUSTOM_DOMAIN=${CUSTOM_DOMAIN}
 FERROUS_PUBLIC_IP=${VPS_PUBLIC_IP}
-FERROUS_SECURE_COOKIE=false
+FERROUS_SECURE_COOKIE=${SECURE_COOKIE}
 RUSTUP_HOME=${RUSTUP_HOME}
 CARGO_HOME=${CARGO_HOME}
 RUST_LOG=info,actix_web=info

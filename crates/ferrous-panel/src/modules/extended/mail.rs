@@ -1,36 +1,188 @@
 use super::common::*;
+use std::os::unix::fs::PermissionsExt as _;
 
 // ============================================================================
 // 5. Mail Server (Postfix / Dovecot / Rspamd)
 // ============================================================================
 
-fn build_mail_domain_item(domain: &Domain, mailboxes_count: u32) -> MailDomainItem {
-    let d = domain.as_str();
-    let digest = sha256_hex(format!("ferrous-dkim:{d}").as_bytes());
-    let fake_b64 = format!(
-        "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA{}IDAQAB",
-        &digest[..48]
-    );
-    MailDomainItem {
-        id: format!("md-{}", d.replace('.', "-")),
-        domain: d.to_string(),
-        spf_status: "verified".to_string(),
-        dkim_status: "verified".to_string(),
-        dmarc_status: "verified".to_string(),
-        dkim_selector: "ferrous._domainkey".to_string(),
-        dkim_public_key: format!("v=DKIM1; k=rsa; p={fake_b64}"),
-        catch_all_address: format!("postmaster@{d}"),
-        mailboxes_count,
+const DKIM_SELECTOR_NAME: &str = "ferrous";
+const DKIM_SELECTOR_HOST: &str = "ferrous._domainkey";
+
+async fn generate_real_dkim_public_key(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    domain: &Domain,
+) -> Result<String, PanelError> {
+    let dkim_dir = config.data_dir.join("mail").join("dkim");
+    std::fs::create_dir_all(&dkim_dir)?;
+    let priv_path = dkim_dir.join(format!("{}.key", domain.as_str()));
+    let pub_path = dkim_dir.join(format!("{}.pub", domain.as_str()));
+
+    if !executor.is_binary_available(AllowedBinary::OpenSsl) {
+        if is_production_vps(config) {
+            return Err(PanelError::Conflict(
+                "thiếu binary openssl để tạo khóa DKIM RSA-2048 (gợi ý: sudo apt install -y openssl postfix dovecot-core rspamd)".to_string(),
+            ));
+        }
+        return Ok("v=DKIM1; k=rsa; p=PENDING_OPENSSL_UNAVAILABLE".to_string());
+    }
+
+    let priv_str = priv_path.display().to_string();
+    if !priv_path.is_file() {
+        let gen = executor
+            .run(
+                AllowedBinary::OpenSsl,
+                &[
+                    "genpkey",
+                    "-algorithm",
+                    "RSA",
+                    "-pkeyopt",
+                    "rsa_keygen_bits:2048",
+                    "-out",
+                    &priv_str,
+                ],
+                CMD_TIMEOUT,
+            )
+            .await?;
+        if !gen.success {
+            return Err(PanelError::CommandFailed {
+                binary: "openssl",
+                exit_code: gen.exit_code,
+                stderr: if gen.stderr.trim().is_empty() {
+                    gen.stdout
+                } else {
+                    gen.stderr
+                },
+            });
+        }
+        if priv_path.is_file() {
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&priv_path, perms)?;
+        }
+    }
+
+    let pub_out = executor
+        .run(
+            AllowedBinary::OpenSsl,
+            &["pkey", "-in", &priv_str, "-pubout"],
+            CMD_TIMEOUT,
+        )
+        .await?;
+    if !pub_out.success {
+        return Err(PanelError::CommandFailed {
+            binary: "openssl",
+            exit_code: pub_out.exit_code,
+            stderr: if pub_out.stderr.trim().is_empty() {
+                pub_out.stdout
+            } else {
+                pub_out.stderr
+            },
+        });
+    }
+
+    let b64: String = pub_out
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("-----"))
+        .collect();
+    if b64.is_empty() {
+        if is_production_vps(config) {
+            return Err(PanelError::Conflict(
+                "openssl pkey -pubout không trả về public key hợp lệ".to_string(),
+            ));
+        }
+        return Ok("v=DKIM1; k=rsa; p=PENDING_OPENSSL_TEST".to_string());
+    }
+
+    let record = format!("v=DKIM1; k=rsa; p={b64}");
+    atomic_write_file(&pub_path, format!("{record}\n").as_bytes(), 0o644)?;
+    Ok(record)
+}
+
+async fn check_txt_record_contains(
+    executor: &dyn CommandExecutor,
+    hostname: &str,
+    needle: &str,
+) -> String {
+    if !executor.is_binary_available(AllowedBinary::Dig) {
+        return "unverified".to_string();
+    }
+    match executor
+        .run(
+            AllowedBinary::Dig,
+            &["+short", "+time=3", "+tries=1", "TXT", hostname],
+            CMD_TIMEOUT,
+        )
+        .await
+    {
+        Ok(out) if out.success => {
+            let normalized = out.stdout.replace('"', "").to_ascii_lowercase();
+            if normalized.contains(&needle.to_ascii_lowercase()) {
+                "verified".to_string()
+            } else {
+                "missing".to_string()
+            }
+        }
+        _ => "unverified".to_string(),
     }
 }
 
+async fn build_mail_domain_item(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    domain: &Domain,
+    mailboxes_count: u32,
+) -> Result<MailDomainItem, PanelError> {
+    let d = domain.as_str();
+    let dkim_public_key = generate_real_dkim_public_key(config, executor, domain).await?;
+    let spf_status = check_txt_record_contains(executor, d, "v=spf1").await;
+    let dkim_host = format!("{DKIM_SELECTOR_HOST}.{d}");
+    let dkim_status = check_txt_record_contains(executor, &dkim_host, "v=dkim1").await;
+    let dmarc_host = format!("_dmarc.{d}");
+    let dmarc_status = check_txt_record_contains(executor, &dmarc_host, "v=dmarc1").await;
+
+    Ok(MailDomainItem {
+        id: format!("md-{}", d.replace('.', "-")),
+        domain: d.to_string(),
+        spf_status,
+        dkim_status,
+        dmarc_status,
+        dkim_selector: DKIM_SELECTOR_HOST.to_string(),
+        dkim_public_key,
+        catch_all_address: format!("postmaster@{d}"),
+        mailboxes_count,
+    })
+}
+
 fn default_mail_server_data(config: &Config) -> MailServerData {
+    if is_production_vps(config) {
+        return MailServerData {
+            postfix_version: "Postfix".to_string(),
+            dovecot_version: "Dovecot".to_string(),
+            rspamd_version: "Rspamd".to_string(),
+            postfix_status: "unknown".to_string(),
+            dovecot_status: "unknown".to_string(),
+            rspamd_status: "unknown".to_string(),
+            queue_count: 0,
+            sent_today: 0,
+            spam_blocked_today: 0,
+            domains: Vec::new(),
+            mailboxes: Vec::new(),
+            forwarders: Vec::new(),
+            messages: Vec::new(),
+        };
+    }
+
     let local_domain = resolve_local_domain(Some(config));
     let Ok(dom) = Domain::parse(&local_domain) else {
         return MailServerData {
-            postfix_version: "Postfix 3.8.6".to_string(),
-            dovecot_version: "Dovecot 2.3.21".to_string(),
-            rspamd_version: "Rspamd 3.8.4".to_string(),
+            postfix_version: "Postfix".to_string(),
+            dovecot_version: "Dovecot".to_string(),
+            rspamd_version: "Rspamd".to_string(),
+            postfix_status: "test-mode".to_string(),
+            dovecot_status: "test-mode".to_string(),
+            rspamd_status: "test-mode".to_string(),
             queue_count: 0,
             sent_today: 0,
             spam_blocked_today: 0,
@@ -41,59 +193,30 @@ fn default_mail_server_data(config: &Config) -> MailServerData {
         };
     };
     let d = dom.as_str();
-    let domain_item = build_mail_domain_item(&dom, 2);
     MailServerData {
-        postfix_version: "Postfix 3.8.6 (TLSv1.3 + Viktor DANE)".to_string(),
-        dovecot_version: "Dovecot 2.3.21 (IMAPS :993 / Maildir++)".to_string(),
-        rspamd_version: "Rspamd 3.8.4 (DKIM Signer + Neural Bayes)".to_string(),
+        postfix_version: "Postfix (test mode)".to_string(),
+        dovecot_version: "Dovecot (test mode)".to_string(),
+        rspamd_version: "Rspamd (test mode)".to_string(),
+        postfix_status: "test-mode".to_string(),
+        dovecot_status: "test-mode".to_string(),
+        rspamd_status: "test-mode".to_string(),
         queue_count: 0,
-        sent_today: 24,
-        spam_blocked_today: 67,
-        domains: vec![domain_item],
-        mailboxes: vec![
-            MailboxAccount {
-                id: "mb-admin-local".to_string(),
-                email: format!("admin@{d}"),
-                domain: d.to_string(),
-                display_name: "Ferrous System Administrator".to_string(),
-                quota_mb: 5120,
-                used_mb: 48.2,
-                imap_server: format!("mail.{d}:993 (SSL/TLS)"),
-                smtp_server: format!("mail.{d}:465 (SMTPS)"),
-                status: "active".to_string(),
-                last_login: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-            },
-            MailboxAccount {
-                id: "mb-security-local".to_string(),
-                email: format!("security@{d}"),
-                domain: d.to_string(),
-                display_name: "SecOps & Certbot Alerts".to_string(),
-                quota_mb: 2048,
-                used_mb: 12.4,
-                imap_server: format!("mail.{d}:993 (SSL/TLS)"),
-                smtp_server: format!("mail.{d}:465 (SMTPS)"),
-                status: "active".to_string(),
-                last_login: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-            },
-        ],
-        forwarders: vec![MailForwarder {
-            id: "fwd-support".to_string(),
-            source_email: format!("support@{d}"),
-            destination_email: format!("admin@{d}"),
+        sent_today: 0,
+        spam_blocked_today: 0,
+        domains: vec![MailDomainItem {
+            id: format!("md-{}", d.replace('.', "-")),
             domain: d.to_string(),
-            active: true,
+            spf_status: "pending".to_string(),
+            dkim_status: "pending".to_string(),
+            dmarc_status: "pending".to_string(),
+            dkim_selector: DKIM_SELECTOR_HOST.to_string(),
+            dkim_public_key: format!("v=DKIM1; k=rsa; p=PENDING_KEYGEN_{DKIM_SELECTOR_NAME}"),
+            catch_all_address: format!("postmaster@{d}"),
+            mailboxes_count: 0,
         }],
-        messages: vec![MailMessageItem {
-            id: "msg-welcome-01".to_string(),
-            folder: "inbox".to_string(),
-            from: format!("security@{d}"),
-            to: format!("admin@{d}"),
-            subject: "[FerrousPanel] DKIM, SPF & DMARC Verification Ready".to_string(),
-            snippet: "All outbound messages are signed with ferrous._domainkey RSA-2048...".to_string(),
-            body: "FerrousPanel Mail Server subsystem is active.\n\n- Postfix virtual mailbox domains synchronized\n- Dovecot Maildir++ quotas enforced\n- Rspamd DKIM signing enabled for selector ferrous._domainkey".to_string(),
-            timestamp: Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
-            dkim_signed: true,
-        }],
+        mailboxes: Vec::new(),
+        forwarders: Vec::new(),
+        messages: Vec::new(),
     }
 }
 
@@ -166,50 +289,135 @@ async fn sync_mail_virtual_files_live(
     config: &Config,
     mail: &MailServerData,
     executor: &dyn CommandExecutor,
+    require_mta_in_prod: bool,
 ) -> Result<(), PanelError> {
     sync_mail_virtual_files(config, mail)?;
 
-    if is_production_vps(config) && Path::new("/etc/postfix").is_dir() {
-        let domains_txt = mail
-            .domains
-            .iter()
-            .map(|d| format!("{} OK\n", d.domain))
-            .collect::<String>();
-        let mailboxes_txt = mail
-            .mailboxes
-            .iter()
-            .map(|m| format!("{} {}/{}/\n", m.email, m.domain, m.email))
-            .collect::<String>();
-        let virtual_alias = mail
-            .forwarders
-            .iter()
-            .map(|f| format!("{} {}\n", f.source_email, f.destination_email))
-            .collect::<String>();
+    if !is_production_vps(config) {
+        return Ok(());
+    }
 
-        let dom_path = Path::new("/etc/postfix/ferrous_virtual_domains");
-        let mb_path = Path::new("/etc/postfix/ferrous_virtual_mailboxes");
-        let alias_path = Path::new("/etc/postfix/ferrous_virtual_aliases");
+    if !Path::new("/etc/postfix").is_dir() || !executor.is_binary_available(AllowedBinary::Postmap) {
+        if require_mta_in_prod {
+            return Err(PanelError::Conflict(
+                "Postfix chưa được cài đặt hoặc thiếu /etc/postfix / postmap (gợi ý: sudo apt install -y postfix dovecot-core rspamd)".to_string(),
+            ));
+        }
+        return Ok(());
+    }
 
-        let _ = atomic_write_file(dom_path, domains_txt.as_bytes(), 0o644);
-        let _ = atomic_write_file(mb_path, mailboxes_txt.as_bytes(), 0o644);
-        let _ = atomic_write_file(alias_path, virtual_alias.as_bytes(), 0o644);
+    let domains_txt = mail
+        .domains
+        .iter()
+        .map(|d| format!("{} OK\n", d.domain))
+        .collect::<String>();
+    let mailboxes_txt = mail
+        .mailboxes
+        .iter()
+        .map(|m| format!("{} {}/{}/\n", m.email, m.domain, m.email))
+        .collect::<String>();
+    let virtual_alias = mail
+        .forwarders
+        .iter()
+        .map(|f| format!("{} {}\n", f.source_email, f.destination_email))
+        .collect::<String>();
 
-        if AllowedBinary::Postmap.is_available() {
-            for p in [
-                "/etc/postfix/ferrous_virtual_domains",
-                "/etc/postfix/ferrous_virtual_mailboxes",
-                "/etc/postfix/ferrous_virtual_aliases",
-            ] {
-                let _ = executor.run(AllowedBinary::Postmap, &[p], CMD_TIMEOUT).await;
+    let files = [
+        (
+            Path::new("/etc/postfix/ferrous_virtual_domains"),
+            domains_txt.as_bytes(),
+        ),
+        (
+            Path::new("/etc/postfix/ferrous_virtual_mailboxes"),
+            mailboxes_txt.as_bytes(),
+        ),
+        (
+            Path::new("/etc/postfix/ferrous_virtual_aliases"),
+            virtual_alias.as_bytes(),
+        ),
+    ];
+
+    let snapshots: Vec<(&Path, Option<Vec<u8>>)> = files
+        .iter()
+        .map(|(p, _)| (*p, std::fs::read(p).ok()))
+        .collect();
+
+    let rollback = || {
+        for (p, prev) in &snapshots {
+            if let Some(bytes) = prev {
+                let _ = atomic_write_file(p, bytes, 0o644);
+            } else {
+                let _ = std::fs::remove_file(p);
             }
         }
-        if AllowedBinary::Systemctl.is_available() {
-            let _ = executor
-                .run(AllowedBinary::Systemctl, &["reload", "postfix.service"], CMD_TIMEOUT)
-                .await;
+    };
+
+    for (path, bytes) in &files {
+        if let Err(err) = atomic_write_file(path, bytes, 0o644) {
+            rollback();
+            return Err(err);
         }
     }
-    Ok(())
+
+    for (path, _) in &files {
+        let p_str = path.display().to_string();
+        let res = executor
+            .run(AllowedBinary::Postmap, &[&p_str], CMD_TIMEOUT)
+            .await;
+        match res {
+            Ok(out) if out.success => {}
+            Ok(out) => {
+                rollback();
+                return Err(PanelError::CommandFailed {
+                    binary: "postmap",
+                    exit_code: out.exit_code,
+                    stderr: if out.stderr.trim().is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    },
+                });
+            }
+            Err(err) => {
+                rollback();
+                return Err(err);
+            }
+        }
+    }
+
+    if !executor.is_binary_available(AllowedBinary::Systemctl) {
+        rollback();
+        return Err(PanelError::Conflict(
+            "thiếu systemctl để reload postfix.service (đã rollback)".to_string(),
+        ));
+    }
+
+    let reload = executor
+        .run(
+            AllowedBinary::Systemctl,
+            &["reload", "postfix.service"],
+            CMD_TIMEOUT,
+        )
+        .await;
+    match reload {
+        Ok(out) if out.success => Ok(()),
+        Ok(out) => {
+            rollback();
+            Err(PanelError::CommandFailed {
+                binary: "systemctl",
+                exit_code: out.exit_code,
+                stderr: if out.stderr.trim().is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                },
+            })
+        }
+        Err(err) => {
+            rollback();
+            Err(err)
+        }
+    }
 }
 
 async fn probe_mail_unit_status(executor: &dyn CommandExecutor, unit: &str) -> String {
@@ -241,14 +449,29 @@ pub async fn load_mail_server(
     } else {
         let initial = default_mail_server_data(config);
         store.put_json(KV_MAIL_SERVER, &initial)?;
-        sync_mail_virtual_files_live(config, &initial, executor).await?;
+        sync_mail_virtual_files_live(config, &initial, executor, false).await?;
         initial
     };
 
-    if is_production_vps(config) && AllowedBinary::Systemctl.is_available() {
+    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Systemctl) {
         mail.postfix_status = probe_mail_unit_status(executor, "postfix.service").await;
         mail.dovecot_status = probe_mail_unit_status(executor, "dovecot.service").await;
         mail.rspamd_status = probe_mail_unit_status(executor, "rspamd.service").await;
+    }
+
+    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Dig) {
+        for dom in &mut mail.domains {
+            let d = dom.domain.clone();
+            dom.spf_status = check_txt_record_contains(executor, &d, "v=spf1").await;
+            dom.dkim_status = check_txt_record_contains(
+                executor,
+                &format!("{}.{d}", dom.dkim_selector),
+                "v=dkim1",
+            )
+            .await;
+            dom.dmarc_status =
+                check_txt_record_contains(executor, &format!("_dmarc.{d}"), "v=dmarc1").await;
+        }
     }
 
     Ok(mail)
@@ -272,9 +495,10 @@ pub async fn add_mail_domain(
             domain.as_str()
         )));
     }
-    mail.domains.insert(0, build_mail_domain_item(&domain, 0));
+    let item = build_mail_domain_item(config, executor, &domain, 0).await?;
+    mail.domains.insert(0, item);
+    sync_mail_virtual_files_live(config, &mail, executor, true).await?;
     store.put_json(KV_MAIL_SERVER, &mail)?;
-    sync_mail_virtual_files_live(config, &mail, executor).await?;
     Ok(mail)
 }
 
@@ -322,11 +546,11 @@ pub async fn create_mailbox(
                 display_name.trim().to_string()
             },
             quota_mb: quota_mb.max(64),
-            used_mb: 0.1,
+            used_mb: 0.0,
             imap_server: format!("mail.{}:993 (SSL/TLS)", parsed_domain.as_str()),
             smtp_server: format!("mail.{}:465 (SMTPS)", parsed_domain.as_str()),
             status: "active".to_string(),
-            last_login: "Just created".to_string(),
+            last_login: "Never".to_string(),
         },
     );
     for d in &mut mail.domains {
@@ -334,8 +558,8 @@ pub async fn create_mailbox(
             d.mailboxes_count = d.mailboxes_count.saturating_add(1);
         }
     }
+    sync_mail_virtual_files_live(config, &mail, executor, true).await?;
     store.put_json(KV_MAIL_SERVER, &mail)?;
-    sync_mail_virtual_files_live(config, &mail, executor).await?;
     Ok(mail)
 }
 
@@ -362,13 +586,13 @@ pub async fn delete_mailbox(
                 d.mailboxes_count = d.mailboxes_count.saturating_sub(1);
             }
         }
+        sync_mail_virtual_files_live(config, &mail, executor, true).await?;
         let maildir_root = config.data_dir.join("mail").join("vhosts").join(&dom).join(&email);
         if maildir_root.exists() {
-            let _ = std::fs::remove_dir_all(&maildir_root);
+            std::fs::remove_dir_all(&maildir_root)?;
         }
     }
     store.put_json(KV_MAIL_SERVER, &mail)?;
-    sync_mail_virtual_files_live(config, &mail, executor).await?;
     Ok(mail)
 }
 
@@ -395,8 +619,8 @@ pub async fn create_forwarder(
             active: true,
         },
     );
+    sync_mail_virtual_files_live(config, &mail, executor, true).await?;
     store.put_json(KV_MAIL_SERVER, &mail)?;
-    sync_mail_virtual_files_live(config, &mail, executor).await?;
     Ok(mail)
 }
 
@@ -412,8 +636,8 @@ pub async fn delete_forwarder(
     if mail.forwarders.len() == before {
         return Err(PanelError::NotFound(format!("forwarder '{id}' not found")));
     }
+    sync_mail_virtual_files_live(config, &mail, executor, true).await?;
     store.put_json(KV_MAIL_SERVER, &mail)?;
-    sync_mail_virtual_files_live(config, &mail, executor).await?;
     Ok(mail)
 }
 
@@ -448,10 +672,12 @@ pub async fn send_test_mail(
         0o640,
     )?;
 
-    let mut delivery_note = "spooled locally (install postfix/sendmail for live SMTP delivery)".to_string();
-    let mut dkim_signed = false;
-
-    if is_production_vps(config) && AllowedBinary::Sendmail.is_available() {
+    let (delivery_note, dkim_signed) = if is_production_vps(config) {
+        if !executor.is_binary_available(AllowedBinary::Sendmail) {
+            return Err(PanelError::Conflict(
+                "thiếu binary sendmail/Postfix để gửi email thật (gợi ý: sudo apt install -y postfix)".to_string(),
+            ));
+        }
         let out = executor
             .run_with_stdin(
                 AllowedBinary::Sendmail,
@@ -472,9 +698,10 @@ pub async fn send_test_mail(
                 stderr: err,
             });
         }
-        delivery_note = "dispatched via host sendmail/Postfix MTA".to_string();
-        dkim_signed = true;
-    }
+        ("dispatched via host sendmail/Postfix MTA".to_string(), true)
+    } else {
+        ("spooled in test mode (FERROUS_MODE=test)".to_string(), false)
+    };
 
     let mut mail = load_mail_server(store, config, executor).await?;
     let trimmed_body = body.trim();
@@ -502,4 +729,3 @@ pub async fn send_test_mail(
     store.put_json(KV_MAIL_SERVER, &mail)?;
     Ok(mail)
 }
-

@@ -228,8 +228,36 @@ impl SslManager {
         Box::pin(async move {
             if !self.executor.is_binary_available(AllowedBinary::Certbot) {
                 return Err(PanelError::Conflict(
-                    "certbot is not installed on this server".to_string(),
+                    "certbot is not installed on this server (install: sudo apt install -y certbot)"
+                        .to_string(),
                 ));
+            }
+
+            // Pre-check DNS A/AAAA resolution for primary domain and aliases before burning Let's Encrypt rate limit.
+            let mut all_hosts = vec![domain];
+            for alias in aliases {
+                if alias.as_str() != domain.as_str() {
+                    all_hosts.push(alias);
+                }
+            }
+            for host in all_hosts {
+                let name = host.as_str();
+                let resolved = tokio::net::lookup_host((name, 80u16)).await.map_err(|err| {
+                    PanelError::Conflict(format!(
+                        "DNS pre-check failed for '{name}': domain does not resolve ({err}). Point A/AAAA record to this VPS before requesting Let's Encrypt SSL."
+                    ))
+                })?;
+                let ips: Vec<std::net::IpAddr> = resolved.map(|sa| sa.ip()).collect();
+                if ips.is_empty() {
+                    return Err(PanelError::Conflict(format!(
+                        "DNS pre-check failed for '{name}': no A/AAAA records found. Point DNS to this VPS first."
+                    )));
+                }
+                if ips.iter().all(|ip| ip.is_loopback() || ip.is_unspecified()) {
+                    return Err(PanelError::Conflict(format!(
+                        "DNS pre-check failed for '{name}': resolves only to loopback/unspecified IP ({ips:?}). Point public DNS A/AAAA record to this VPS."
+                    )));
+                }
             }
 
             let challenge_dir = self
@@ -249,10 +277,17 @@ impl SslManager {
                 .await?;
 
             if !out.success {
+                let reason = if !out.stderr.trim().is_empty() {
+                    out.stderr.trim().to_string()
+                } else if !out.stdout.trim().is_empty() {
+                    out.stdout.trim().to_string()
+                } else {
+                    "certbot failed without diagnostic output".to_string()
+                };
                 return Err(PanelError::CommandFailed {
                     binary: AllowedBinary::Certbot.label(),
                     exit_code: out.exit_code,
-                    stderr: out.stderr,
+                    stderr: reason,
                 });
             }
 

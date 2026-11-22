@@ -6,142 +6,119 @@
 
 Open-source, 100% pure-Rust Ubuntu 22.04 / 24.04 LTS VPS Control Panel (`ferrous-panel` + optional `ferrousx-bin`).
 
-- **100% Pure-Rust Backend on VPS**: Frontend React assets (`dist/`) are prebuilt (`vite build`) and embedded directly inside the `ferrous-panel` binary via `rust-embed` (zero Node.js runtime on the VPS).
-- **Automated 1-Command Installer (`install.sh`)**: Automatically creates a 2GB `/swapfile` on low-RAM VPS (`< 4GB RAM`) to prevent OOM, installs/upgrades `rustup` / `cargo` `stable` (`1.89+`, `--profile minimal`), embeds the prebuilt `dist/` UI, compiles `ferrous-panel` with `cargo build --release`, and configures `systemd` + `UFW`.
-- **Zero fabricated metrics & zero hidden shells**: System metrics come from `/proc` + `sysinfo`; all privileged host operations run via allowlisted argv execution (`execve`, no `sh -c`) and strict validated newtypes (`Domain`, `ServiceName`, `Port`, `SafePath`, `SqlIdentifier`, `PortOrRange`, `CronSchedule`, `SafeLinuxUser`, `OctalMode`).
-- **Fail-closed HTTP 501**: Unimplemented subsystems return `HTTP 501 Not Implemented` and display `"Chưa hỗ trợ"` in the UI rather than returning mock data.
+- **100% Pure-Rust Production Binary (Zero Node.js on VPS)**: The native web UI (`crates/ferrous-panel/src/ui/assets/`) is embedded directly into the `ferrous-panel` binary via `rust-embed` with zero Node.js runtime or build dependency on the server.
+- **Secure-by-Default Installer (`install.sh`)**: Defaults to loopback bind (`FERROUS_BIND=127.0.0.1`), enforces SHA-256 checksum verification (`SHA256SUMS.txt`, failing closed unless `--insecure-skip-verify` is explicitly passed), warns loudly when binding publicly without HTTPS, auto-provisions 2GB swap on low-RAM VPS (`< 4GB`), and uses Rust `stable (>= 1.89)`.
+- **Zero Fabricated Data & Live Capabilities (`GET /api/capabilities`)**: System metrics are read from `/proc` + `sysinfo`; all privileged host operations run via allowlisted argv execution (`execve`, no `sh -c`) with bounded 64 KiB stdout/stderr capture, verification readbacks, and automatic rollback on failure. Missing host packages report `unavailable` with install hints (and return `HTTP 409 Conflict` on execution) instead of simulating success.
 
 ---
 
 ## 1-Command Installation (Ubuntu 22.04 / 24.04 LTS)
 
-Run **one single command** on a fresh Ubuntu 22.04 / 24.04 VPS. The installer automatically provisions a 2GB swap file (if RAM < 4GB), installs/upgrades `cargo` (`stable`, `1.89+`) via `rustup`, embeds the prebuilt `dist/` frontend without needing Node.js on the VPS, compiles the release binary, and starts `ferrous-panel.service`:
-
-### Option A — Default 1-Command Install (with Nginx Engine)
+### Option A — Default Secure Loopback Install (Nginx Engine, `127.0.0.1:8443`)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash
 ```
 
-### Option B — Pure-Rust Stack (with FerrousX Engine)
+Access securely over an SSH tunnel:
+```bash
+ssh -N -L 8443:127.0.0.1:8443 root@<VPS_IP>
+```
+
+### Option B — Pure-Rust Web Stack (FerrousX Engine)
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --engine ferrousx
 ```
 
-### Custom Options / Fast Prebuilt Mode / Update / Uninstall
+### Custom Options, Public Bind (with HTTPS Warning), Update & Uninstall
 ```bash
-# Custom port & security entrance path:
-curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --port 9443 --entrance /admin
+# Explicitly bind publicly (prints unencrypted HTTP & cookie warnings until HTTPS is configured):
+curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --bind 0.0.0.0 --port 8443 --entrance /admin
 
-# Optional: Skip Cargo compilation and download prebuilt binary directly:
+# Fast prebuilt binary mode (requires verified SHA256SUMS.txt):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/install.sh | sudo bash -s -- --prebuilt-binary
 
-# 1-Command In-Place Update (pulls latest FerrousPanel + FerrousX if installed):
+# 1-Command In-Place Update:
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash
 
-# Sync / Update FerrousX directly from github.com/Ferrous-panel/FerrousX (ferrousx-bin + ferrousx-ctl + ferrousx.env):
+# Sync / Update FerrousX (`ferrousx-bin` + `ferrousx-ctl` + `ferrousx.env`):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx
-
-# Update ONLY FerrousX from GitHub (skip rebuilding ferrous-panel):
-curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/update.sh | sudo bash -s -- --ferrousx-only
 
 # 1-Command Uninstall (preserves /www/wwwroot & databases):
 curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/uninstall.sh | sudo bash
 ```
 
-### What `install.sh` Does Automatically
-1. **OOM Memory Guard**: Checks `/proc/meminfo`; if RAM `< 4GB` and no swap is active, creates and enables a `2GB /swapfile` (`chmod 0600`) so `cargo build --release` (with LTO) never runs out of memory on 1GB–2GB VPS instances.
-2. **Auto-Install/Upgrade Rust & Cargo (`stable` / 1.89+) + Environment Variables**: Installs `build-essential`, `pkg-config`, `libssl-dev`, runs `rustup` (`--profile minimal --default-toolchain stable`, automatically upgrading any older `rustc < 1.89`), links `cargo`, `rustc`, and `rustup` into `/usr/local/bin`, and automatically registers `/etc/profile.d/ferrous-panel.sh` + `/etc/ferrous-panel/panel.env` (`FERROUS_*`, `CARGO_HOME`, `RUSTUP_HOME`, `PATH`) across login and interactive shells (`/root/.bashrc`, `/root/.profile`, `/etc/bash.bashrc`).
-3. **Prebuilt Static UI (`dist/`) + Cargo Compilation**: Uses the prebuilt `dist/` directory (or downloads `ferrous-dist.tar.gz` from GitHub Releases) so **Node.js is never needed on the VPS**, then compiles `ferrous-panel` (and `ferrousx-bin` when `--engine ferrousx` is selected) with `cargo build --release`.
-4. **First-Run Argon2id Credentials & Systemd Hardening**: Generates a 24-character one-time admin password from kernel `OsRng`, stores only its Argon2id hash (`0600`), configures `ferrous-panel.service` (`NoNewPrivileges=true`, `PrivateTmp=true`), verifies `GET /api/health == 200`, and enables `UFW`.
+---
 
-- **Default loopback bind (`127.0.0.1:8443`)**: Access securely via SSH port forwarding:
-  ```bash
-  ssh -N -L 8443:127.0.0.1:8443 root@<VPS_IP>
-  ```
+## Core Features (Production Ready on Ubuntu 22.04 / 24.04)
+
+1. **Authentication, Audit Log & Feature Registry (`GET /api/capabilities`)**
+   - 32-byte `OsRng` session tokens hashed (SHA-256) in SQLite, verified in constant time (`subtle`), Argon2id admin password (`0600`), login rate-limiting (`5` failures / `15m` / IP -> `HTTP 429`), `HttpOnly; SameSite=Strict` cookies (`Secure` auto-enabled with domain + TLS).
+   - `GET /api/capabilities` probes real host binaries, systemd units, and permissions, returning `ready | degraded | unavailable | experimental` with actionable `fixHint` commands.
+
+2. **Websites & Dual Web Server Engine (`nginx` ⇄ `ferrousx`)**
+   - Supports `static_spa`, `reverse_proxy` (including WebSockets), and `php_fpm`.
+   - Per-site settings enforced on **both** engines: `rateLimitRps` (Nginx `limit_req_zone`/`limit_req`; FerrousX per-IP token bucket with real `429` & `rate_limited` metrics), `redirects`, `hotlinkProtection`, `directoryAuth` (shared Apache/OpenSSL `$apr1$` htpasswd files), and `websocketEnabled`.
+   - Unsupported flags such as `http3Quic: true` on stock Ubuntu 24.04 Nginx 1.24 or FerrousX return `HTTP 409 Conflict` with an explicit explanation rather than silently ignoring the option.
+   - Zero-port-overlap engine switching with HTTP probe verification and automatic rollback on failure.
+   - Upstream-compatible FerrousX UDS Admin IPC (`/run/ferrousx/panel-admin.sock`) supporting `status`, `reload`, `panel_sync`, `vhost_add`, `vhost_del` with `SO_PEERCRED` + 256-bit token authentication and Zero-Downtime RCU reload.
+
+3. **SSL Certificates (Let's Encrypt / Certbot)**
+   - Pre-validates domain DNS resolution before invoking `certbot certonly --webroot -w /www/acme`, reads live X.509 expiry from `fullchain.pem`, manages systemd auto-renewal timers with `--deploy-hook`, and surfaces verbatim `certbot` errors.
+
+4. **Applications & Systemd Services (`/api/apps*`)**
+   - Git deployment with strict flag-injection validation (`--`), real `.service` units, background rebuild jobs, `systemctl is-active` readback verification, and `journalctl` failure diagnostics.
+
+5. **SafePath File Manager (`/api/files*`)**
+   - Strictly confined inside `/www/wwwroot` via `SafePath` canonicalization with symlink escape blocking.
+   - Hardened `remote-download` SSRF defense: `--max-redirs 0`, `--proto-redir =http,https`, DNS pre-resolution + `--resolve` IP pinning, blocking RFC1918, loopback, CGNAT `100.64.0.0/10`, link-local/metadata `169.254.169.254`, IPv4-mapped IPv6 `::ffff:a.b.c.d`, and decimal/hex/octal obfuscated hosts.
+   - Archive extraction validates both TAR (`tar -tf` + `tar -tvf`, space-safe filenames) and ZIP (`unzip -Z` + staging symlink check) against zip-slip and symlink attacks.
+
+6. **Databases (`MariaDB`, `PostgreSQL`, embedded `SQLite 3 WAL`)**
+   - Provisions databases/users, schema inspection, SQL execution, and dumps via `mysql`/`psql` with credentials piped over `stdin` (never exposed on argv or logs) and pure-Rust SQLite management.
+
+7. **Firewall (`UFW`), Fail2ban & SSH Hardening (`/api/security*`, `/api/ssh*`)**
+   - Real `ufw status numbered` readback and anti-lockout guard protecting active SSH and Panel ports unless confirmed (`?force=true`).
+   - Fail2ban ban/unban via `fail2ban-client`.
+   - OpenSSH configuration editing verified with `sshd -t` + automatic rollback, explicit `confirmPortChange` confirmation on port changes, real `ssh-keygen`, and strict read-only WebSSH allowlist.
+
+8. **Multi-PHP FPM, Mail Server (Postfix/Dovecot), Optimizer, Cron & Zstd Backups**
+   - **Multi-PHP (`8.4/8.3/8.2/8.1/7.4`)**: `php-fpm -t` syntax checks + rollback on `php.ini`/extension edits, per-site socket switching, `systemctl is-active` readback.
+   - **Mail Server**: Real OpenSSL RSA-2048 DKIM key generation (`0600`), real `dig +short TXT` verification for SPF/DKIM/DMARC, atomic Postfix virtual maps + `postmap` + reload rollback.
+   - **System Optimizer**: Allowlisted `sysctl` directives written to `/etc/sysctl.d/99-ferrous-optimizer.conf`, verified via `sysctl -p` + `/proc/sys` readback with rollback on error.
+   - **Cron & Backups**: Real `crontab -u` management, `tar --zstd` archives with SHA-256 verification before restore.
 
 ---
 
-## Implemented Features (Real System Operations)
+## Experimental / Optional Subsystems
 
-1. **Authentication & Security Middleware (`crates/ferrous-panel/src/auth/`)**
-   - Token session 32-byte CSPRNG (`OsRng`) hashed and persisted in SQLite (`24h`, or `30d` with `rememberMe`), verified in constant time (`subtle`).
-   - Argon2id password hashing stored in mode `0600` (`admin.credentials.json`); first run generates a random 24-character password once and prints it to stdout (no default password).
-   - `HttpOnly; SameSite=Strict` cookies, login rate-limiting (`5` failures / `15` minutes / IP -> HTTP `429`), 1 MiB JSON cap, and SQLite audit log.
+The following subsystems are explicitly marked **`experimental`** in `GET /api/capabilities` and the native UI. They require optional external runtimes/kernels and return `HTTP 409 Conflict` with install instructions when prerequisites are absent (never simulated):
 
-2. **Host Telemetry (`GET /api/telemetry`)**
-   - Real CPU/per-core usage, memory, swap, disk, network throughput (`sysinfo`), `/proc/loadavg`, and real 60-second historical samples persisted in SQLite `telemetry_history`.
-
-3. **Selectable Web Server Engine (`nginx` or `ferrousx`) + Certbot SSL**
-   - Switchable global engine (`GET/PUT /api/webserver`, `POST /api/webserver/switch`) with zero port overlap: pre-validates all sites (`nginx -t` or `ferrousx-bin --check-config`), stops old engine, starts new engine on `:80`/`:443`, probes each site over TCP HTTP, and rolls back automatically on failure.
-   - **Upstream FerrousX Sync (`Ferrous-panel/FerrousX @ 48659720`, `0.1.0-security-hardened`, FX-001..FX-013)**: `install.sh --engine ferrousx` and `update.sh --ferrousx` pull & compile upstream `ferrousx-bin` + `ferrousx-ctl` (`fx`), provision `/etc/ferrousx/ferrousx.env` (`0640`) + `/etc/ferrousx/admin.token` (`0600`), and wire `ferrousx.service` with `EnvironmentFile=-/etc/ferrousx/ferrousx.env` and `EnvironmentFile=-/etc/ferrous-panel/panel.env`.
-   - Embedded fallback `crates/ferrousx` (`ferrousx-bin`): standalone pure-Rust HTTP/HTTPS server (`tokio`, `hyper 1`, `rustls` SNI + ALPN `h2`/`http1.1`) supporting `ferrousx.env` dynamic env resolution, upstream TOML aliases (`workers`, `bind_http_addr`, `bind_https_addr`, `waf_mode`), `static_spa`, `reverse_proxy` (including WebSockets), `php_fpm` (Unix socket FastCGI), `redirect_https`, SIGHUP hot-reload, and `-c`/`-t`/`--check-config`.
-   - SSL via `certbot certonly --webroot -w /www/acme` with `/.well-known/acme-challenge/` served by both engines, X.509 expiry parsed from `/etc/letsencrypt/live/<domain>/`, and systemd auto-renewal timer.
-
-4. **Websites & Systemd Services (`/api/apps*`)**
-   - Writes `.service` unit files, runs `systemctl daemon-reload / enable --now / start / stop / restart`, queries real `MainPID` & `MemoryCurrent` from `systemctl show`, measures real web-root disk usage, updates `MemoryMax` & `Environment=`, and performs real TCP HTTP `GET /` probes (`/test-http`).
-
-5. **Firewall, Fail2ban & Kernel Hardening (`/api/security*`)**
-   - Reads and manages `ufw status numbered` (`allow`/`deny`/`limit` by validated `PortOrRange` and source CIDR) and `ufw --force delete <id>`.
-   - Queries `fail2ban-client status` and bans/unbans IPs per jail.
-   - Reads and updates allowlisted `sysctl` kernel parameters persistently.
-
-6. **Databases (`mysql` / `psql` CLI, `/api/databases*`)**
-   - Provisions databases, roles/users, password updates, table schema inspection, and read/write SQL execution via `mysql` / `psql` CLI with strict `SqlIdentifier` & literal escaping.
-   - Real sizes read from `information_schema.TABLES` / `pg_database_size`; returns `HTTP 409 Conflict` when engine CLI is absent. Plaintext database passwords are never stored or logged.
-
-7. **SafePath File Manager (`/api/files*`)**
-   - Lists, creates, edits, renames, chmods, compresses (`zip`), downloads (`curl` with SSRF private-IP blocking), and extracts (`unzip`/`tar`) files strictly confined inside `/www/wwwroot` with symlink escape prevention and pre-flight anti-zip-slip checks.
-
-8. **cPanel Suite: Crontab, Zstandard Backups, Hickory DNS Zone Editor & SFTP Chroot (`/api/cpanel*`)**
-   - Reads/writes user crontabs (`crontab -u`), validates schedule/user/allowlisted binary, and executes jobs directly without a shell.
-   - Creates `tar --zstd` archives (plus optional `mysqldump`/`pg_dump`), records real file byte size and streaming SHA-256 checksums, and verifies constant-time SHA-256 + listing safety before restore.
-   - Manages DNS records (`A`, `AAAA`, `CNAME`, `MX`, `TXT`, `CAA`) persisted in SQLite and exported to RFC 1035 Hickory DNS zone files (`<data_dir>/dns/zones/<domain>.zone`), plus chrooted SFTP accounts under `/www/wwwroot` with real disk quota usage calculation.
-
-9. **Security Center: UFW, Fail2ban, Kernel Sysctl, eBPF/XDP Anti-DDoS, Layer-7 WAF & SHA-256 FIM (`/api/security*`)**
-   - Manages UFW firewall rules (including per-rule enable/disable toggle), Fail2ban jail bans/unbans, and kernel sysctl hardening directives.
-   - Controls eBPF/XDP protection modes (`normal`, `elevated`, `under_attack`), Layer-7 WAF rules (`FX-RCE-01`, `FX-SQLI-02`, `FX-TRAV-03`, `FX-SSRF-04`, `FX-XSS-05`, `FX-BOT-06`), and real SHA-256 File Integrity Monitoring scans across `/www/wwwroot` and `/var/lib/ferrous-panel`.
-
-10. **Multi-PHP FPM Pools, 1-Click Templates & Software Package Installer (`/api/php*`, `/api/oneclick*`, `/api/software*`)**
-    - Manages PHP 8.4 / 8.3 / 8.2 / 8.1 / 7.4 FPM pools (`php.ini`, `pool.d/www.conf`, OPcache JIT, extension toggles, and per-site PHP socket switching with automatic Nginx/FerrousX vhost regeneration).
-    - Deploys 1-Click application templates (Actix-Web, Axum, WordPress, Laravel, Next.js, FastAPI) and manages server packages (`FerrousX`, `Nginx`, `PostgreSQL 17`, `MariaDB 11.4`, `Redis 7.4`, `Postfix/Dovecot`, `Certbot`, `Fail2ban`).
-
-11. **Mail Server: Postfix / Dovecot / Rspamd (`/api/mail*`)**
-    - Manages mail domains with Ed25519 DKIM selectors, SPF/DMARC records, virtual Maildir accounts (`<data_dir>/mail/vhosts/<domain>/<user>/Maildir/{cur,new,tmp}`), virtual forwarder maps, and outbound message spooling.
-
-12. **System Optimizer, Anti-Crash Guard, SSH Manager & Panel Admin (`/api/optimizer*`, `/api/ssh*`, `/api/panel-admin*`)**
-    - Applies kernel sysctl tuning profiles (`99-ferrous-optimizer.conf`), memory reclamation, watchdog self-healing, and cgroups v2 / ZRAM Anti-Crash Guard policies.
-    - Hardens OpenSSH/russh daemon settings, manages Ed25519 authorized keys & keypair generation, executes safe allowlisted Web SSH commands, and exposes `fp` CLI options (`1..20`) via the Web UI.
-
-13. **Rust Edge Cloud, Polyglot FFI/IPC Bridge Compiler & Diagnostics (`/api/edge-cloud*`, `/api/polyglot*`, `/api/rust-source`, `/api/system/diagnostics`)**
-    - Manages Wasmtime WASI Preview 2 edge workers (with sub-millisecond fuel invocation telemetry), Youki/Firecracker OCI sandboxes, BoringTun WireGuard mesh peers, and BLAKE3 Merkle-verified Zstd snapshots.
-    - Compiles Polyglot FFI/IPC bridge artifacts (`PyO3`, `N-API`, `C-ABI`, `WASI`, `JNI`) with generated C headers and systemd env bindings.
+- **Edge Cloud (`edge_cloud_wasi`, `edge_cloud_oci`, `edge_cloud_wireguard`)**: Requires `wasmtime` (WASI workers), `podman` or `docker` (OCI containers), and `wg` (`wireguard-tools` for WireGuard peers).
+- **Polyglot FFI Bridge Compiler (`polyglot_ffi`)**: Requires `rustc` / `cargo` installed on the VPS to compile real cdylib/FFI crates.
+- **eBPF / XDP Anti-DDoS (`ebpf_xdp`)**: Currently limited to `sysctl` SYN-flood/network hardening and Layer-7 configuration; native kernel XDP bytecode attachment is experimental and not enabled by default.
 
 ---
 
 ## Built-in Terminal CLI (`fp`)
 
-`fp` and `ferrous` are symlinks to `/usr/local/bin/ferrous-panel` implemented directly with `clap`:
+`fp` and `ferrous` are symlinks to `/usr/local/bin/ferrous-panel`:
 
 ```bash
 fp              # Interactive management menu
-fp status       # (alias: 14, default, info) Show bind addr, web engine & credential file path
-fp restart      # (alias: 1) Restart ferrous-panel.service
-fp stop         # (alias: 2) Stop ferrous-panel.service
-fp start        # (alias: 3) Start ferrous-panel.service
-fp reload       # (alias: 4) Reload active web engine & panel service
-fp passwd       # (alias: 5) Interactively update Admin password (Argon2id) or pass --generate
-fp username     # (alias: 6) Change Admin username
-fp port <PORT>  # (alias: 7) Update FERROUS_PORT in panel.env & open UFW port
-fp entrance <P> # (alias: 8) Update FERROUS_SECURITY_ENTRANCE
-fp repair       # (alias: 11) Validate active web config & reload
-fp check        # (alias: 15) Check systemd units & validate engine config
-fp logs         # (alias: 16) Show journalctl logs for ferrous-panel.service
-fp webserver    # (alias: 19) View or switch active engine (`fp webserver nginx|ferrousx`)
+fp status       # Show bind addr, mode, web engine & credential file path
+fp restart      # Restart ferrous-panel.service
+fp stop / start # Stop or start ferrous-panel.service
+fp passwd       # Update Admin password (Argon2id) or pass --generate
+fp port <PORT>  # Update FERROUS_PORT in panel.env & open UFW port
+fp repair       # Validate active web config & reload
+fp check        # Check systemd units & validate engine config
+fp logs         # Show journalctl logs for ferrous-panel.service
+fp webserver    # View or switch active engine (`fp webserver nginx|ferrousx`)
 ```
 
 ---
 
-## Local Verification & Smoke Testing
+## Verification & Smoke Testing (Ubuntu 24.04)
 
 ```bash
 cargo check --workspace --all-targets
@@ -149,65 +126,30 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
 
-# Run Ubuntu 24.04 end-to-end verification suite:
+# Run full Ubuntu 24.04 end-to-end smoke & security verification:
 sudo bash scripts/smoke-test.sh
 ```
-
----
-
-## Required Libraries & Dependencies
-
-### 1. Rust Workspace Crates (`Cargo.toml` — `[workspace.dependencies]`)
-All Rust dependencies are centrally version-pinned in the root `Cargo.toml` and inherited via `.workspace = true` by `crates/ferrous-panel` and `crates/ferrousx`:
-
-| Library (`Crate`) | Version | Target Crate | Purpose |
-| :--- | :--- | :--- | :--- |
-| `actix-web` | `4.9` | `ferrous-panel` | Control-plane HTTP/REST server, middleware & routing |
-| `tokio` | `1.43` | `ferrous-panel`, `ferrousx` | Multi-threaded async I/O, process, signal & timer runtime |
-| `rusqlite` (`bundled`) | `0.32` | `ferrous-panel` | Embedded SQLite 3 with WAL mode & parameterized `params![]` queries |
-| `argon2` / `sha2` / `subtle` / `rand` | `0.5` / `0.10` / `2.6` / `0.8` | `ferrous-panel` | Argon2id password hashing, SHA-256 tokens/FIM & constant-time checks |
-| `sysinfo` | `0.33` | `ferrous-panel` | Real Linux `/proc` CPU, RAM, swap, disk & network telemetry |
-| `rust-embed` / `mime_guess` | `8.5` / `2.0` | `ferrous-panel`, `ferrousx` | Embeds prebuilt `dist/` SPA into the Rust binary |
-| `hyper` / `hyper-util` / `http-body-util` | `1.6` / `0.1` / `0.1` | `ferrousx` | Standalone HTTP/1.1 + HTTP/2 server & reverse proxy (`ferrousx-bin`) |
-| `rustls` / `tokio-rustls` / `rustls-pemfile` | `0.23` / `0.26` / `2.2` | `ferrousx` | Memory-safe TLS 1.2/1.3 (`ring`) with SNI & ALPN `h2`/`http1.1` |
-| `fastcgi-client` | `0.9` | `ferrousx` | Native PHP-FPM FastCGI gateway over Unix domain sockets |
-| `serde` / `serde_json` / `toml` | `1.0` / `1.0` / `0.8` | `ferrous-panel`, `ferrousx` | Strict `camelCase` JSON API contract & TOML vhost parser |
-| `clap` / `chrono` | `4.5` / `0.4` | `ferrous-panel`, `ferrousx` | Built-in `fp` & `ferrousx-bin` CLI parser + UTC timestamps |
-| `thiserror` / `anyhow` / `tracing` / `tracing-subscriber` | `2.0` / `1.0` / `0.1` / `0.3` | `ferrous-panel`, `ferrousx` | Typed error mapping (`PanelError`) & structured logging |
-
-### 2. Frontend UI Libraries (`package.json` — Build-Time Only, Zero Node.js on VPS)
-- **Runtime UI (`dependencies`)**: `react` (`^19.0.1`), `react-dom` (`^19.0.1`), `react-is` (`^19.3.1`), `lucide-react` (`^0.546.0`), `recharts` (`^3.10.1`), `motion` (`^12.23.24`).
-- **Build & Type-Checking (`devDependencies`)**: `vite` (`^8.3.0`), `@vitejs/plugin-react` (`^6.1.1`), `tailwindcss` (`^4.3.3`), `@tailwindcss/vite` (`^4.3.3`), `autoprefixer` (`^10.4.21`), `typescript` (`^7.0.2`), `@types/react` (`^19.3.0`), `@types/react-dom` (`^19.3.0`).
-
-### 3. Ubuntu 22.04 / 24.04 LTS System Packages (`install.sh`)
-Automatically installed via `apt-get` during 1-command installation:
-- **Compiler & Build**: `build-essential`, `pkg-config`, `libssl-dev`, `ca-certificates`, `curl`, `git` + `rustup` (`stable` / `1.89+` minimal profile).
-- **Archive & Crypto**: `tar`, `zstd`, `zip`, `unzip`, `openssl`.
-- **Network & Security**: `ufw`, `fail2ban`, `certbot`, `nginx` (when `--engine nginx`).
 
 ---
 
 ## Repository Structure
 
 ```text
-├── Cargo.toml                         # Rust 1.89+ Workspace (ferrous-panel + ferrousx; excludes _archive/)
-├── PROGRESS.md                        # Phase tracker (P1–P7), assumptions & root-cause log
+├── Cargo.toml                         # Rust 1.89+ Workspace (ferrous-panel + ferrousx)
+├── PROGRESS.md                        # Remediation & verification status log
 ├── crates/
-│   ├── ferrous-panel/                 # Control plane daemon, API, auth, modules, fp CLI & embedded dist/
-│   └── ferrousx/                      # Standalone HTTP/HTTPS/FastCGI/WS Rust web server (ferrousx-bin)
-├── dist/                              # Prebuilt static React UI embedded into ferrous-panel via rust-embed
+│   ├── ferrous-panel/                 # Control plane daemon, API, auth, modules, fp CLI & Native UI
+│   │   ├── src/ui/assets/             # Pure-Rust embedded Native UI (HTML/CSS/ES6, zero Node.js)
+│   │   └── tests/                     # Auth, contract, webserver, modules & security_and_real_ops tests
+│   └── ferrousx/                      # Standalone HTTP/HTTPS/FastCGI/WS Rust web server + UDS IPC
+│       └── tests/                     # Server & ipc_and_site_features E2E tests
 ├── scripts/
-│   └── smoke-test.sh                  # Ubuntu 24.04 end-to-end verification script (P7)
-├── src/                               # React 19 + TypeScript + Tailwind frontend UI source
-├── package.json                       # Frontend Vite scripts ("dev", "build")
+│   ├── panel.env.example              # Hardened default environment config (127.0.0.1, production mode)
+│   └── smoke-test.sh                  # Ubuntu 24.04 14-point smoke & security verification suite
 ├── install.sh / update.sh / uninstall.sh
-├── .github/                           # CI/Release workflow & open-source Issue/PR templates
-└── _archive/                          # Archived legacy prototypes (excluded from Cargo workspace)
+└── .github/workflows/ci-release.yml   # Workspace clippy/test, Ubuntu 24.04 smoke test & tag-only releases
 ```
 
-## Open Source Governance & License
+## License
 
-- **License**: [MIT License](LICENSE)
-- **Contributing**: [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Code of Conduct**: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- **Security Policy**: [SECURITY.md](SECURITY.md)
+[MIT License](LICENSE)

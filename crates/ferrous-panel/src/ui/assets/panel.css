@@ -613,6 +613,38 @@ table.data-table th.right, table.data-table td.right {
   font-size: 13px;
   margin-bottom: 12px;
 }
+.cap-banner {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-alt);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.cap-banner.unavailable {
+  border-color: var(--err);
+  background: var(--err-soft);
+  color: var(--text);
+}
+.cap-banner.degraded, .cap-banner.experimental {
+  border-color: var(--warn);
+}
+.cap-banner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cap-hint {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
 .divider {
   border: 0;
   border-top: 1px solid var(--border);

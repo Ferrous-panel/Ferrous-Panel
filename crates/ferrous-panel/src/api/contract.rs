@@ -199,6 +199,8 @@ pub struct DirectoryPrivacyItem {
     pub label: String,
     pub username: String,
     pub enabled: bool,
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -872,6 +874,12 @@ pub struct MailServerData {
     pub postfix_version: String,
     pub dovecot_version: String,
     pub rspamd_version: String,
+    #[serde(default)]
+    pub postfix_status: String,
+    #[serde(default)]
+    pub dovecot_status: String,
+    #[serde(default)]
+    pub rspamd_status: String,
     pub queue_count: u32,
     pub sent_today: u64,
     pub spam_blocked_today: u64,

@@ -5,13 +5,14 @@ use crate::api::contract::{
 use crate::config::Config;
 use crate::error::PanelError;
 use crate::modules::ModuleStore;
-use crate::system::cmd::AllowedBinary;
+use crate::system::cmd::{validate_no_flag_injection, AllowedBinary};
 use crate::system::paths::SafePath;
 use crate::system::validate::{Domain, Port, ServiceName};
 use crate::webserver::ssl::SslCertState;
 use crate::webserver::{
-    atomic_write_file, CommandExecutor, EngineKind, PhpFpmVersion, SafeFilename, SiteMode,
-    SiteSpec, UpstreamHost, UpstreamTarget, WebServerEngine, WebServerManager, WwwRootPath,
+    atomic_write_file, CommandExecutor, EngineKind, PhpFpmVersion, SafeFilename,
+    SiteDirectoryAuth, SiteHotlinkProtection, SiteMode, SiteRedirectRule, SiteSpec, UpstreamHost,
+    UpstreamTarget, WebServerEngine, WebServerManager, WwwRootPath,
 };
 use chrono::Utc;
 use std::collections::BTreeMap;
@@ -800,17 +801,141 @@ async fn ensure_wwwroot_ownership(
     config: &Config,
     executor: &dyn CommandExecutor,
 ) {
-    if config.wwwroot == Path::new("/www/wwwroot")
-        && executor.is_binary_available(AllowedBinary::Chown)
-    {
+    if config.is_production() && executor.is_binary_available(AllowedBinary::Chown) {
         let dir_str = working_dir.display().to_string();
-        let _ = executor
+        if let Ok(out) = executor
             .run(
                 AllowedBinary::Chown,
-                &["-R", "www-data:www-data", &dir_str],
+                &["-R", "www-data:www-data", "--", &dir_str],
                 SYSTEMD_TIMEOUT,
             )
-            .await;
+            .await
+        {
+            if !out.success {
+                tracing::warn!(
+                    path = %dir_str,
+                    stderr = %out.stderr,
+                    "chown www-data on wwwroot returned non-zero"
+                );
+            }
+        }
+    }
+}
+
+async fn verify_unit_active_or_journal(
+    executor: &dyn CommandExecutor,
+    unit_file: &str,
+) -> Result<(), PanelError> {
+    let active_out = executor
+        .run(
+            AllowedBinary::Systemctl,
+            &["is-active", unit_file],
+            SYSTEMD_TIMEOUT,
+        )
+        .await?;
+    if active_out.success && active_out.stdout.trim() == "active" {
+        return Ok(());
+    }
+    let journal_tail = if executor.is_binary_available(AllowedBinary::Journalctl) {
+        executor
+            .run(
+                AllowedBinary::Journalctl,
+                &["-u", unit_file, "-n", "30", "--no-pager"],
+                SYSTEMD_TIMEOUT,
+            )
+            .await
+            .map(|o| {
+                if !o.stdout.trim().is_empty() {
+                    o.stdout.trim().to_string()
+                } else {
+                    o.stderr.trim().to_string()
+                }
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let state_txt = if active_out.stdout.trim().is_empty() {
+        active_out.stderr.trim().to_string()
+    } else {
+        active_out.stdout.trim().to_string()
+    };
+    let detail = if journal_tail.is_empty() {
+        format!("service {unit_file} is not active (state={state_txt})")
+    } else {
+        format!("service {unit_file} failed to stay active (state={state_txt}):\n{journal_tail}")
+    };
+    Err(PanelError::CommandFailed {
+        binary: "systemctl",
+        exit_code: active_out.exit_code,
+        stderr: detail,
+    })
+}
+
+fn validate_git_repo_and_branch<'a>(
+    repo_raw: &'a str,
+    branch_raw: &'a str,
+) -> Result<(&'a str, &'a str), PanelError> {
+    let repo = validate_no_flag_injection(repo_raw, "gitRepoUrl")?;
+    if !repo.starts_with("https://") && !repo.starts_with("http://") {
+        return Err(PanelError::Validation(
+            "gitRepoUrl must start with https:// or http://".to_string(),
+        ));
+    }
+    let branch = if branch_raw.trim().is_empty() {
+        "main"
+    } else {
+        validate_no_flag_injection(branch_raw, "gitBranch")?
+    };
+    if !branch
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
+        || branch.contains("..")
+    {
+        return Err(PanelError::Validation(
+            "gitBranch contains invalid characters".to_string(),
+        ));
+    }
+    Ok((repo, branch))
+}
+
+fn map_site_rules_to_spec(
+    spec: &mut SiteSpec,
+    redirects: Option<&[crate::api::contract::RedirectRuleItem]>,
+    hotlink: Option<&crate::api::contract::HotlinkProtectionConfig>,
+    directory_auth: Option<&[crate::api::contract::DirectoryPrivacyItem]>,
+) {
+    if let Some(rules) = redirects {
+        spec.redirects = rules
+            .iter()
+            .map(|r| SiteRedirectRule {
+                source_path: r.source_path.clone(),
+                target_url: r.target_url.clone(),
+                status_code: r.redirect_type.trim().parse::<u16>().unwrap_or(301),
+                keep_query: r.keep_query,
+                enabled: r.enabled,
+            })
+            .collect();
+    }
+    if let Some(hl) = hotlink {
+        spec.hotlink_protection = Some(SiteHotlinkProtection {
+            enabled: hl.enabled,
+            protected_extensions: hl.protected_extensions.clone(),
+            allowed_domains: hl.allowed_domains.clone(),
+            block_empty_referer: hl.block_empty_referer,
+        });
+    }
+    if let Some(auths) = directory_auth {
+        spec.directory_auth = auths
+            .iter()
+            .map(|a| SiteDirectoryAuth {
+                path: a.path.clone(),
+                label: a.label.clone(),
+                username: a.username.clone(),
+                password: a.password.clone(),
+                enabled: a.enabled,
+            })
+            .collect();
     }
 }
 
@@ -927,6 +1052,9 @@ fn build_site_spec_for_app(
         http3_quic: false,
         websocket_enabled: false,
         rate_limit_rps: 0,
+        redirects: Vec::new(),
+        hotlink_protection: None,
+        directory_auth: Vec::new(),
     })
 }
 
@@ -1063,23 +1191,18 @@ pub async fn deploy_app(
     let mut initial_logs = Vec::new();
     let trimmed_repo = req.git_repo_url.trim();
     if !trimmed_repo.is_empty()
-        && (trimmed_repo.starts_with("https://") || trimmed_repo.starts_with("http://"))
         && !safe_working.as_path().join(".git").exists()
         && webserver
             .executor()
             .is_binary_available(AllowedBinary::Git)
     {
+        let (safe_repo, branch) = validate_git_repo_and_branch(trimmed_repo, &req.git_branch)?;
         let dir_empty = std::fs::read_dir(safe_working.as_path())
             .map(|mut rd| rd.next().is_none())
             .unwrap_or(false);
         if dir_empty {
-            let branch = if req.git_branch.trim().is_empty() {
-                "main"
-            } else {
-                req.git_branch.trim()
-            };
             let dest_str = safe_working.as_path().display().to_string();
-            match webserver
+            let clone_out = webserver
                 .executor()
                 .run(
                     AllowedBinary::Git,
@@ -1089,35 +1212,29 @@ pub async fn deploy_app(
                         "1",
                         "--branch",
                         branch,
-                        trimmed_repo,
+                        "--",
+                        safe_repo,
                         &dest_str,
                     ],
                     BUILD_TIMEOUT,
                 )
-                .await
-            {
-                Ok(out) if out.success => {
-                    initial_logs.push(format!(
-                        "[{}] Cloned repository {} (branch '{}')",
-                        Utc::now().to_rfc3339(),
-                        trimmed_repo,
-                        branch
-                    ));
-                }
-                Ok(out) => {
-                    initial_logs.push(format!(
-                        "[{}] Git clone skipped/failed ({:?}): {}",
-                        Utc::now().to_rfc3339(),
-                        out.exit_code,
-                        out.stderr.chars().take(240).collect::<String>()
-                    ));
-                }
-                Err(err) => {
-                    initial_logs.push(format!(
-                        "[{}] Git clone skipped: {err}",
-                        Utc::now().to_rfc3339()
-                    ));
-                }
+                .await?;
+            if clone_out.success {
+                initial_logs.push(format!(
+                    "[{}] Cloned repository {} (branch '{}')",
+                    Utc::now().to_rfc3339(),
+                    safe_repo,
+                    branch
+                ));
+            } else {
+                return Err(PanelError::CommandFailed {
+                    binary: "git",
+                    exit_code: clone_out.exit_code,
+                    stderr: format!(
+                        "git clone failed for '{safe_repo}' (branch '{branch}'): {}",
+                        clone_out.stderr.trim()
+                    ),
+                });
             }
         }
     }
@@ -1262,7 +1379,21 @@ pub async fn deploy_app(
             )
             .await;
         match start_out {
-            Ok(out) if out.success => {}
+            Ok(out) if out.success => {
+                if config.is_production() {
+                    if let Err(err) = verify_unit_active_or_journal(executor.as_ref(), &unit_file).await {
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["disable", "--now", &unit_file], SYSTEMD_TIMEOUT)
+                            .await;
+                        let _ = std::fs::remove_file(&unit_path);
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
+                            .await;
+                        let _ = webserver.remove_and_apply_site(&domain).await;
+                        return Err(err);
+                    }
+                }
+            }
             Ok(out) => {
                 let _ = std::fs::remove_file(&unit_path);
                 let _ = executor
@@ -1472,10 +1603,20 @@ pub async fn app_action(
         {
             let service = ServiceName::parse(&app.systemd_unit)?;
             let unit_file = service.unit_file_name();
-            let _ = webserver
+            let restart_out = webserver
                 .executor()
                 .run(AllowedBinary::Systemctl, &["restart", &unit_file], SYSTEMD_TIMEOUT)
-                .await;
+                .await?;
+            if !restart_out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: restart_out.exit_code,
+                    stderr: restart_out.stderr,
+                });
+            }
+            if config.is_production() {
+                verify_unit_active_or_journal(webserver.executor().as_ref(), &unit_file).await?;
+            }
         }
         store.upsert_app(&app)?;
         return Ok(enrich_app(app, config, webserver).await);
@@ -1499,6 +1640,9 @@ pub async fn app_action(
             exit_code: out.exit_code,
             stderr: out.stderr,
         });
+    }
+    if config.is_production() && matches!(action, "start" | "restart") {
+        verify_unit_active_or_journal(webserver.executor().as_ref(), &unit_file).await?;
     }
 
     Ok(enrich_app(app, config, webserver).await)
@@ -1528,48 +1672,38 @@ pub async fn git_deploy_app(
         .is_binary_available(AllowedBinary::Git)
     {
         if safe_working.as_path().join(".git").exists() {
-            match webserver
+            let safe_branch = validate_no_flag_injection(branch, "gitBranch")?;
+            let pull_out = webserver
                 .executor()
                 .run_with_env(
                     AllowedBinary::Git,
-                    &["pull", "--ff-only", "origin", branch],
+                    &["pull", "--ff-only", "--", "origin", safe_branch],
                     &[],
                     Some(safe_working.as_path()),
                     BUILD_TIMEOUT,
                 )
-                .await
-            {
-                Ok(out) if out.success => {
-                    app.logs.push(format!(
-                        "[{}] git pull --ff-only origin {branch} succeeded.",
-                        Utc::now().to_rfc3339()
-                    ));
-                }
-                Ok(out) => {
-                    app.logs.push(format!(
-                        "[{}] git pull returned ({:?}): {}",
-                        Utc::now().to_rfc3339(),
-                        out.exit_code,
-                        out.stderr.chars().take(240).collect::<String>()
-                    ));
-                }
-                Err(err) => {
-                    app.logs.push(format!(
-                        "[{}] git pull skipped: {err}",
-                        Utc::now().to_rfc3339()
-                    ));
-                }
+                .await?;
+            if pull_out.success {
+                app.logs.push(format!(
+                    "[{}] git pull --ff-only origin {safe_branch} succeeded.",
+                    Utc::now().to_rfc3339()
+                ));
+            } else {
+                return Err(PanelError::CommandFailed {
+                    binary: "git",
+                    exit_code: pull_out.exit_code,
+                    stderr: pull_out.stderr,
+                });
             }
-        } else if !app.git_repo_url.trim().is_empty()
-            && (app.git_repo_url.trim().starts_with("https://")
-                || app.git_repo_url.trim().starts_with("http://"))
-        {
+        } else if !app.git_repo_url.trim().is_empty() {
+            let (safe_repo, safe_branch) =
+                validate_git_repo_and_branch(&app.git_repo_url, branch)?;
             let dir_empty = std::fs::read_dir(safe_working.as_path())
                 .map(|mut rd| rd.next().is_none())
                 .unwrap_or(false);
             if dir_empty {
                 let dest_str = safe_working.as_path().display().to_string();
-                let _ = webserver
+                let clone_out = webserver
                     .executor()
                     .run(
                         AllowedBinary::Git,
@@ -1578,13 +1712,21 @@ pub async fn git_deploy_app(
                             "--depth",
                             "1",
                             "--branch",
-                            branch,
-                            app.git_repo_url.trim(),
+                            safe_branch,
+                            "--",
+                            safe_repo,
                             &dest_str,
                         ],
                         BUILD_TIMEOUT,
                     )
-                    .await;
+                    .await?;
+                if !clone_out.success {
+                    return Err(PanelError::CommandFailed {
+                        binary: "git",
+                        exit_code: clone_out.exit_code,
+                        stderr: clone_out.stderr,
+                    });
+                }
             }
         }
     }
@@ -1666,10 +1808,20 @@ pub async fn git_deploy_app(
     {
         let service = ServiceName::parse(&app.systemd_unit)?;
         let unit_file = service.unit_file_name();
-        let _ = webserver
+        let restart_out = webserver
             .executor()
             .run(AllowedBinary::Systemctl, &["restart", &unit_file], SYSTEMD_TIMEOUT)
-            .await;
+            .await?;
+        if !restart_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "systemctl",
+                exit_code: restart_out.exit_code,
+                stderr: restart_out.stderr,
+            });
+        }
+        if config.is_production() {
+            verify_unit_active_or_journal(webserver.executor().as_ref(), &unit_file).await?;
+        }
     }
 
     store.upsert_app(&app)?;
@@ -1816,6 +1968,10 @@ pub async fn update_site_settings(
         }
     }
 
+    let next_redirects = redirects.or_else(|| app.redirects.clone());
+    let next_hotlink = hotlink_protection.or_else(|| app.hotlink_protection.clone());
+    let next_dir_auth = directory_auth.or_else(|| app.directory_auth.clone());
+
     let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
     let effective_doc_root =
         resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
@@ -1832,6 +1988,12 @@ pub async fn update_site_settings(
     spec.http3_quic = next_h3;
     spec.websocket_enabled = next_ws;
     spec.rate_limit_rps = next_rps;
+    map_site_rules_to_spec(
+        &mut spec,
+        next_redirects.as_deref(),
+        next_hotlink.as_ref(),
+        next_dir_auth.as_deref(),
+    );
 
     let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
     app.ssl_enabled = next_ssl;
@@ -1839,15 +2001,17 @@ pub async fn update_site_settings(
     app.http3_quic = next_h3;
     app.websocket_enabled = next_ws;
     app.rate_limit_rps = next_rps;
-    if let Some(r) = redirects {
-        app.redirects = Some(r);
-    }
-    if let Some(h) = hotlink_protection {
-        app.hotlink_protection = Some(h);
-    }
-    if let Some(d) = directory_auth {
-        app.directory_auth = Some(d);
-    }
+    app.redirects = next_redirects;
+    app.hotlink_protection = next_hotlink;
+    // Strip plaintext passwords before persisting ManagedApp metadata to SQLite.
+    app.directory_auth = next_dir_auth.map(|list| {
+        list.into_iter()
+            .map(|mut item| {
+                item.password = None;
+                item
+            })
+            .collect()
+    });
     if let Some(preset) = url_rewrite_preset {
         app.url_rewrite_preset = preset;
     }

@@ -6,9 +6,9 @@ use crate::webserver::ferrousx_ipc::{
     FerrousxIpcClient, DEFAULT_FERROUSX_ADMIN_TOKEN_FILE, DEFAULT_FERROUSX_CONTROL_SOCKET,
 };
 use crate::webserver::{
-    atomic_write_file, parse_systemctl_status, BoxFuture, CommandExecutor, EngineKind,
-    EngineStatus, FileSnapshot, RenderedSite, SiteMode, SiteSpec, ValidationReport,
-    WebServerEngine, DEFAULT_ACME_WEBROOT, DEFAULT_LETSENCRYPT_LIVE,
+    atomic_write_file, parse_systemctl_status, write_site_htpasswd_file, BoxFuture,
+    CommandExecutor, EngineKind, EngineStatus, FileSnapshot, RenderedSite, SiteMode, SiteSpec,
+    ValidationReport, WebServerEngine, DEFAULT_ACME_WEBROOT, DEFAULT_LETSENCRYPT_LIVE,
 };
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -195,6 +195,15 @@ impl FerrousxEngine {
         self.paths.sites_dir.join(format!("{}.toml", domain.as_str()))
     }
 
+    fn htpasswd_path(&self, domain: &Domain) -> PathBuf {
+        self.paths
+            .sites_dir
+            .parent()
+            .unwrap_or_else(|| Path::new("/etc/ferrousx"))
+            .join("htpasswd")
+            .join(format!("{}.htpasswd", domain.as_str()))
+    }
+
     fn ensure_installed(&self) -> Result<(), PanelError> {
         if !self.is_installed() {
             return Err(PanelError::Conflict(
@@ -233,6 +242,10 @@ server_tokens = false\n"
     /// Atomically stages `sites/<domain>.toml` via tmp+rename without running `--check-config` yet.
     pub fn stage_site_unvalidated(&self, spec: &SiteSpec) -> Result<FileSnapshot, PanelError> {
         let rendered = self.render_site(spec)?;
+        if spec.directory_auth.iter().any(|d| d.enabled) {
+            let htpasswd_file = self.htpasswd_path(&spec.domain);
+            write_site_htpasswd_file(&htpasswd_file, &spec.directory_auth)?;
+        }
         let site_path = self.site_config_path(&spec.domain);
         let snap = FileSnapshot::capture(&site_path)?;
         if let Err(err) = atomic_write_file(&site_path, rendered.content.as_bytes(), 0o644) {
@@ -288,10 +301,17 @@ server_tokens = false\n"
                 return Ok(());
             }
             let unit = self.paths.service_name.as_str();
-            let _ = self
+            let out = self
                 .executor
                 .run(AllowedBinary::Systemctl, &["enable", unit], CMD_TIMEOUT)
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Systemctl.label(),
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
             Ok(())
         })
     }
@@ -302,10 +322,17 @@ server_tokens = false\n"
                 return Ok(());
             }
             let unit = self.paths.service_name.as_str();
-            let _ = self
+            let out = self
                 .executor
                 .run(AllowedBinary::Systemctl, &["disable", unit], CMD_TIMEOUT)
-                .await;
+                .await?;
+            if !out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Systemctl.label(),
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
             Ok(())
         })
     }
@@ -322,6 +349,12 @@ impl WebServerEngine for FerrousxEngine {
 
     fn render_site(&self, spec: &SiteSpec) -> Result<RenderedSite, PanelError> {
         spec.validate_supported()?;
+        if spec.http3_quic {
+            return Err(PanelError::Conflict(
+                "HTTP/3 QUIC listener is not enabled in FerrousX yet (HTTP/1.1 + HTTP/2 + TLS 1.3 are supported). Disable http3Quic."
+                    .to_string(),
+            ));
+        }
 
         let all_domains = spec.all_domains();
         let mut domains_toml = String::from("[");
@@ -385,11 +418,66 @@ index_file = \"{}\"\n",
             SiteMode::Unsupported => String::new(),
         };
 
+        let mut extra_sections = String::new();
+        for rule in spec.redirects.iter().filter(|r| r.enabled) {
+            let _ = write!(
+                extra_sections,
+                "\n[[redirects]]\nsource_path = \"{}\"\ntarget_url = \"{}\"\nstatus_code = {}\nkeep_query = {}\nenabled = true\n",
+                rule.source_path.trim().replace('"', "\\\""),
+                rule.target_url.trim().replace('"', "\\\""),
+                rule.status_code,
+                rule.keep_query
+            );
+        }
+
+        if let Some(ref hl) = spec.hotlink_protection {
+            if hl.enabled {
+                let exts: Vec<String> = hl
+                    .protected_extensions
+                    .split(|c: char| c == ',' || c == '|' || c.is_ascii_whitespace())
+                    .map(|s| s.trim().trim_start_matches('.').to_ascii_lowercase())
+                    .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric()))
+                    .map(|s| format!("\"{s}\""))
+                    .collect();
+                let allowed: Vec<String> = hl
+                    .allowed_domains
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("\"{}\"", s.replace('"', "")))
+                    .collect();
+                let _ = write!(
+                    extra_sections,
+                    "\n[hotlink]\nenabled = true\nprotected_extensions = [{}]\nallowed_domains = [{}]\nblock_empty_referer = {}\n",
+                    exts.join(", "),
+                    allowed.join(", "),
+                    hl.block_empty_referer
+                );
+            }
+        }
+
+        let htpasswd_file = self.htpasswd_path(&spec.domain);
+        for auth in spec.directory_auth.iter().filter(|d| d.enabled) {
+            let label = if auth.label.trim().is_empty() {
+                "Restricted Area".to_string()
+            } else {
+                auth.label.trim().replace('"', "'")
+            };
+            let _ = write!(
+                extra_sections,
+                "\n[[directory_auth]]\npath = \"{}\"\nlabel = \"{}\"\nhtpasswd_file = \"{}\"\nenabled = true\n",
+                auth.path.trim().replace('"', "\\\""),
+                label,
+                htpasswd_file.display()
+            );
+        }
+
         let content = format!(
             "# Managed by FerrousPanel (FerrousxEngine) — {domain}\n\
 domain = \"{domain}\"\n\
 server_names = {domains_toml}\n\
 root = \"{doc_root}\"\n\
+rate_limit_rps = {rate_limit_rps}\n\
 \n\
 [acme]\n\
 prefix = \"/.well-known/acme-challenge/\"\n\
@@ -402,8 +490,9 @@ redirect_https = {redirect_https}\n\
 cert_path = \"{cert_path}\"\n\
 key_path = \"{key_path}\"\n\
 \n\
-{mode_section}",
+{mode_section}{extra_sections}",
             domain = spec.domain.as_str(),
+            rate_limit_rps = spec.rate_limit_rps,
             ssl_enabled = spec.ssl_enabled,
             redirect_https = spec.redirect_https,
         );

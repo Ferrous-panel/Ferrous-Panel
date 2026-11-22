@@ -180,6 +180,47 @@ pub struct SiteConfigToml {
     pub handler: HandlerSectionToml,
     #[serde(default)]
     pub waf_mode: Option<String>,
+    #[serde(default)]
+    pub rate_limit_rps: u32,
+    #[serde(default)]
+    pub http3_quic: bool,
+    #[serde(default)]
+    pub redirects: Vec<RedirectRuleToml>,
+    #[serde(default)]
+    pub hotlink: Option<HotlinkSectionToml>,
+    #[serde(default)]
+    pub directory_auth: Vec<DirectoryAuthToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RedirectRuleToml {
+    pub source_path: String,
+    pub target_url: String,
+    #[serde(default = "default_redirect_status")]
+    pub status_code: u16,
+    #[serde(default = "default_true")]
+    pub keep_query: bool,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct HotlinkSectionToml {
+    pub enabled: bool,
+    pub protected_extensions: Vec<String>,
+    pub allowed_domains: Vec<String>,
+    pub block_empty_referer: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DirectoryAuthToml {
+    pub path: String,
+    #[serde(default)]
+    pub label: String,
+    pub htpasswd_file: PathBuf,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -422,6 +463,28 @@ pub enum SiteHandler {
 }
 
 #[derive(Debug, Clone)]
+pub struct ValidatedRedirectRule {
+    pub source_path: String,
+    pub target_url: String,
+    pub status_code: u16,
+    pub keep_query: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedHotlinkConfig {
+    pub protected_extensions: Vec<String>,
+    pub allowed_domains: Vec<String>,
+    pub block_empty_referer: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ValidatedDirectoryAuth {
+    pub path: String,
+    pub label: String,
+    pub htpasswd_file: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct ValidatedSite {
     pub domain: HostLabel,
     pub server_names: Vec<HostLabel>,
@@ -433,6 +496,10 @@ pub struct ValidatedSite {
     pub redirect_https: bool,
     pub handler: SiteHandler,
     pub tls_key: Option<Arc<CertifiedKey>>,
+    pub rate_limit_rps: u32,
+    pub redirects: Vec<ValidatedRedirectRule>,
+    pub hotlink: Option<ValidatedHotlinkConfig>,
+    pub directory_auth: Vec<ValidatedDirectoryAuth>,
 }
 
 #[derive(Debug, Clone)]
@@ -761,6 +828,101 @@ fn validate_site(
         }
     };
 
+    if raw.http3_quic {
+        return Err(ServerError::Config(format!(
+            "http3_quic = true is not supported by FerrousX UDP/QUIC listener yet in {}",
+            source_file.display()
+        )));
+    }
+
+    let mut redirects = Vec::new();
+    for rule in raw.redirects {
+        if !rule.enabled {
+            continue;
+        }
+        let src = rule.source_path.trim().to_string();
+        let target = rule.target_url.trim().to_string();
+        if !src.starts_with('/') || src.contains('\r') || src.contains('\n') {
+            return Err(ServerError::Config(format!(
+                "invalid redirect source_path '{}' in {}",
+                rule.source_path,
+                source_file.display()
+            )));
+        }
+        if target.is_empty() || target.contains('\r') || target.contains('\n') {
+            return Err(ServerError::Config(format!(
+                "invalid redirect target_url '{}' in {}",
+                rule.target_url,
+                source_file.display()
+            )));
+        }
+        if !matches!(rule.status_code, 301 | 302 | 307 | 308) {
+            return Err(ServerError::Config(format!(
+                "redirect status_code must be 301, 302, 307, or 308 in {}",
+                source_file.display()
+            )));
+        }
+        redirects.push(ValidatedRedirectRule {
+            source_path: src,
+            target_url: target,
+            status_code: rule.status_code,
+            keep_query: rule.keep_query,
+        });
+    }
+
+    let hotlink = raw.hotlink.and_then(|hl| {
+        if !hl.enabled {
+            return None;
+        }
+        let protected_extensions: Vec<String> = hl
+            .protected_extensions
+            .into_iter()
+            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|e| !e.is_empty())
+            .collect();
+        if protected_extensions.is_empty() {
+            return None;
+        }
+        let allowed_domains: Vec<String> = hl
+            .allowed_domains
+            .into_iter()
+            .map(|d| d.trim().to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+            .collect();
+        Some(ValidatedHotlinkConfig {
+            protected_extensions,
+            allowed_domains,
+            block_empty_referer: hl.block_empty_referer,
+        })
+    });
+
+    let mut directory_auth = Vec::new();
+    for auth in raw.directory_auth {
+        if !auth.enabled {
+            continue;
+        }
+        let clean_path = auth.path.trim().to_string();
+        if !clean_path.starts_with('/') || clean_path.contains('\r') || clean_path.contains('\n') {
+            return Err(ServerError::Config(format!(
+                "invalid directory_auth.path '{}' in {}",
+                auth.path,
+                source_file.display()
+            )));
+        }
+        let htpasswd_file =
+            validate_absolute_clean_path(&auth.htpasswd_file, "directory_auth.htpasswd_file")?;
+        let label = if auth.label.trim().is_empty() {
+            "Restricted Area".to_string()
+        } else {
+            auth.label.trim().replace('"', "'")
+        };
+        directory_auth.push(ValidatedDirectoryAuth {
+            path: clean_path,
+            label,
+            htpasswd_file,
+        });
+    }
+
     Ok(ValidatedSite {
         domain,
         server_names,
@@ -772,5 +934,9 @@ fn validate_site(
         redirect_https: raw.ssl.redirect_https,
         handler,
         tls_key,
+        rate_limit_rps: raw.rate_limit_rps,
+        redirects,
+        hotlink,
+        directory_auth,
     })
 }
