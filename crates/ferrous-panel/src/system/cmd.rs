@@ -2,6 +2,7 @@ use crate::error::PanelError;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -56,6 +57,15 @@ pub enum AllowedBinary {
     Git,
     Cargo,
     Rustc,
+    Useradd,
+    Userdel,
+    Postmap,
+    Sendmail,
+    Wasmtime,
+    Podman,
+    Docker,
+    Wg,
+    WgQuick,
 }
 
 impl AllowedBinary {
@@ -108,6 +118,15 @@ impl AllowedBinary {
             Self::Git => "git",
             Self::Cargo => "cargo",
             Self::Rustc => "rustc",
+            Self::Useradd => "useradd",
+            Self::Userdel => "userdel",
+            Self::Postmap => "postmap",
+            Self::Sendmail => "sendmail",
+            Self::Wasmtime => "wasmtime",
+            Self::Podman => "podman",
+            Self::Docker => "docker",
+            Self::Wg => "wg",
+            Self::WgQuick => "wg-quick",
         }
     }
 
@@ -166,6 +185,15 @@ impl AllowedBinary {
             "git" => Some(Self::Git),
             "cargo" => Some(Self::Cargo),
             "rustc" => Some(Self::Rustc),
+            "useradd" => Some(Self::Useradd),
+            "userdel" => Some(Self::Userdel),
+            "postmap" => Some(Self::Postmap),
+            "sendmail" => Some(Self::Sendmail),
+            "wasmtime" => Some(Self::Wasmtime),
+            "podman" => Some(Self::Podman),
+            "docker" => Some(Self::Docker),
+            "wg" => Some(Self::Wg),
+            "wg-quick" => Some(Self::WgQuick),
             _ => None,
         }
     }
@@ -219,6 +247,15 @@ impl AllowedBinary {
             Self::Git => &["/usr/bin/git", "/usr/local/bin/git"],
             Self::Cargo => &["/usr/local/bin/cargo", "/root/.cargo/bin/cargo", "/usr/bin/cargo"],
             Self::Rustc => &["/usr/local/bin/rustc", "/root/.cargo/bin/rustc", "/usr/bin/rustc"],
+            Self::Useradd => &["/usr/sbin/useradd", "/sbin/useradd"],
+            Self::Userdel => &["/usr/sbin/userdel", "/sbin/userdel"],
+            Self::Postmap => &["/usr/sbin/postmap", "/usr/bin/postmap"],
+            Self::Sendmail => &["/usr/sbin/sendmail", "/usr/lib/sendmail", "/usr/bin/sendmail"],
+            Self::Wasmtime => &["/usr/local/bin/wasmtime", "/root/.wasmtime/bin/wasmtime", "/usr/bin/wasmtime"],
+            Self::Podman => &["/usr/bin/podman", "/usr/local/bin/podman"],
+            Self::Docker => &["/usr/bin/docker", "/usr/local/bin/docker"],
+            Self::Wg => &["/usr/bin/wg", "/usr/sbin/wg"],
+            Self::WgQuick => &["/usr/bin/wg-quick", "/usr/sbin/wg-quick"],
         }
     }
 
@@ -322,6 +359,55 @@ pub async fn run_with_env(
     let child = cmd.spawn()?;
     let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
 
+    let output = tokio::time::timeout(timeout, child.wait_with_output())
+        .await
+        .map_err(|_| PanelError::CommandTimeout {
+            binary: bin.label(),
+            timeout_ms,
+        })??;
+
+    Ok(CmdOutput {
+        exit_code: output.status.code(),
+        success: output.status.success(),
+        stdout: bounded_utf8(&output.stdout),
+        stderr: bounded_utf8(&output.stderr),
+    })
+}
+
+/// Runs an allowlisted binary directly (`execve`, no shell) and pipes `stdin_bytes` to its stdin.
+pub async fn run_with_stdin(
+    bin: AllowedBinary,
+    args: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+) -> Result<CmdOutput, PanelError> {
+    if timeout.is_zero() {
+        return Err(PanelError::Validation(
+            "command timeout must be greater than zero".to_string(),
+        ));
+    }
+    for arg in args {
+        if arg.contains('\0') {
+            return Err(PanelError::Forbidden(
+                "NUL byte in command argument is forbidden".to_string(),
+            ));
+        }
+    }
+    let resolved = bin.resolve_path()?;
+    let mut cmd = Command::new(resolved);
+    cmd.args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_bytes).await;
+        let _ = stdin.shutdown().await;
+    }
+
+    let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
     let output = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| PanelError::CommandTimeout {

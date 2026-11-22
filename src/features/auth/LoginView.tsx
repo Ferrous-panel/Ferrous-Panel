@@ -12,8 +12,8 @@ import {
   Sun,
   UserCheck
 } from 'lucide-react';
-import { PanelAdminAccount } from '../types';
-import { PanelLanguage } from '../i18n';
+import { PanelAdminAccount } from '../../types';
+import { PanelLanguage } from '../../i18n';
 import { FerrousLogo } from '../../components/FerrousLogo';
 
 interface LoginViewProps {

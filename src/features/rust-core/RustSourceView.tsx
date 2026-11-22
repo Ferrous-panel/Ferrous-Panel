@@ -17,7 +17,7 @@ import {
   PolyglotCompileResult,
   PolyglotToolchainSpec,
   RustSourceFile
-} from '../types';
+} from '../../types';
 import { authenticatedFetch } from '../../services/actixGateway';
 
 interface RustSourceViewProps {

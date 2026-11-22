@@ -20,7 +20,7 @@ import {
   OneClickTemplate,
   ServerPackageItem,
   WebServerEngineType
-} from '../types';
+} from '../../types';
 
 interface OneClickAppsViewProps {
   templates: OneClickTemplate[];

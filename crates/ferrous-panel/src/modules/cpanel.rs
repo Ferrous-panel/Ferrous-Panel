@@ -925,9 +925,72 @@ pub fn list_sftp_accounts(
     Ok(accounts)
 }
 
-pub fn add_sftp_account(
+async fn sync_sftp_sshd_dropin(
+    config: &Config,
+    accounts: &[SftpAccountItem],
+    executor: &dyn CommandExecutor,
+) -> Result<(), PanelError> {
+    let mut conf = String::from("# Managed by FerrousPanel — SFTP Chroot Jail Configuration\n");
+    for acc in accounts {
+        if SafeLinuxUser::parse(&acc.username).is_err() {
+            continue;
+        }
+        conf.push_str(&format!(
+            "\nMatch User {}\n    ChrootDirectory {}\n    ForceCommand internal-sftp\n    AllowTcpForwarding no\n    X11Forwarding no\n    PermitTunnel no\n",
+            acc.username, acc.chroot_dir
+        ));
+    }
+
+    let local_dir = config.data_dir.join("sftp");
+    std::fs::create_dir_all(&local_dir)?;
+    crate::webserver::atomic_write_file(
+        &local_dir.join("90-ferrous-sftp.conf"),
+        conf.as_bytes(),
+        0o644,
+    )?;
+
+    if config.data_dir == Path::new("/var/lib/ferrous-panel")
+        && Path::new("/etc/ssh/sshd_config.d").is_dir()
+    {
+        let dropin_path = Path::new("/etc/ssh/sshd_config.d/90-ferrous-sftp.conf");
+        let prev = std::fs::read(dropin_path).ok();
+        crate::webserver::atomic_write_file(dropin_path, conf.as_bytes(), 0o644)?;
+
+        if executor.is_binary_available(AllowedBinary::Sshd) {
+            let check = executor
+                .run(AllowedBinary::Sshd, &["-t"], CRON_TIMEOUT)
+                .await;
+            let valid = check.as_ref().is_ok_and(|o| o.success);
+            if !valid {
+                if let Some(old_bytes) = prev {
+                    let _ = crate::webserver::atomic_write_file(dropin_path, &old_bytes, 0o644);
+                } else {
+                    let _ = std::fs::remove_file(dropin_path);
+                }
+                return Err(PanelError::Validation(
+                    "sshd -t rejected SFTP chroot drop-in configuration; rolled back safely"
+                        .to_string(),
+                ));
+            }
+        }
+        if executor.is_binary_available(AllowedBinary::Systemctl) {
+            let reload = executor
+                .run(AllowedBinary::Systemctl, &["reload", "ssh.service"], CRON_TIMEOUT)
+                .await;
+            if reload.as_ref().is_err() || reload.as_ref().is_ok_and(|o| !o.success) {
+                let _ = executor
+                    .run(AllowedBinary::Systemctl, &["reload", "sshd.service"], CRON_TIMEOUT)
+                    .await;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn add_sftp_account(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     username: &str,
     target_app: &str,
     auth_method: &str,
@@ -953,6 +1016,46 @@ pub fn add_sftp_account(
             clean_user.as_str()
         )));
     }
+
+    let chroot_str = safe_chroot.as_path().display().to_string();
+    if config.data_dir == Path::new("/var/lib/ferrous-panel")
+        && executor.is_binary_available(AllowedBinary::Useradd)
+    {
+        let exists = executor.is_binary_available(AllowedBinary::Id)
+            && executor
+                .run(AllowedBinary::Id, &["-u", clean_user.as_str()], CRON_TIMEOUT)
+                .await
+                .is_ok_and(|o| o.success);
+        if !exists {
+            let add_out = executor
+                .run(
+                    AllowedBinary::Useradd,
+                    &[
+                        "--system",
+                        "--no-create-home",
+                        "--home-dir",
+                        &chroot_str,
+                        "--shell",
+                        "/usr/sbin/nologin",
+                        clean_user.as_str(),
+                    ],
+                    CRON_TIMEOUT,
+                )
+                .await?;
+            if !add_out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "useradd",
+                    exit_code: add_out.exit_code,
+                    stderr: if add_out.stderr.is_empty() {
+                        add_out.stdout
+                    } else {
+                        add_out.stderr
+                    },
+                });
+            }
+        }
+    }
+
     let id = format!("sftp-{}", clean_user.as_str());
     let used_mb = dir_used_mb(safe_chroot.as_path());
     accounts.insert(
@@ -960,7 +1063,7 @@ pub fn add_sftp_account(
         SftpAccountItem {
             id,
             username: clean_user.as_str().to_string(),
-            chroot_dir: safe_chroot.as_path().display().to_string(),
+            chroot_dir: chroot_str,
             target_app: rel_target.to_string(),
             auth_method: if auth_method.trim().is_empty() {
                 "Ed25519 SSH Key".to_string()
@@ -972,22 +1075,42 @@ pub fn add_sftp_account(
             status: "active".to_string(),
         },
     );
+    sync_sftp_sshd_dropin(config, &accounts, executor).await?;
     store.put_json(KV_SFTP_ACCOUNTS, &accounts)?;
     Ok(accounts)
 }
 
-pub fn delete_sftp_account(
+pub async fn delete_sftp_account(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<Vec<SftpAccountItem>, PanelError> {
     let mut accounts = list_sftp_accounts(store, config)?;
+    let removed_user = accounts
+        .iter()
+        .find(|a| a.id == id)
+        .map(|a| a.username.clone());
     let before = accounts.len();
     accounts.retain(|a| a.id != id);
     if accounts.len() == before {
         return Err(PanelError::NotFound(format!(
             "SFTP account '{id}' not found"
         )));
+    }
+    sync_sftp_sshd_dropin(config, &accounts, executor).await?;
+    if config.data_dir == Path::new("/var/lib/ferrous-panel")
+        && executor.is_binary_available(AllowedBinary::Userdel)
+    {
+        if let Some(ref uname) = removed_user {
+            if let Ok(valid_u) = SafeLinuxUser::parse(uname) {
+                if !matches!(valid_u.as_str(), "root" | "www-data" | "ubuntu" | "admin") {
+                    let _ = executor
+                        .run(AllowedBinary::Userdel, &[valid_u.as_str()], CRON_TIMEOUT)
+                        .await;
+                }
+            }
+        }
     }
     store.put_json(KV_SFTP_ACCOUNTS, &accounts)?;
     Ok(accounts)

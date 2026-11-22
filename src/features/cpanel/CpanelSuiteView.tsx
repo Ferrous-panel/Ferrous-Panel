@@ -12,7 +12,7 @@ import {
   ShieldCheck,
   Trash2
 } from 'lucide-react';
-import { CpanelData, ManagedApp, SqlDatabase } from '../types';
+import { CpanelData, ManagedApp, SqlDatabase } from '../../types';
 
 interface CpanelSuiteViewProps {
   cpanel: CpanelData | null;

@@ -24,7 +24,7 @@ import {
   SshGeneratedKeypair,
   SshPanelData,
   WebSshCommandOutput
-} from '../types';
+} from '../../types';
 
 interface SshTerminalViewProps {
   sshData: SshPanelData;

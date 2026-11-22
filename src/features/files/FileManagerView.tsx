@@ -21,7 +21,7 @@ import {
   Upload,
   X
 } from 'lucide-react';
-import { ManagedApp, WebFileNode } from '../types';
+import { ManagedApp, WebFileNode } from '../../types';
 import { authenticatedFetch } from '../../services/actixGateway';
 
 interface FileManagerViewProps {

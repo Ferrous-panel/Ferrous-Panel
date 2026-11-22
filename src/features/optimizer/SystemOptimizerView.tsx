@@ -20,7 +20,7 @@ import {
   AntiCrashGuardState,
   OptimizationProfilePreset,
   SystemOptimizerData,
-} from '../types';
+} from '../../types';
 
 interface SystemOptimizerViewProps {
   optimizer: SystemOptimizerData;

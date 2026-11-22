@@ -90,6 +90,23 @@ export default function App() {
 
   const sidebarItems = getSidebarItems(tr);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof document === 'undefined') return;
+    const canonicalHref = `${window.location.origin}${window.location.pathname}`;
+    let canonical = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    if (!canonical) {
+      canonical = document.createElement('link');
+      canonical.setAttribute('rel', 'canonical');
+      document.head.appendChild(canonical);
+    }
+    canonical.setAttribute('href', canonicalHref);
+
+    const activeLabel = sidebarItems.find((item) => item.id === activeTab)?.label;
+    document.title = activeLabel && isAuthenticated
+      ? `${activeLabel} — FerrousPanel`
+      : 'FerrousPanel — Ubuntu & Actix-Web Server Control Panel';
+  }, [activeTab, isAuthenticated, lang]);
+
   // Mandatory Login Gate: If not authenticated, render LoginView only
   if (!isAuthenticated) {
     return (

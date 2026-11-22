@@ -13,7 +13,7 @@ import {
   Server,
   RefreshCw,
 } from 'lucide-react';
-import { MailServerData, MailMessageItem } from '../types';
+import { MailServerData, MailMessageItem } from '../../types';
 
 interface MailServerViewProps {
   mailData: MailServerData | null;

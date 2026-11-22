@@ -15,7 +15,7 @@ import {
   Square,
   Trash2
 } from 'lucide-react';
-import { ManagedApp, PhpVersionInstance } from '../types';
+import { ManagedApp, PhpVersionInstance } from '../../types';
 
 interface PhpManagerViewProps {
   phpVersions: PhpVersionInstance[];

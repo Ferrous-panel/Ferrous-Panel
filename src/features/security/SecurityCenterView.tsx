@@ -15,7 +15,7 @@ import {
   Unlock,
   Zap
 } from 'lucide-react';
-import { SecurityData } from '../types';
+import { SecurityData } from '../../types';
 
 interface SecurityCenterViewProps {
   security: SecurityData | null;

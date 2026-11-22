@@ -565,7 +565,12 @@ pub async fn get_mail(state: web::Data<AppState>) -> Result<HttpResponse, PanelE
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let mail = ext::load_mail_server(&state.modules, &state.config)?;
+    let mail = ext::load_mail_server(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(mail))
 }
 
@@ -582,7 +587,13 @@ pub async fn post_mail_domain(
         .map(|p| p.into_inner().domain)
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| "mail.ferrous-panel.local".to_string());
-    let mail = ext::add_mail_domain(&state.modules, &state.config, &domain)?;
+    let mail = ext::add_mail_domain(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &domain,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -618,11 +629,13 @@ pub async fn post_mail_mailbox(
     let mail = ext::create_mailbox(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         &email,
         &domain,
         &body.display_name,
         quota,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -644,7 +657,13 @@ pub async fn delete_mail_mailbox(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let mail = ext::delete_mailbox(&state.modules, &state.config, &id)?;
+    let mail = ext::delete_mailbox(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -681,7 +700,15 @@ pub async fn post_mail_forwarder(
     } else {
         body.destination_email
     };
-    let mail = ext::create_forwarder(&state.modules, &state.config, &src, &dst, &domain)?;
+    let mail = ext::create_forwarder(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &src,
+        &dst,
+        &domain,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -703,7 +730,13 @@ pub async fn delete_mail_forwarder(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let mail = ext::delete_forwarder(&state.modules, &state.config, &id)?;
+    let mail = ext::delete_forwarder(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -715,7 +748,7 @@ pub async fn delete_mail_forwarder(
     Ok(HttpResponse::Ok().json(mail))
 }
 
-/// `POST /api/mail/send` — spools and records an outbound/test message with DKIM signature metadata.
+/// `POST /api/mail/send` — spools and transmits an outbound/test message via host sendmail/Postfix.
 pub async fn post_mail_send(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -738,11 +771,13 @@ pub async fn post_mail_send(
     let mail = ext::send_test_mail(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         &from,
         &to,
         &body.subject,
         &body.body,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1519,16 +1554,21 @@ pub struct CreateBlake3SnapshotPayload {
     pub immutable_lock: bool,
 }
 
-/// `GET /api/edge-cloud` — loads WASI workers, Youki/Firecracker OCI sandboxes, WireGuard peers, and BLAKE3 snapshots.
+/// `GET /api/edge-cloud` — loads WASI workers, OCI sandboxes, WireGuard peers, and Zstd/Merkle snapshots.
 pub async fn get_edge_cloud(state: web::Data<AppState>) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = ext::load_edge_cloud(&state.modules)?;
+    let data = ext::load_edge_cloud(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/workers` — deploys a new Wasmtime WASI Preview 2 edge worker.
+/// `POST /api/edge-cloud/workers` — compiles and deploys a Wasmtime WASI Preview 2 edge worker.
 pub async fn post_edge_worker(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1545,6 +1585,8 @@ pub async fn post_edge_worker(
     };
     let data = ext::deploy_wasi_worker(
         &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
         &name,
         &body.route_pattern,
         &body.target_domain,
@@ -1553,7 +1595,8 @@ pub async fn post_edge_worker(
         body.fuel_limit,
         &body.kv_namespace,
         &body.rust_source_snippet,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1565,7 +1608,7 @@ pub async fn post_edge_worker(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/workers/{id}/invoke` — invokes a WASI edge worker and returns sub-ms execution telemetry.
+/// `POST /api/edge-cloud/workers/{id}/invoke` — invokes a WASI edge worker and returns real execution telemetry.
 pub async fn post_edge_worker_invoke(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1575,7 +1618,13 @@ pub async fn post_edge_worker_invoke(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let (result, edge_cloud) = ext::invoke_wasi_worker(&state.modules, &id)?;
+    let (result, edge_cloud) = ext::invoke_wasi_worker(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1600,7 +1649,13 @@ pub async fn post_edge_worker_toggle(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::toggle_wasi_worker(&state.modules, &id)?;
+    let data = ext::toggle_wasi_worker(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1612,7 +1667,7 @@ pub async fn post_edge_worker_toggle(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `DELETE /api/edge-cloud/workers/{id}` — removes a WASI worker.
+/// `DELETE /api/edge-cloud/workers/{id}` — removes a WASI worker and its build artifacts.
 pub async fn delete_edge_worker(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1622,7 +1677,13 @@ pub async fn delete_edge_worker(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::delete_wasi_worker(&state.modules, &id)?;
+    let data = ext::delete_wasi_worker(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1634,7 +1695,7 @@ pub async fn delete_edge_worker(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/containers` — deploys a Youki OCI or Firecracker MicroVM sandbox.
+/// `POST /api/edge-cloud/containers` — deploys a Podman/Docker OCI container sandbox.
 pub async fn post_edge_container(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1651,6 +1712,8 @@ pub async fn post_edge_container(
     };
     let data = ext::deploy_oci_container(
         &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
         &name,
         &body.image,
         &body.runtime_engine,
@@ -1658,7 +1721,8 @@ pub async fn post_edge_container(
         body.container_port,
         body.memory_max_mb,
         body.cpu_quota_percent,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1685,7 +1749,14 @@ pub async fn post_edge_container_action(
         .map(|p| p.into_inner().action)
         .filter(|a| !a.trim().is_empty())
         .unwrap_or_else(|| "restart".to_string());
-    let data = ext::oci_container_action(&state.modules, &id, &action)?;
+    let data = ext::oci_container_action(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+        &action,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1697,7 +1768,7 @@ pub async fn post_edge_container_action(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/wireguard` — adds a BoringTun WireGuard mesh peer.
+/// `POST /api/edge-cloud/wireguard` — provisions a WireGuard mesh peer with real Curve25519 keys.
 pub async fn post_edge_wireguard(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1714,11 +1785,14 @@ pub async fn post_edge_wireguard(
     };
     let data = ext::add_wireguard_peer(
         &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
         &name,
         &body.region,
         &body.endpoint,
         &body.allowed_ips,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1730,7 +1804,7 @@ pub async fn post_edge_wireguard(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/wireguard/{id}/toggle` — toggles a WireGuard peer connection state.
+/// `POST /api/edge-cloud/wireguard/{id}/toggle` — toggles a WireGuard peer connection state and syncs wg0.conf.
 pub async fn post_edge_wireguard_toggle(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1740,7 +1814,13 @@ pub async fn post_edge_wireguard_toggle(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::toggle_wireguard_peer(&state.modules, &id)?;
+    let data = ext::toggle_wireguard_peer(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1752,7 +1832,7 @@ pub async fn post_edge_wireguard_toggle(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `DELETE /api/edge-cloud/wireguard/{id}` — removes a WireGuard mesh peer.
+/// `DELETE /api/edge-cloud/wireguard/{id}` — removes a WireGuard mesh peer and syncs wg0.conf.
 pub async fn delete_edge_wireguard(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1762,7 +1842,13 @@ pub async fn delete_edge_wireguard(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::delete_wireguard_peer(&state.modules, &id)?;
+    let data = ext::delete_wireguard_peer(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1774,7 +1860,7 @@ pub async fn delete_edge_wireguard(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/edge-cloud/snapshots` — creates a BLAKE3 Merkle-tree verified Zstd snapshot vault.
+/// `POST /api/edge-cloud/snapshots` — creates a verified Zstd/Gzip snapshot archive of a webroot target.
 pub async fn post_edge_snapshot(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1791,12 +1877,15 @@ pub async fn post_edge_snapshot(
     };
     let data = ext::create_blake3_snapshot(
         &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
         &name,
         &body.target_resource,
         &body.s3_endpoint,
         &body.bucket,
         body.immutable_lock,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -1808,7 +1897,7 @@ pub async fn post_edge_snapshot(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `DELETE /api/edge-cloud/snapshots/{id}` — deletes a BLAKE3 snapshot vault.
+/// `DELETE /api/edge-cloud/snapshots/{id}` — deletes a snapshot archive from disk and metadata store.
 pub async fn delete_edge_snapshot(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -1818,7 +1907,13 @@ pub async fn delete_edge_snapshot(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let data = ext::delete_blake3_snapshot(&state.modules, &id)?;
+    let data = ext::delete_blake3_snapshot(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

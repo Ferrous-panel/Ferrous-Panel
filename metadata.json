@@ -1,6 +1,6 @@
 {
   "name": "FerrousPanel — Ubuntu & Actix-Web Server Control Panel",
-  "description": "Bảng điều khiển quản trị máy chủ Ubuntu bảo mật cao viết bằng Rust (Actix-Web), hỗ trợ quản lý đa framework, tự động hóa Nginx Reverse Proxy, Systemd, UFW Firewall và Fail2ban.",
+  "description": "Bảng điều khiển quản trị máy chủ Ubuntu hiệu năng cao viết bằng Rust (Actix-Web) & FerrousX, hỗ trợ triển khai đa framework JS/CSS không cần Node.js (Bun/Deno), Rust, PHP, SQL, Mail Postfix, SFTP Chroot, WASI Edge Cloud, UFW và Fail2ban.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

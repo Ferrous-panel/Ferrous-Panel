@@ -39,7 +39,7 @@ import {
   SqlDatabase,
   TelemetryData,
   TelemetryHistoryPoint
-} from '../types';
+} from '../../types';
 import { authenticatedFetch } from '../../services/actixGateway';
 
 interface FerrousXSyncCrate {

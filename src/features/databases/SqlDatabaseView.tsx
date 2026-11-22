@@ -25,7 +25,7 @@ import {
   MysqlPhpMyAdminConfig,
   SqlDatabase,
   SqlQueryResponse
-} from '../types';
+} from '../../types';
 
 interface SqlDatabaseViewProps {
   databases: SqlDatabase[];

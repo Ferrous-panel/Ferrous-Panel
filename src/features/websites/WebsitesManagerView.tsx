@@ -32,7 +32,7 @@ import {
   RewritePresetType,
   WebServerEngineType,
   WebsiteLiveTestResult
-} from '../types';
+} from '../../types';
 import { authenticatedFetch } from '../../services/actixGateway';
 
 interface WebsitesManagerViewProps {

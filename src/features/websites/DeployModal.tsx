@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Server, X } from 'lucide-react';
-import { WebServerEngineType, WebsiteRuntimeType } from '../types';
+import { WebServerEngineType, WebsiteRuntimeType } from '../../types';
 
 interface DeployModalProps {
   isOpen: boolean;

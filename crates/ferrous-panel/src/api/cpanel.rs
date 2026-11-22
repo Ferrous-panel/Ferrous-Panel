@@ -349,11 +349,13 @@ pub async fn add_sftp(
     let accounts = cpanel_mod::add_sftp_account(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         &body.username,
         &body.target_app,
         &body.auth_method,
         body.quota_mb,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -375,7 +377,13 @@ pub async fn delete_sftp(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let accounts = cpanel_mod::delete_sftp_account(&state.modules, &state.config, &id)?;
+    let accounts = cpanel_mod::delete_sftp_account(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

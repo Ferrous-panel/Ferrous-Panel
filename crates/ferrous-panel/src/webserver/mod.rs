@@ -547,6 +547,17 @@ pub trait CommandExecutor: fmt::Debug + Send + Sync {
         self.run(bin, args, timeout)
     }
 
+    fn run_with_stdin<'a>(
+        &'a self,
+        bin: AllowedBinary,
+        args: &'a [&'a str],
+        stdin_bytes: &'a [u8],
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
+        let _ = stdin_bytes;
+        self.run(bin, args, timeout)
+    }
+
     fn http_probe<'a>(
         &'a self,
         connect_addr: SocketAddr,
@@ -582,6 +593,16 @@ impl CommandExecutor for SystemCommandExecutor {
         timeout: Duration,
     ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
         Box::pin(cmd::run_with_env(bin, args, envs, cwd, timeout))
+    }
+
+    fn run_with_stdin<'a>(
+        &'a self,
+        bin: AllowedBinary,
+        args: &'a [&'a str],
+        stdin_bytes: &'a [u8],
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<CmdOutput, PanelError>> {
+        Box::pin(cmd::run_with_stdin(bin, args, stdin_bytes, timeout))
     }
 
     fn http_probe<'a>(
