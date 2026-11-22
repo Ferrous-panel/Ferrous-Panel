@@ -43,6 +43,7 @@ INTERACTIVE_MODE=false
 UNATTENDED_MODE=false
 AUTO_SWAP=true
 PREBUILT_BINARY_ONLY=false
+INSTALL_JS_TOOLCHAIN=true
 
 DATA_DIR="/var/lib/ferrous-panel"
 ENV_FILE="/etc/ferrous-panel/panel.env"
@@ -75,6 +76,7 @@ Options:
   --branch <BRANCH>           Git branch to build from (default: main)
   --version <TAG|latest>      GitHub Release version tag (default: latest)
   --prebuilt-binary           Download prebuilt binary instead of compiling with Cargo
+  --no-js-toolchain           Skip installing Zero-Node.js JS/CSS binaries (bun + tailwindcss)
   --no-swap                   Do not auto-create 2GB /swapfile on low-RAM VPS
   --interactive               Prompt interactively for engine and admin account setup
   -y, --yes, --unattended     Skip interactive prompts (auto-generate credentials)
@@ -100,6 +102,7 @@ while [[ $# -gt 0 ]]; do
     --branch) GIT_BRANCH="$2"; shift 2 ;;
     --version) RELEASE_TAG="$2"; shift 2 ;;
     --prebuilt-binary) PREBUILT_BINARY_ONLY=true; shift ;;
+    --no-js-toolchain) INSTALL_JS_TOOLCHAIN=false; shift ;;
     --no-swap) AUTO_SWAP=false; shift ;;
     --interactive) INTERACTIVE_MODE=true; UNATTENDED_MODE=false; shift ;;
     -y|--yes|--unattended) INTERACTIVE_MODE=false; UNATTENDED_MODE=true; shift ;;
@@ -401,6 +404,47 @@ download_release_binary() {
   install -m 0755 "$tmp_file" "$dest_path"
 }
 
+install_zero_node_js_css_toolchain() {
+  local bun_arch="x64"
+  local tw_arch="x64"
+  if [ "${ARCH}" = "aarch64" ]; then
+    bun_arch="aarch64"
+    tw_arch="arm64"
+  fi
+
+  if [ ! -x /usr/local/bin/bun ]; then
+    echo -e "${CYAN}[*] Installing Bun single native binary (Zero-Node.js JS/TS runtime & bundler)...${NC}"
+    if ! command -v unzip >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
+    fi
+    mkdir -p "${TMP_DIR}/bun-dl"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/bun.zip" \
+      "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${bun_arch}.zip" \
+      && unzip -qo "${TMP_DIR}/bun-dl/bun.zip" -d "${TMP_DIR}/bun-dl" \
+      && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
+      install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
+      echo -e "${GREEN}[+] Installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+    else
+      echo -e "${YELLOW}[!] Could not download Bun binary right now (you can install later via Software Store).${NC}"
+    fi
+  fi
+
+  if [ ! -x /usr/local/bin/tailwindcss ]; then
+    echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Rust Oxide, Zero-Node.js)...${NC}"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tailwindcss" \
+      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-${tw_arch}"; then
+      install -m 0755 "${TMP_DIR}/tailwindcss" /usr/local/bin/tailwindcss
+      echo -e "${GREEN}[+] Installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
+    else
+      echo -e "${YELLOW}[!] Could not download Tailwind CSS standalone binary right now (you can install later via Software Store).${NC}"
+    fi
+  fi
+}
+
+if [ "${INSTALL_JS_TOOLCHAIN}" = true ]; then
+  install_zero_node_js_css_toolchain
+fi
+
 # ==============================================================================
 # [4/7] Fetch Source + Prebuilt Static dist/ & Build with Cargo
 # ==============================================================================
@@ -434,7 +478,7 @@ else
   fi
 
   # Ensure prebuilt dist/ static UI exists (tracked dist/, ferrous-dist.tar.gz release,
-  # or build cleanly using a temporary portable Node.js 22 tarball inside TMP_DIR)
+  # or build cleanly using native Bun — ZERO Node.js installed on VPS!)
   if [ ! -f "${BUILD_WORKSPACE}/dist/index.html" ]; then
     echo -e "${CYAN}[*] Downloading prebuilt static frontend bundle (ferrous-dist.tar.gz)...${NC}"
     mkdir -p "${TMP_DIR}/dist_new"
@@ -445,31 +489,15 @@ else
       mv "${TMP_DIR}/dist_new" "${BUILD_WORKSPACE}/dist"
       echo -e "${GREEN}[+] Synced prebuilt static UI bundle into ${BUILD_WORKSPACE}/dist.${NC}"
     elif [ -f "${BUILD_WORKSPACE}/package.json" ]; then
-      NODE_BIN_DIR=""
-      if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-        NODE_MAJOR="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
-        if [ "${NODE_MAJOR:-0}" -ge 20 ]; then
-          NODE_BIN_DIR="$(dirname "$(command -v node)")"
-        fi
+      if [ ! -x /usr/local/bin/bun ]; then
+        install_zero_node_js_css_toolchain
       fi
-      if [ -z "${NODE_BIN_DIR}" ]; then
-        NODE_ARCH="x64"
-        [ "${ARCH}" = "aarch64" ] && NODE_ARCH="arm64"
-        NODE_VER="v22.15.0"
-        echo -e "${CYAN}[*] Prebuilt bundle unavailable; downloading temporary portable Node.js ${NODE_VER} to build dist/...${NC}"
-        mkdir -p "${TMP_DIR}/portable-node"
-        if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/node.tar.gz" "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${NODE_ARCH}.tar.gz" \
-          && tar -xzf "${TMP_DIR}/node.tar.gz" -C "${TMP_DIR}/portable-node" --strip-components=1; then
-          NODE_BIN_DIR="${TMP_DIR}/portable-node/bin"
-        fi
-      fi
-      if [ -n "${NODE_BIN_DIR}" ] && [ -x "${NODE_BIN_DIR}/npm" ]; then
-        echo -e "${CYAN}[*] Building static frontend UI (${BUILD_WORKSPACE}/dist) via Vite...${NC}"
+      if [ -x /usr/local/bin/bun ]; then
+        echo -e "${CYAN}[*] Building static frontend UI (${BUILD_WORKSPACE}/dist) via Bun + Vite (Zero-Node.js)...${NC}"
         (
-          export PATH="${NODE_BIN_DIR}:${PATH}"
           cd "${BUILD_WORKSPACE}"
-          npm install --no-audit --no-fund
-          npm run build
+          /usr/local/bin/bun install --no-progress
+          /usr/local/bin/bun run build
         )
         rm -rf "${BUILD_WORKSPACE}/node_modules"
       fi
@@ -1134,6 +1162,7 @@ echo -e "${GREEN}===============================================================
 echo -e "  Binary            : ${BIN_PANEL} (embedded dist/ SPA)"
 echo -e "  CLI Symlinks      : fp / ferrous -> ${BIN_PANEL}"
 echo -e "  Rust Toolchain    : $(cargo --version 2>/dev/null || echo 'prebuilt')"
+echo -e "  JS/CSS Zero-Node  : bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'not-installed') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'not-installed') (Node.js NOT required)"
 echo -e "  Web Engine        : ${WEB_ENGINE}"
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
   echo -e "  FerrousX Binary   : ${BIN_FERROUSX} (CLI: ${BIN_FERROUSX_CTL} / fx)"

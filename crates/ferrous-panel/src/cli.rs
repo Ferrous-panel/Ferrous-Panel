@@ -752,6 +752,25 @@ async fn check_services(config: &Config) -> Result<()> {
         if validation.valid { "OK" } else { "FAILED" },
         validation.output
     );
+    println!("Zero-Node.js JS/CSS Toolchain:");
+    println!(
+        "  - bun (JS/TS frameworks)  : {}",
+        AllowedBinary::Bun
+            .resolved_path_str()
+            .unwrap_or("not installed (run update.sh or Software Store)")
+    );
+    println!(
+        "  - tailwindcss (CSS v4)    : {}",
+        AllowedBinary::TailwindCli
+            .resolved_path_str()
+            .unwrap_or("not installed (run update.sh or Software Store)")
+    );
+    println!(
+        "  - deno (optional Rust V8) : {}",
+        AllowedBinary::Deno
+            .resolved_path_str()
+            .unwrap_or("not installed (optional)")
+    );
     Ok(())
 }
 

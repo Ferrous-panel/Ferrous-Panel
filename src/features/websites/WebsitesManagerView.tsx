@@ -81,7 +81,7 @@ const REWRITE_PRESET_LABELS: { id: RewritePresetType; label: string }[] = [
   { id: 'nuxt_nitro', label: 'Nuxt 3 (Vue 3 Nitro Engine + _nuxt Cache)' },
   {
     id: 'sveltekit_node',
-    label: 'SvelteKit 2 (Svelte 5 Adapter-Node + _app/immutable)'
+    label: 'SvelteKit 2 (Svelte 5 Zero-Node Bun + _app/immutable)'
   },
   {
     id: 'astro_hybrid',
@@ -89,7 +89,7 @@ const REWRITE_PRESET_LABELS: { id: RewritePresetType; label: string }[] = [
   },
   { id: 'laravel', label: 'Laravel 11 / Symfony 7 (try_files -> /index.php?$query_string)' },
   { id: 'wordpress', label: 'WordPress 6.7 Permalinks Rewrite' },
-  { id: 'spa_history', label: 'React / Vue / Vite SPA HTML5 History Fallback' }
+  { id: 'spa_history', label: 'React / Vue / Vite / Tailwind CSS (FerrousX Zero-Node SPA + Clean URLs)' }
 ];
 
 const CLIENT_REWRITE_SNIPPETS: Record<RewritePresetType, string> = {
@@ -337,7 +337,10 @@ export const WebsitesManagerView: React.FC<WebsitesManagerViewProps> = ({
     fw.includes('Astro') ||
     fw.includes('Remix') ||
     fw.includes('NestJS') ||
-    fw.includes('Vite');
+    fw.includes('Bun') ||
+    fw.includes('Deno') ||
+    fw.includes('Vite') ||
+    fw.includes('Static HTML');
 
   const isPolyglotFramework = (fw: string) =>
     fw.includes('Python') ||

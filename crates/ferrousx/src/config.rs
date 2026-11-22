@@ -217,6 +217,12 @@ pub enum HandlerSectionToml {
         index_file: String,
         #[serde(default)]
         spa_fallback: bool,
+        #[serde(default = "default_true")]
+        clean_urls: bool,
+        #[serde(default = "default_true")]
+        precompressed: bool,
+        #[serde(default = "default_true")]
+        immutable_assets: bool,
     },
     ReverseProxy {
         upstream: String,
@@ -397,6 +403,9 @@ pub enum SiteHandler {
     StaticSpa {
         index_file: SafeFileName,
         spa_fallback: bool,
+        clean_urls: bool,
+        precompressed: bool,
+        immutable_assets: bool,
     },
     ReverseProxy {
         upstream: UpstreamOrigin,
@@ -711,9 +720,15 @@ fn validate_site(
         HandlerSectionToml::StaticSpa {
             index_file,
             spa_fallback,
+            clean_urls,
+            precompressed,
+            immutable_assets,
         } => SiteHandler::StaticSpa {
             index_file: SafeFileName::parse(&index_file)?,
             spa_fallback,
+            clean_urls,
+            precompressed,
+            immutable_assets,
         },
         HandlerSectionToml::ReverseProxy {
             upstream,

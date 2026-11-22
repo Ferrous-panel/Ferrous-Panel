@@ -117,30 +117,28 @@ export const DeployModal: React.FC<DeployModalProps> = ({
       setExecCommand(`/www/wwwroot/${clean}/target/release/${prefix}`);
     } else if (nextFw === 'Next.js 15 (React SSR)') {
       setRunSubDir('/.next/standalone');
-      setExecCommand(
-        `/usr/bin/node /www/wwwroot/${clean}/.next/standalone/server.js`
-      );
+      setExecCommand(`/usr/local/bin/bun --bun run start`);
     } else if (nextFw === 'Nuxt 3 (Vue 3 SSR)') {
       setRunSubDir('/.output/public');
       setExecCommand(
-        `/usr/bin/node /www/wwwroot/${clean}/.output/server/index.mjs`
+        `/usr/local/bin/bun /www/wwwroot/${clean}/.output/server/index.mjs`
       );
     } else if (nextFw === 'SvelteKit 2 (Svelte 5)') {
       setRunSubDir('/build');
-      setExecCommand(`/usr/bin/node /www/wwwroot/${clean}/build/index.js`);
+      setExecCommand(`/usr/local/bin/bun /www/wwwroot/${clean}/build/index.js`);
     } else if (nextFw === 'Astro 5 (Hybrid / Static)') {
       setRunSubDir('/dist/client');
       setExecCommand(
-        `/usr/bin/node /www/wwwroot/${clean}/dist/server/entry.mjs`
+        `/usr/local/bin/bun /www/wwwroot/${clean}/dist/server/entry.mjs`
       );
     } else if (nextFw === 'Remix / React Router v7') {
       setRunSubDir('/build/client');
       setExecCommand(
-        `/usr/bin/npx react-router-serve /www/wwwroot/${clean}/build/server/index.js`
+        `/usr/local/bin/bun x react-router-serve /www/wwwroot/${clean}/build/server/index.js`
       );
     } else if (nextFw === 'NestJS 10 (TypeScript API)') {
       setRunSubDir('/dist');
-      setExecCommand(`/usr/bin/node /www/wwwroot/${clean}/dist/main.js`);
+      setExecCommand(`/usr/local/bin/bun /www/wwwroot/${clean}/dist/main.js`);
     } else if (nextFw === 'Bun / ElysiaJS (TypeScript)') {
       setRunSubDir('/');
       setExecCommand(`/usr/local/bin/bun run /www/wwwroot/${clean}/src/index.ts`);
@@ -148,9 +146,9 @@ export const DeployModal: React.FC<DeployModalProps> = ({
       setRunSubDir('/');
       setExecCommand(`/usr/local/bin/deno run --allow-net --allow-env --allow-read /www/wwwroot/${clean}/main.ts`);
     } else if (isNextStatic) {
-      setRunSubDir('/dist');
+      setRunSubDir(nextFw === 'Vite + React 19 / Vue 3 SPA' ? '/dist' : '/');
       setCreateDatabase(false);
-      setExecCommand('ferrousx static try_files /index.html');
+      setExecCommand('ferrousx static_spa (Zero-Node.js · Brotli/Gzip + Clean URLs)');
     } else if (isNextPhp) {
       setRunSubDir('/public');
       setDbEngine('MariaDB 11.4');
@@ -372,33 +370,36 @@ export const DeployModal: React.FC<DeployModalProps> = ({
                   <option value="Axum (Rust)">Axum 0.8 (Rust Tokio Hyper)</option>
                   <option value="Rocket (Rust)">Rocket 0.5 (Rust Async)</option>
                 </optgroup>
-                <optgroup label="2. Modern JS/TS Frameworks (NAPI-RS + Rust IPC Bridge)">
-                  <option value="Next.js 15 (React SSR)">
-                    Next.js 15 (React 19 App Router SSR + NAPI-RS)
-                  </option>
-                  <option value="Nuxt 3 (Vue 3 SSR)">
-                    Nuxt 3.14 (Vue 3 Nitro SSR + NAPI-RS)
-                  </option>
-                  <option value="SvelteKit 2 (Svelte 5)">
-                    SvelteKit 2.8 (Svelte 5 Runes SSR + Bun/Node FFI)
-                  </option>
-                  <option value="Astro 5 (Hybrid / Static)">
-                    Astro 5.0 (Content Islands Hybrid + NAPI-RS)
-                  </option>
-                  <option value="Remix / React Router v7">
-                    Remix / React Router v7 SSR
-                  </option>
-                  <option value="NestJS 10 (TypeScript API)">
-                    NestJS 10 (Enterprise TypeScript API + Rust Addon)
-                  </option>
-                  <option value="Bun / ElysiaJS (TypeScript)">
-                    Bun 1.1 + ElysiaJS / Hono High-Speed API
-                  </option>
-                  <option value="Deno 2 (TypeScript / Fresh)">
-                    Deno 2.x (TypeScript / Fresh / Oak Edge Runtime)
+                <optgroup label="2. Modern JS/TS & CSS Frameworks (Zero-Node.js · Bun / Tailwind / FerrousX)">
+                  <option value="Static HTML / SPA">
+                    Static HTML / CSS / Tailwind CSS v4 (FerrousX Native · Zero-Node.js)
                   </option>
                   <option value="Vite + React 19 / Vue 3 SPA">
-                    Vite 6 + React 19 / Vue 3 SPA
+                    Vite 6 + React 19 / Vue 3 / Svelte SPA (Bun Build · Zero-Node.js)
+                  </option>
+                  <option value="Next.js 15 (React SSR)">
+                    Next.js 15 (React 19 App Router SSR · Bun Zero-Node.js)
+                  </option>
+                  <option value="Nuxt 3 (Vue 3 SSR)">
+                    Nuxt 3.14 (Vue 3 Nitro SSR · Bun Zero-Node.js)
+                  </option>
+                  <option value="SvelteKit 2 (Svelte 5)">
+                    SvelteKit 2.8 (Svelte 5 Runes SSR · Bun Zero-Node.js)
+                  </option>
+                  <option value="Astro 5 (Hybrid / Static)">
+                    Astro 5.0 (Content Islands · FerrousX / Bun Zero-Node.js)
+                  </option>
+                  <option value="Remix / React Router v7">
+                    Remix / React Router v7 SSR (Bun Zero-Node.js)
+                  </option>
+                  <option value="NestJS 10 (TypeScript API)">
+                    NestJS 10 (TypeScript API · Bun Zero-Node.js)
+                  </option>
+                  <option value="Bun / ElysiaJS (TypeScript)">
+                    Bun + ElysiaJS / Hono High-Speed API (Zero-Node.js)
+                  </option>
+                  <option value="Deno 2 (TypeScript / Fresh)">
+                    Deno 2.x (TypeScript / Fresh / Oak Rust Runtime)
                   </option>
                 </optgroup>
                 <optgroup label="3. Polyglot Server Languages (PHP / Python / Go / Java / .NET / Ruby)">

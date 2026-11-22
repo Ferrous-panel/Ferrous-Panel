@@ -444,12 +444,18 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: 
         } => {
             let idx = index_file.as_str();
             let try_rule = if *spa_fallback {
-                format!("try_files $uri $uri/ /{idx};")
+                format!("try_files $uri $uri.html $uri/ /{idx};")
             } else {
-                "try_files $uri $uri/ =404;".to_string()
+                "try_files $uri $uri.html $uri/ =404;".to_string()
             };
             format!(
                 "    index {idx};\n\
+    location ~* \\.(?:mjs|js|css|wasm|woff2|woff|svg|webp|avif)$ {{\n\
+        expires 30d;\n\
+        add_header Cache-Control \"public, max-age=2592000\";\n\
+        add_header X-Content-Type-Options \"nosniff\" always;\n\
+        try_files $uri =404;\n\
+    }}\n\
     location / {{\n\
         {try_rule}\n\
     }}"

@@ -336,7 +336,9 @@ export const OneClickAppsView: React.FC<OneClickAppsViewProps> = ({
                           }`}
                         />
                         {pkg.status === 'running'
-                          ? 'Đang chạy'
+                          ? pkg.category === 'JS/CSS Zero-Node'
+                            ? 'Sẵn sàng (Zero-Node)'
+                            : 'Đang chạy'
                           : pkg.status === 'stopped'
                             ? 'Đã dừng'
                             : 'Chưa cài đặt'}

@@ -99,7 +99,8 @@ pub async fn dispatch_request(
             &site.acme_webroot,
             &req_path,
             None,
-            false,
+            StaticServeOptions::acme(),
+            None,
             is_head,
             server_tokens,
         )
@@ -152,6 +153,9 @@ pub async fn dispatch_request(
         SiteHandler::StaticSpa {
             index_file,
             spa_fallback,
+            clean_urls,
+            precompressed,
+            immutable_assets,
         } => {
             runtime.metrics.record_static();
             if !matches!(*req.method(), Method::GET | Method::HEAD) {
@@ -162,11 +166,23 @@ pub async fn dispatch_request(
                 )
             } else {
                 let is_head = *req.method() == Method::HEAD;
+                let accept_encoding = req
+                    .headers()
+                    .get(header::ACCEPT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let opts = StaticServeOptions {
+                    spa_fallback: *spa_fallback,
+                    clean_urls: *clean_urls,
+                    precompressed: *precompressed,
+                    immutable_assets: *immutable_assets,
+                };
                 serve_static_file_from_root(
                     &site.root,
                     &req_path,
                     Some(index_file.as_str()),
-                    *spa_fallback,
+                    opts,
+                    accept_encoding.as_deref(),
                     is_head,
                     server_tokens,
                 )
@@ -255,11 +271,130 @@ fn build_https_redirect(
         .unwrap_or_else(|_| text_response(StatusCode::INTERNAL_SERVER_ERROR, "redirect error", false))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StaticServeOptions {
+    spa_fallback: bool,
+    clean_urls: bool,
+    precompressed: bool,
+    immutable_assets: bool,
+}
+
+impl StaticServeOptions {
+    const fn acme() -> Self {
+        Self {
+            spa_fallback: false,
+            clean_urls: false,
+            precompressed: false,
+            immutable_assets: false,
+        }
+    }
+
+    const fn static_assets_only() -> Self {
+        Self {
+            spa_fallback: false,
+            clean_urls: false,
+            precompressed: true,
+            immutable_assets: true,
+        }
+    }
+}
+
+fn resolve_web_mime(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("js" | "mjs" | "cjs") => "application/javascript; charset=utf-8".to_string(),
+        Some("css") => "text/css; charset=utf-8".to_string(),
+        Some("html" | "htm") => "text/html; charset=utf-8".to_string(),
+        Some("json" | "map" | "webmanifest") => "application/json; charset=utf-8".to_string(),
+        Some("wasm") => "application/wasm".to_string(),
+        Some("svg") => "image/svg+xml".to_string(),
+        Some("woff2") => "font/woff2".to_string(),
+        Some("woff") => "font/woff".to_string(),
+        Some("ttf") => "font/ttf".to_string(),
+        Some("otf") => "font/otf".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("avif") => "image/avif".to_string(),
+        Some("ico") => "image/x-icon".to_string(),
+        Some("xml") => "application/xml; charset=utf-8".to_string(),
+        Some("txt") => "text/plain; charset=utf-8".to_string(),
+        _ => mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string(),
+    }
+}
+
+fn is_compressible_asset(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| s.to_ascii_lowercase())
+            .as_deref(),
+        Some("html" | "htm" | "css" | "js" | "mjs" | "cjs" | "json" | "svg" | "xml" | "txt" | "wasm" | "map")
+    )
+}
+
+fn accept_encoding_supports(accept_encoding: Option<&str>, encoding: &str) -> bool {
+    let Some(header_val) = accept_encoding else {
+        return false;
+    };
+    header_val.split(',').any(|token| {
+        let mut parts = token.trim().split(';');
+        let Some(name) = parts.next() else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case(encoding) {
+            return false;
+        }
+        for param in parts {
+            let trimmed = param.trim();
+            if let Some(q_val) = trimmed.strip_prefix("q=") {
+                if q_val.trim().parse::<f32>().ok().is_some_and(|q| q <= 0.0) {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
+fn cache_control_for_asset(req_path: &str, file_path: &Path, immutable_assets: bool) -> Option<&'static str> {
+    if !immutable_assets {
+        return None;
+    }
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    if matches!(ext.as_deref(), Some("html" | "htm")) {
+        return Some("no-cache, must-revalidate");
+    }
+    let is_framework_immutable_dir = req_path.starts_with("/assets/")
+        || req_path.starts_with("/_next/static/")
+        || req_path.starts_with("/_astro/")
+        || req_path.starts_with("/_nuxt/")
+        || req_path.starts_with("/_app/immutable/");
+    if is_framework_immutable_dir {
+        return Some("public, max-age=31536000, immutable");
+    }
+    if matches!(
+        ext.as_deref(),
+        Some("js" | "mjs" | "css" | "wasm" | "woff2" | "woff" | "svg" | "webp" | "avif" | "png" | "jpg" | "jpeg" | "ico")
+    ) {
+        return Some("public, max-age=86400");
+    }
+    None
+}
+
 async fn serve_static_file_from_root(
     root: &Path,
     req_path: &str,
     default_index: Option<&str>,
-    spa_fallback: bool,
+    opts: StaticServeOptions,
+    accept_encoding: Option<&str>,
     is_head: bool,
     server_tokens: bool,
 ) -> Response<RespBody> {
@@ -288,18 +423,50 @@ async fn serve_static_file_from_root(
         }
     }
 
-    match open_regular_file(&target_file, root).await {
-        Ok(Some((file, len, mime))) => build_file_response(file, len, &mime, is_head, server_tokens),
+    match open_regular_file_negotiated(&target_file, root, opts.precompressed, accept_encoding).await {
+        Ok(Some(opened)) => {
+            let cc = cache_control_for_asset(req_path, &target_file, opts.immutable_assets);
+            build_file_response(opened, cc, is_head, server_tokens)
+        }
         Ok(None) => {
-            if spa_fallback {
+            let has_extension = Path::new(req_path).extension().is_some();
+
+            // Clean URL resolution for Astro / Next.js static export / Nuxt generate / Tailwind multi-page sites
+            if opts.clean_urls && !ends_with_slash && !has_extension {
+                let mut html_candidate = resolved.as_os_str().to_os_string();
+                html_candidate.push(".html");
+                let html_path = std::path::PathBuf::from(html_candidate);
+                if let Ok(Some(opened)) =
+                    open_regular_file_negotiated(&html_path, root, opts.precompressed, accept_encoding).await
+                {
+                    let cc = cache_control_for_asset(req_path, &html_path, opts.immutable_assets);
+                    return build_file_response(opened, cc, is_head, server_tokens);
+                }
                 if let Some(idx) = default_index {
-                    let has_extension = Path::new(req_path).extension().is_some();
+                    let dir_idx = resolved.join(idx);
+                    if let Ok(Some(opened)) =
+                        open_regular_file_negotiated(&dir_idx, root, opts.precompressed, accept_encoding).await
+                    {
+                        let cc = cache_control_for_asset(req_path, &dir_idx, opts.immutable_assets);
+                        return build_file_response(opened, cc, is_head, server_tokens);
+                    }
+                }
+            }
+
+            if opts.spa_fallback {
+                if let Some(idx) = default_index {
                     if !has_extension {
                         let fallback_path = root.join(idx);
-                        if let Ok(Some((file, len, mime))) =
-                            open_regular_file(&fallback_path, root).await
+                        if let Ok(Some(opened)) = open_regular_file_negotiated(
+                            &fallback_path,
+                            root,
+                            opts.precompressed,
+                            accept_encoding,
+                        )
+                        .await
                         {
-                            return build_file_response(file, len, &mime, is_head, server_tokens);
+                            let cc = cache_control_for_asset(req_path, &fallback_path, opts.immutable_assets);
+                            return build_file_response(opened, cc, is_head, server_tokens);
                         }
                     }
                 }
@@ -310,10 +477,70 @@ async fn serve_static_file_from_root(
     }
 }
 
-async fn open_regular_file(
+struct OpenedStaticFile {
+    file: tokio::fs::File,
+    len: u64,
+    mime: String,
+    content_encoding: Option<&'static str>,
+    vary_accept_encoding: bool,
+}
+
+async fn open_regular_file_negotiated(
     target_path: &Path,
     root: &Path,
-) -> Result<Option<(tokio::fs::File, u64, String)>, StatusCode> {
+    precompressed: bool,
+    accept_encoding: Option<&str>,
+) -> Result<Option<OpenedStaticFile>, StatusCode> {
+    let compressible = is_compressible_asset(target_path);
+    let mime = resolve_web_mime(target_path);
+
+    if precompressed && compressible {
+        if accept_encoding_supports(accept_encoding, "br") {
+            let mut br_os = target_path.as_os_str().to_os_string();
+            br_os.push(".br");
+            let br_path = std::path::PathBuf::from(br_os);
+            if let Ok(Some((file, len))) = open_contained_file(&br_path, root).await {
+                return Ok(Some(OpenedStaticFile {
+                    file,
+                    len,
+                    mime,
+                    content_encoding: Some("br"),
+                    vary_accept_encoding: true,
+                }));
+            }
+        }
+        if accept_encoding_supports(accept_encoding, "gzip") {
+            let mut gz_os = target_path.as_os_str().to_os_string();
+            gz_os.push(".gz");
+            let gz_path = std::path::PathBuf::from(gz_os);
+            if let Ok(Some((file, len))) = open_contained_file(&gz_path, root).await {
+                return Ok(Some(OpenedStaticFile {
+                    file,
+                    len,
+                    mime,
+                    content_encoding: Some("gzip"),
+                    vary_accept_encoding: true,
+                }));
+            }
+        }
+    }
+
+    match open_contained_file(target_path, root).await? {
+        Some((file, len)) => Ok(Some(OpenedStaticFile {
+            file,
+            len,
+            mime,
+            content_encoding: None,
+            vary_accept_encoding: precompressed && compressible,
+        })),
+        None => Ok(None),
+    }
+}
+
+async fn open_contained_file(
+    target_path: &Path,
+    root: &Path,
+) -> Result<Option<(tokio::fs::File, u64)>, StatusCode> {
     if !target_path.is_file() {
         return Ok(None);
     }
@@ -331,23 +558,29 @@ async fn open_regular_file(
     if !meta.is_file() {
         return Ok(None);
     }
-    let mime = mime_guess::from_path(&canon_file)
-        .first_or_octet_stream()
-        .to_string();
-    Ok(Some((file, meta.len(), mime)))
+    Ok(Some((file, meta.len())))
 }
 
 fn build_file_response(
-    file: tokio::fs::File,
-    len: u64,
-    mime: &str,
+    opened: OpenedStaticFile,
+    cache_control: Option<&'static str>,
     is_head: bool,
     server_tokens: bool,
 ) -> Response<RespBody> {
     let mut builder = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
-        .header(header::CONTENT_LENGTH, len.to_string());
+        .header(header::CONTENT_TYPE, &opened.mime)
+        .header(header::CONTENT_LENGTH, opened.len.to_string())
+        .header(HeaderName::from_static("x-content-type-options"), "nosniff");
+    if let Some(enc) = opened.content_encoding {
+        builder = builder.header(header::CONTENT_ENCODING, enc);
+    }
+    if opened.vary_accept_encoding {
+        builder = builder.header(header::VARY, "Accept-Encoding");
+    }
+    if let Some(cc) = cache_control {
+        builder = builder.header(header::CACHE_CONTROL, cc);
+    }
     if server_tokens {
         builder = builder.header(header::SERVER, "FerrousX");
     }
@@ -355,7 +588,7 @@ fn build_file_response(
     let body = if is_head {
         empty_body()
     } else {
-        FileStreamBody::new(file).boxed()
+        FileStreamBody::new(opened.file).boxed()
     };
 
     builder
@@ -592,11 +825,17 @@ async fn handle_php_fpm(
         .is_some_and(|e| e.eq_ignore_ascii_case("php"));
     if resolved.is_file() && !is_php_ext {
         let is_head = *req.method() == Method::HEAD;
+        let accept_encoding = req
+            .headers()
+            .get(header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         return serve_static_file_from_root(
             &site.root,
             &req_path,
             None,
-            false,
+            StaticServeOptions::static_assets_only(),
+            accept_encoding.as_deref(),
             is_head,
             server_tokens,
         )

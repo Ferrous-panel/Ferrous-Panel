@@ -178,10 +178,12 @@ export interface ServerPackageItem {
   name: string;
   category:
     | 'Rust Supplemental Package'
+    | 'JS/CSS Zero-Node'
     | 'Web Server'
     | 'Runtime'
     | 'Database'
     | 'Cache & Queue'
+    | 'Security'
     | 'Security & Process';
   version: string;
   description: string;

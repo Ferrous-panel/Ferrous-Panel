@@ -47,6 +47,7 @@ FERROUSX_ADMIN_TOKEN_FILE="/etc/ferrousx/admin.token"
 UPDATE_PANEL=true
 FORCE_FERROUSX=false
 FORCE_NGINX=false
+SYNC_JS_TOOLCHAIN=true
 
 usage() {
   cat <<'EOF_HELP'
@@ -60,6 +61,8 @@ Options:
   --nginx-only                 Validate & sync ONLY Nginx (do not rebuild ferrous-panel)
   --ferrousx                   Sync & rebuild latest FerrousX from github.com/Ferrous-panel/FerrousX
   --ferrousx-only              Update ONLY FerrousX from GitHub (do not rebuild ferrous-panel)
+  --js-only                    Install/update ONLY Zero-Node.js JS/CSS binaries (bun + tailwindcss)
+  --no-js-toolchain            Skip syncing Zero-Node.js JS/CSS binaries (bun + tailwindcss)
   --engine <nginx|ferrousx>    Target web engine to update & validate
   --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
@@ -86,6 +89,15 @@ while [[ $# -gt 0 ]]; do
     --ferrousx-only)
       FORCE_FERROUSX=true
       UPDATE_PANEL=false
+      shift
+      ;;
+    --js-only)
+      SYNC_JS_TOOLCHAIN=true
+      UPDATE_PANEL=false
+      shift
+      ;;
+    --no-js-toolchain)
+      SYNC_JS_TOOLCHAIN=false
       shift
       ;;
     --engine)
@@ -668,6 +680,43 @@ update_ferrousx_from_github() {
   fi
 }
 
+install_zero_node_js_css_toolchain() {
+  local bun_arch="x64"
+  local tw_arch="x64"
+  if [ "${ARCH}" = "aarch64" ]; then
+    bun_arch="aarch64"
+    tw_arch="arm64"
+  fi
+
+  if [ ! -x /usr/local/bin/bun ]; then
+    echo -e "${CYAN}[*] Installing Bun single native binary (Zero-Node.js JS/TS runtime & bundler)...${NC}"
+    if ! command -v unzip >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
+    fi
+    mkdir -p "${TMP_DIR}/bun-dl"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/bun.zip" \
+      "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-${bun_arch}.zip" \
+      && unzip -qo "${TMP_DIR}/bun-dl/bun.zip" -d "${TMP_DIR}/bun-dl" \
+      && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
+      install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
+      echo -e "${GREEN}[+] Installed Bun $(/usr/local/bin/bun --version 2>/dev/null || echo 'latest') -> /usr/local/bin/bun (Zero-Node.js).${NC}"
+    else
+      echo -e "${YELLOW}[!] Could not download Bun binary right now.${NC}"
+    fi
+  fi
+
+  if [ ! -x /usr/local/bin/tailwindcss ]; then
+    echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Rust Oxide, Zero-Node.js)...${NC}"
+    if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tailwindcss" \
+      "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-${tw_arch}"; then
+      install -m 0755 "${TMP_DIR}/tailwindcss" /usr/local/bin/tailwindcss
+      echo -e "${GREEN}[+] Installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
+    else
+      echo -e "${YELLOW}[!] Could not download Tailwind CSS standalone binary right now.${NC}"
+    fi
+  fi
+}
+
 ensure_frontend_dist() {
   local work_dir="$1"
   local dist_ready=false
@@ -694,43 +743,22 @@ ensure_frontend_dist() {
     fi
   fi
 
-  # 3) Otherwise build fresh dist/ locally using Node 20+ (or temporary portable Node 22 in TMP_DIR)
+  # 3) Otherwise build fresh dist/ locally using Bun (100% Zero-Node.js on VPS!)
   if [ "$dist_ready" = false ] && [ -f "${work_dir}/package.json" ]; then
-    local node_bin_dir=""
-    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
-      local node_major
-      node_major="$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)"
-      if [ "${node_major:-0}" -ge 20 ]; then
-        node_bin_dir="$(dirname "$(command -v node)")"
-      fi
+    if [ ! -x /usr/local/bin/bun ]; then
+      install_zero_node_js_css_toolchain
     fi
 
-    if [ -z "$node_bin_dir" ]; then
-      local node_arch="x64"
-      if [ "${ARCH}" = "aarch64" ]; then
-        node_arch="arm64"
-      fi
-      local node_ver="v22.15.0"
-      local node_url="https://nodejs.org/dist/${node_ver}/node-${node_ver}-linux-${node_arch}.tar.gz"
-      echo -e "${CYAN}[*] Prebuilt UI bundle not found; downloading temporary portable Node.js ${node_ver} to build dist/...${NC}"
-      mkdir -p "${TMP_DIR}/portable-node"
-      if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/node.tar.gz" "${node_url}" \
-        && tar -xzf "${TMP_DIR}/node.tar.gz" -C "${TMP_DIR}/portable-node" --strip-components=1; then
-        node_bin_dir="${TMP_DIR}/portable-node/bin"
-      fi
-    fi
-
-    if [ -n "$node_bin_dir" ] && [ -x "${node_bin_dir}/npm" ]; then
-      echo -e "${CYAN}[*] Building static frontend UI (${work_dir}/dist) via Vite...${NC}"
+    if [ -x /usr/local/bin/bun ]; then
+      echo -e "${CYAN}[*] Building static frontend UI (${work_dir}/dist) via Bun + Vite (Zero-Node.js)...${NC}"
       if (
-        export PATH="${node_bin_dir}:${PATH}"
         cd "${work_dir}"
-        npm install --no-audit --no-fund
-        npm run build
+        /usr/local/bin/bun install --no-progress
+        /usr/local/bin/bun run build
       ); then
         rm -rf "${work_dir}/node_modules"
         if [ -f "${work_dir}/dist/index.html" ]; then
-          echo -e "${GREEN}[+] Built fresh static UI bundle into ${work_dir}/dist (zero Node.js left on VPS).${NC}"
+          echo -e "${GREEN}[+] Built fresh static UI bundle into ${work_dir}/dist using Bun (100% Zero-Node.js).${NC}"
           dist_ready=true
         fi
       fi
@@ -1012,6 +1040,10 @@ EOF_NGX_DEF
   fi
 }
 
+if [ "$SYNC_JS_TOOLCHAIN" = true ]; then
+  install_zero_node_js_css_toolchain
+fi
+
 if [ "$FORCE_FERROUSX" = true ] || [ -x "${BIN_FERROUSX}" ]; then
   update_ferrousx_from_github
 fi
@@ -1021,3 +1053,6 @@ if [ "$FORCE_NGINX" = true ] || systemctl is-active --quiet nginx.service 2>/dev
 fi
 
 echo -e "${GREEN}${BOLD}Update completed cleanly. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
+if [ -x /usr/local/bin/bun ] || [ -x /usr/local/bin/tailwindcss ]; then
+  echo -e "${CYAN}Zero-Node.js JS/CSS Toolchain: bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'missing') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'missing') (Node.js NOT required).${NC}"
+fi

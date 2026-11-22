@@ -50,6 +50,10 @@ pub enum AllowedBinary {
     Ip,
     Phpenmod,
     Phpdismod,
+    Bun,
+    Deno,
+    TailwindCli,
+    Git,
 }
 
 impl AllowedBinary {
@@ -96,6 +100,10 @@ impl AllowedBinary {
             Self::Ip => "ip",
             Self::Phpenmod => "phpenmod",
             Self::Phpdismod => "phpdismod",
+            Self::Bun => "bun",
+            Self::Deno => "deno",
+            Self::TailwindCli => "tailwindcss",
+            Self::Git => "git",
         }
     }
 
@@ -148,6 +156,10 @@ impl AllowedBinary {
             "ip" => Some(Self::Ip),
             "phpenmod" => Some(Self::Phpenmod),
             "phpdismod" => Some(Self::Phpdismod),
+            "bun" => Some(Self::Bun),
+            "deno" => Some(Self::Deno),
+            "tailwindcss" => Some(Self::TailwindCli),
+            "git" => Some(Self::Git),
             _ => None,
         }
     }
@@ -195,12 +207,26 @@ impl AllowedBinary {
             Self::Ip => &["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"],
             Self::Phpenmod => &["/usr/sbin/phpenmod"],
             Self::Phpdismod => &["/usr/sbin/phpdismod"],
+            Self::Bun => &["/usr/local/bin/bun", "/root/.bun/bin/bun", "/usr/bin/bun"],
+            Self::Deno => &["/usr/local/bin/deno", "/root/.deno/bin/deno", "/usr/bin/deno"],
+            Self::TailwindCli => &["/usr/local/bin/tailwindcss", "/usr/bin/tailwindcss"],
+            Self::Git => &["/usr/bin/git", "/usr/local/bin/git"],
         }
     }
 
     #[must_use]
     pub fn is_available(self) -> bool {
         self.resolve_path().is_ok()
+    }
+
+    #[must_use]
+    pub fn resolved_path_str(self) -> Option<&'static str> {
+        for candidate in self.candidate_paths() {
+            if Path::new(candidate).is_file() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 
     fn resolve_path(self) -> Result<&'static Path, PanelError> {

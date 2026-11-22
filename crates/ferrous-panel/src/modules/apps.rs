@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const SYSTEMD_TIMEOUT: Duration = Duration::from_secs(20);
+const BUILD_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn is_static_runtime(fw: WebsiteRuntimeType) -> bool {
     matches!(
@@ -29,11 +30,434 @@ fn is_static_runtime(fw: WebsiteRuntimeType) -> bool {
     )
 }
 
+fn is_js_ssr_runtime(fw: WebsiteRuntimeType) -> bool {
+    matches!(
+        fw,
+        WebsiteRuntimeType::NextJs15
+            | WebsiteRuntimeType::Nuxt3
+            | WebsiteRuntimeType::SvelteKit2
+            | WebsiteRuntimeType::Astro5
+            | WebsiteRuntimeType::RemixReactRouterV7
+            | WebsiteRuntimeType::NestJs10
+            | WebsiteRuntimeType::BunElysiaJs
+            | WebsiteRuntimeType::Deno2
+            | WebsiteRuntimeType::NodeJsNextJs
+    )
+}
+
+fn is_js_or_css_runtime(fw: WebsiteRuntimeType) -> bool {
+    is_static_runtime(fw) || is_js_ssr_runtime(fw)
+}
+
 fn is_php_runtime(fw: WebsiteRuntimeType) -> bool {
     matches!(
         fw,
         WebsiteRuntimeType::Php83Fpm | WebsiteRuntimeType::PhpSymfony7
     )
+}
+
+fn bun_binary_path() -> &'static str {
+    AllowedBinary::Bun
+        .resolved_path_str()
+        .unwrap_or("/usr/local/bin/bun")
+}
+
+fn deno_binary_path() -> &'static str {
+    AllowedBinary::Deno
+        .resolved_path_str()
+        .unwrap_or("/usr/local/bin/deno")
+}
+
+/// Automatically converts legacy `node`/`npm`/`npx` commands (or empty JS exec commands)
+/// into Zero-Node.js native Bun/Deno commands so JS/TS frameworks run without installing Node.js.
+fn normalize_zero_node_exec_command(
+    framework: WebsiteRuntimeType,
+    raw_exec: &str,
+    working_dir: &Path,
+) -> (String, Option<String>) {
+    let trimmed = raw_exec.trim();
+    if !is_js_ssr_runtime(framework) {
+        return (trimmed.to_string(), None);
+    }
+
+    let bun = bun_binary_path();
+    let deno = deno_binary_path();
+    let dir_str = working_dir.display();
+
+    if trimmed.is_empty() || trimmed == "/usr/bin/env" {
+        let default_cmd = match framework {
+            WebsiteRuntimeType::NextJs15 | WebsiteRuntimeType::NodeJsNextJs => {
+                if working_dir.join(".next/standalone/server.js").is_file() {
+                    format!("{bun} {dir_str}/.next/standalone/server.js")
+                } else {
+                    format!("{bun} --bun run start")
+                }
+            }
+            WebsiteRuntimeType::Nuxt3 => format!("{bun} {dir_str}/.output/server/index.mjs"),
+            WebsiteRuntimeType::SvelteKit2 => format!("{bun} {dir_str}/build/index.js"),
+            WebsiteRuntimeType::Astro5 => format!("{bun} {dir_str}/dist/server/entry.mjs"),
+            WebsiteRuntimeType::RemixReactRouterV7 => {
+                format!("{bun} x react-router-serve {dir_str}/build/server/index.js")
+            }
+            WebsiteRuntimeType::NestJs10 => format!("{bun} {dir_str}/dist/main.js"),
+            WebsiteRuntimeType::BunElysiaJs => format!("{bun} run {dir_str}/src/index.ts"),
+            WebsiteRuntimeType::Deno2 => {
+                format!("{deno} run --allow-net --allow-env --allow-read {dir_str}/main.ts")
+            }
+            _ => format!("{bun} run start"),
+        };
+        return (
+            default_cmd.clone(),
+            Some(format!(
+                "Zero-Node.js runtime configured automatically: {default_cmd}"
+            )),
+        );
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let first = parts.next().unwrap_or("");
+    let rest: Vec<&str> = parts.collect();
+    let first_name = Path::new(first)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(first);
+
+    match first_name {
+        "node" | "nodejs" => {
+            let rewritten = if rest.is_empty() {
+                format!("{bun} run start")
+            } else {
+                format!("{bun} {}", rest.join(" "))
+            };
+            (
+                rewritten.clone(),
+                Some(format!(
+                    "Zero-Node.js mode: translated Node.js command -> {rewritten}"
+                )),
+            )
+        }
+        "npm" | "pnpm" | "yarn" => {
+            let rewritten = if rest.is_empty() {
+                format!("{bun} run start")
+            } else if rest.first().copied() == Some("start") {
+                format!("{bun} --bun run start")
+            } else {
+                format!("{bun} {}", rest.join(" "))
+            };
+            (
+                rewritten.clone(),
+                Some(format!(
+                    "Zero-Node.js mode: translated {first_name} command -> {rewritten}"
+                )),
+            )
+        }
+        "npx" => {
+            let rewritten = if rest.is_empty() {
+                format!("{bun} run start")
+            } else {
+                format!("{bun} x {}", rest.join(" "))
+            };
+            (
+                rewritten.clone(),
+                Some(format!(
+                    "Zero-Node.js mode: translated npx command -> {rewritten}"
+                )),
+            )
+        }
+        "bun" => (
+            if rest.is_empty() {
+                format!("{bun} run start")
+            } else {
+                format!("{bun} {}", rest.join(" "))
+            },
+            None,
+        ),
+        "deno" => (
+            if rest.is_empty() {
+                format!("{deno} run --allow-net --allow-env --allow-read main.ts")
+            } else {
+                format!("{deno} {}", rest.join(" "))
+            },
+            None,
+        ),
+        _ => (trimmed.to_string(), None),
+    }
+}
+
+fn ensure_default_js_envs(
+    framework: WebsiteRuntimeType,
+    internal_port: u16,
+    envs: &mut Vec<(String, String)>,
+) {
+    if !is_js_ssr_runtime(framework) {
+        return;
+    }
+    let port_str = internal_port.to_string();
+    let defaults = [
+        ("PORT", port_str.as_str()),
+        ("HOST", "127.0.0.1"),
+        ("HOSTNAME", "127.0.0.1"),
+        ("NITRO_PORT", port_str.as_str()),
+        ("NITRO_HOST", "127.0.0.1"),
+        ("NODE_ENV", "production"),
+    ];
+    for (k, v) in defaults {
+        if !envs.iter().any(|(ek, _)| ek == k) {
+            envs.push((k.to_string(), v.to_string()));
+        }
+    }
+}
+
+/// Resolves the effective static output directory (e.g. `dist/`, `build/`, `out/`, `.output/public`)
+/// inside `working_dir` for zero-Node.js JS/CSS frameworks served directly by FerrousX/Nginx.
+fn resolve_effective_doc_root(
+    working_dir: &Path,
+    run_sub_dir: &str,
+    framework: WebsiteRuntimeType,
+) -> PathBuf {
+    let trimmed = run_sub_dir.trim().trim_start_matches('/').trim_end_matches('/');
+    if !trimmed.is_empty()
+        && !trimmed.contains("..")
+        && !trimmed.contains('\0')
+        && (is_static_runtime(framework) || is_php_runtime(framework))
+    {
+        let explicit = working_dir.join(trimmed);
+        if explicit.is_dir() && explicit.starts_with(working_dir) {
+            if is_php_runtime(framework) || explicit.join("index.html").is_file() {
+                return explicit;
+            }
+        }
+    }
+
+    if is_static_runtime(framework) {
+        for candidate in ["dist", "build", "out", ".output/public", "public"] {
+            let sub = working_dir.join(candidate);
+            if sub.is_dir() && sub.join("index.html").is_file() {
+                return sub;
+            }
+        }
+    }
+
+    working_dir.to_path_buf()
+}
+
+fn package_json_has_script(working_dir: &Path, script_name: &str) -> bool {
+    let pkg_path = working_dir.join("package.json");
+    let Ok(raw) = std::fs::read_to_string(&pkg_path) else {
+        return false;
+    };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    val.get("scripts")
+        .and_then(|s| s.get(script_name))
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn find_tailwind_input_output(working_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    const INPUT_CANDIDATES: &[(&str, &str)] = &[
+        ("src/input.css", "dist/output.css"),
+        ("input.css", "output.css"),
+        ("styles/input.css", "styles/output.css"),
+        ("assets/input.css", "assets/output.css"),
+        ("src/styles.css", "dist/styles.css"),
+    ];
+    for (inp, out) in INPUT_CANDIDATES {
+        let inp_path = working_dir.join(inp);
+        if inp_path.is_file() {
+            let out_path = working_dir.join(out);
+            return Some((inp_path, out_path));
+        }
+    }
+    None
+}
+
+/// Executes a real Zero-Node.js JS/TS/CSS build directly via allowlisted native binaries
+/// (`bun`, `tailwindcss` standalone CLI, or `deno`) without requiring Node.js/npm on the VPS.
+async fn run_zero_node_js_css_build(
+    working_dir: &Path,
+    framework: WebsiteRuntimeType,
+    executor: &dyn CommandExecutor,
+) -> Vec<String> {
+    let mut logs = Vec::new();
+    if !is_js_or_css_runtime(framework) {
+        return logs;
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let has_package_json = working_dir.join("package.json").is_file();
+    let has_deno_json =
+        working_dir.join("deno.json").is_file() || working_dir.join("deno.jsonc").is_file();
+    let tailwind_pair = find_tailwind_input_output(working_dir);
+
+    if has_package_json {
+        if executor.is_binary_available(AllowedBinary::Bun) {
+            logs.push(format!(
+                "[{now}] Zero-Node.js build: installing dependencies via Bun (no Node.js required)..."
+            ));
+            match executor
+                .run_with_env(
+                    AllowedBinary::Bun,
+                    &["install", "--no-progress"],
+                    &[("NODE_ENV", "development")],
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                Ok(out) if out.success => {
+                    logs.push(format!(
+                        "[{}] Bun install succeeded.",
+                        Utc::now().to_rfc3339()
+                    ));
+                    if package_json_has_script(working_dir, "build") {
+                        match executor
+                            .run_with_env(
+                                AllowedBinary::Bun,
+                                &["run", "build"],
+                                &[("NODE_ENV", "production")],
+                                Some(working_dir),
+                                BUILD_TIMEOUT,
+                            )
+                            .await
+                        {
+                            Ok(build_out) if build_out.success => {
+                                logs.push(format!(
+                                    "[{}] Zero-Node.js framework build (`bun run build`) completed cleanly.",
+                                    Utc::now().to_rfc3339()
+                                ));
+                            }
+                            Ok(build_out) => {
+                                let detail = if build_out.stderr.is_empty() {
+                                    build_out.stdout
+                                } else {
+                                    build_out.stderr
+                                };
+                                let brief: String = detail.chars().take(400).collect();
+                                logs.push(format!(
+                                    "[{}] `bun run build` exited ({:?}): {brief}",
+                                    Utc::now().to_rfc3339(),
+                                    build_out.exit_code
+                                ));
+                            }
+                            Err(err) => {
+                                logs.push(format!(
+                                    "[{}] `bun run build` failed: {err}",
+                                    Utc::now().to_rfc3339()
+                                ));
+                            }
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let detail = if out.stderr.is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    };
+                    let brief: String = detail.chars().take(400).collect();
+                    logs.push(format!(
+                        "[{}] `bun install` exited ({:?}): {brief}",
+                        Utc::now().to_rfc3339(),
+                        out.exit_code
+                    ));
+                }
+                Err(err) => {
+                    logs.push(format!(
+                        "[{}] `bun install` error: {err}",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+            }
+        } else {
+            logs.push(format!(
+                "[{now}] Detected package.json — install Bun (Zero-Node.js) in Software Store or run update.sh to enable automatic JS/TS framework builds without Node.js."
+            ));
+        }
+    } else if has_deno_json && executor.is_binary_available(AllowedBinary::Deno) {
+        let deno_raw = std::fs::read_to_string(working_dir.join("deno.json"))
+            .or_else(|_| std::fs::read_to_string(working_dir.join("deno.jsonc")))
+            .unwrap_or_default();
+        if deno_raw.contains("\"build\"") {
+            match executor
+                .run_with_env(
+                    AllowedBinary::Deno,
+                    &["task", "build"],
+                    &[],
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                Ok(out) if out.success => logs.push(format!(
+                    "[{}] Zero-Node.js Deno build (`deno task build`) completed cleanly.",
+                    Utc::now().to_rfc3339()
+                )),
+                Ok(out) => logs.push(format!(
+                    "[{}] `deno task build` exited ({:?}): {}",
+                    Utc::now().to_rfc3339(),
+                    out.exit_code,
+                    out.stderr.chars().take(300).collect::<String>()
+                )),
+                Err(err) => logs.push(format!(
+                    "[{}] `deno task build` error: {err}",
+                    Utc::now().to_rfc3339()
+                )),
+            }
+        }
+    }
+
+    // Standalone Tailwind CSS v4 native binary (Rust Oxide engine — ZERO Node.js!)
+    if let Some((inp_path, out_path)) = tailwind_pair {
+        if !has_package_json && executor.is_binary_available(AllowedBinary::TailwindCli) {
+            if let Some(parent) = out_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let inp_str = inp_path.display().to_string();
+            let out_str = out_path.display().to_string();
+            match executor
+                .run_with_env(
+                    AllowedBinary::TailwindCli,
+                    &["-i", &inp_str, "-o", &out_str, "--minify"],
+                    &[],
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                Ok(out) if out.success => {
+                    logs.push(format!(
+                        "[{}] Tailwind CSS Standalone CLI compiled {} -> {} (Zero-Node.js, minified).",
+                        Utc::now().to_rfc3339(),
+                        inp_path.display(),
+                        out_path.display()
+                    ));
+                }
+                Ok(out) => {
+                    let detail = if out.stderr.is_empty() {
+                        out.stdout
+                    } else {
+                        out.stderr
+                    };
+                    logs.push(format!(
+                        "[{}] Tailwind CSS standalone build exited ({:?}): {}",
+                        Utc::now().to_rfc3339(),
+                        out.exit_code,
+                        detail.chars().take(300).collect::<String>()
+                    ));
+                }
+                Err(err) => {
+                    logs.push(format!(
+                        "[{}] Tailwind CSS standalone build error: {err}",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+            }
+        }
+    }
+
+    logs
 }
 
 fn default_rewrite_preset(fw: WebsiteRuntimeType) -> RewritePresetType {
@@ -402,6 +826,80 @@ pub async fn deploy_app(
         WebServerEngineType::Nginx => EngineKind::Nginx,
     });
 
+    let mut initial_logs = Vec::new();
+    let trimmed_repo = req.git_repo_url.trim();
+    if !trimmed_repo.is_empty()
+        && (trimmed_repo.starts_with("https://") || trimmed_repo.starts_with("http://"))
+        && !safe_working.as_path().join(".git").exists()
+        && webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Git)
+    {
+        let dir_empty = std::fs::read_dir(safe_working.as_path())
+            .map(|mut rd| rd.next().is_none())
+            .unwrap_or(false);
+        if dir_empty {
+            let branch = if req.git_branch.trim().is_empty() {
+                "main"
+            } else {
+                req.git_branch.trim()
+            };
+            let dest_str = safe_working.as_path().display().to_string();
+            match webserver
+                .executor()
+                .run(
+                    AllowedBinary::Git,
+                    &[
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        branch,
+                        trimmed_repo,
+                        &dest_str,
+                    ],
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                Ok(out) if out.success => {
+                    initial_logs.push(format!(
+                        "[{}] Cloned repository {} (branch '{}')",
+                        Utc::now().to_rfc3339(),
+                        trimmed_repo,
+                        branch
+                    ));
+                }
+                Ok(out) => {
+                    initial_logs.push(format!(
+                        "[{}] Git clone skipped/failed ({:?}): {}",
+                        Utc::now().to_rfc3339(),
+                        out.exit_code,
+                        out.stderr.chars().take(240).collect::<String>()
+                    ));
+                }
+                Err(err) => {
+                    initial_logs.push(format!(
+                        "[{}] Git clone skipped: {err}",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+            }
+        }
+    }
+
+    // Run Zero-Node.js JS/TS/CSS build (Bun / Deno / Standalone Tailwind CLI) if source exists.
+    let build_logs = run_zero_node_js_css_build(
+        safe_working.as_path(),
+        req.framework,
+        webserver.executor().as_ref(),
+    )
+    .await;
+    initial_logs.extend(build_logs);
+
+    let effective_doc_root =
+        resolve_effective_doc_root(safe_working.as_path(), &req.run_sub_dir, req.framework);
+
     // Build and apply web server site configuration FIRST (validates nginx -t / ferrousx-bin --check-config).
     // Never write ssl_certificate directives before the real PEM files exist on disk (prevents `nginx -t` failure).
     let cert_ready = webserver
@@ -413,7 +911,7 @@ pub async fn deploy_app(
     let mut spec = build_site_spec_for_app(
         domain.clone(),
         parsed_aliases.clone(),
-        safe_working.as_path(),
+        &effective_doc_root,
         &config.wwwroot,
         req.framework,
         req.internal_port,
@@ -426,8 +924,6 @@ pub async fn deploy_app(
     let mut rendered = webserver
         .upsert_and_apply_site(&spec, preferred_engine)
         .await?;
-
-    let mut initial_logs = Vec::new();
     if req.ssl_enabled && !effective_ssl {
         if webserver
             .executor()
@@ -475,8 +971,16 @@ pub async fn deploy_app(
     }
 
     let mut systemd_unit = String::new();
+    let mut effective_exec_command = req.exec_command.clone();
     if !is_static_runtime(req.framework) && !is_php_runtime(req.framework) {
-        let exec_start = validate_exec_start(&req.exec_command)?;
+        let (normalized_exec, rewrite_note) =
+            normalize_zero_node_exec_command(req.framework, &req.exec_command, safe_working.as_path());
+        if let Some(note) = rewrite_note {
+            initial_logs.push(format!("[{}] {note}", Utc::now().to_rfc3339()));
+        }
+        let exec_start = validate_exec_start(&normalized_exec)?;
+        effective_exec_command = exec_start.clone();
+        ensure_default_js_envs(req.framework, req.internal_port, &mut clean_envs);
         let unit = unit_name_for_domain(&domain)?;
         let unit_file = unit.unit_file_name();
         let unit_path = config.systemd_unit_dir.join(&unit_file);
@@ -597,7 +1101,7 @@ pub async fn deploy_app(
         internal_port: req.internal_port,
         working_dir: safe_working.as_path().display().to_string(),
         run_sub_dir: req.run_sub_dir,
-        exec_command: req.exec_command,
+        exec_command: effective_exec_command,
         workers: req.workers,
         memory_limit_mb: req.memory_limit_mb,
         memory_used_mb: 0,
@@ -667,9 +1171,52 @@ pub async fn app_action(
     }
 
     if action == "rebuild" {
+        let safe_working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+        let build_logs = run_zero_node_js_css_build(
+            safe_working.as_path(),
+            app.framework,
+            webserver.executor().as_ref(),
+        )
+        .await;
+        app.logs.extend(build_logs);
+
+        if is_static_runtime(app.framework) {
+            if let Ok(domain) = Domain::parse(&app.domain) {
+                let mut aliases = Vec::new();
+                for a in &app.aliases {
+                    if let Ok(d) = Domain::parse(a) {
+                        aliases.push(d);
+                    }
+                }
+                let effective_root = resolve_effective_doc_root(
+                    safe_working.as_path(),
+                    &app.run_sub_dir,
+                    app.framework,
+                );
+                if let Ok(mut spec) = build_site_spec_for_app(
+                    domain,
+                    aliases,
+                    &effective_root,
+                    &config.wwwroot,
+                    app.framework,
+                    app.internal_port,
+                    app.ssl_enabled,
+                    app.force_https,
+                ) {
+                    spec.http3_quic = app.http3_quic;
+                    spec.websocket_enabled = app.websocket_enabled;
+                    spec.rate_limit_rps = app.rate_limit_rps;
+                    if let Ok(rendered) = webserver.upsert_and_apply_site(&spec, None).await {
+                        app.url_rewrite_rules = rendered.content;
+                        app.nginx_vhost = rendered.config_path.display().to_string();
+                    }
+                }
+            }
+        }
+
         app.last_deploy_time = Utc::now().to_rfc3339();
         app.logs.push(format!(
-            "[{}] Rebuild pipeline completed for {} ({:?})",
+            "[{}] Zero-Node.js rebuild pipeline completed for {} ({:?})",
             app.last_deploy_time, app.domain, app.framework
         ));
         if !app.systemd_unit.is_empty()
@@ -723,6 +1270,120 @@ pub async fn git_deploy_app(
 
     let safe_working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
     std::fs::create_dir_all(safe_working.as_path())?;
+
+    let branch = if app.git_branch.trim().is_empty() {
+        "main"
+    } else {
+        app.git_branch.trim()
+    };
+
+    if webserver
+        .executor()
+        .is_binary_available(AllowedBinary::Git)
+    {
+        if safe_working.as_path().join(".git").exists() {
+            match webserver
+                .executor()
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["pull", "--ff-only", "origin", branch],
+                    &[],
+                    Some(safe_working.as_path()),
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                Ok(out) if out.success => {
+                    app.logs.push(format!(
+                        "[{}] git pull --ff-only origin {branch} succeeded.",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+                Ok(out) => {
+                    app.logs.push(format!(
+                        "[{}] git pull returned ({:?}): {}",
+                        Utc::now().to_rfc3339(),
+                        out.exit_code,
+                        out.stderr.chars().take(240).collect::<String>()
+                    ));
+                }
+                Err(err) => {
+                    app.logs.push(format!(
+                        "[{}] git pull skipped: {err}",
+                        Utc::now().to_rfc3339()
+                    ));
+                }
+            }
+        } else if !app.git_repo_url.trim().is_empty()
+            && (app.git_repo_url.trim().starts_with("https://")
+                || app.git_repo_url.trim().starts_with("http://"))
+        {
+            let dir_empty = std::fs::read_dir(safe_working.as_path())
+                .map(|mut rd| rd.next().is_none())
+                .unwrap_or(false);
+            if dir_empty {
+                let dest_str = safe_working.as_path().display().to_string();
+                let _ = webserver
+                    .executor()
+                    .run(
+                        AllowedBinary::Git,
+                        &[
+                            "clone",
+                            "--depth",
+                            "1",
+                            "--branch",
+                            branch,
+                            app.git_repo_url.trim(),
+                            &dest_str,
+                        ],
+                        BUILD_TIMEOUT,
+                    )
+                    .await;
+            }
+        }
+    }
+
+    let build_logs = run_zero_node_js_css_build(
+        safe_working.as_path(),
+        app.framework,
+        webserver.executor().as_ref(),
+    )
+    .await;
+    app.logs.extend(build_logs);
+
+    if is_static_runtime(app.framework) {
+        if let Ok(domain) = Domain::parse(&app.domain) {
+            let mut aliases = Vec::new();
+            for a in &app.aliases {
+                if let Ok(d) = Domain::parse(a) {
+                    aliases.push(d);
+                }
+            }
+            let effective_root = resolve_effective_doc_root(
+                safe_working.as_path(),
+                &app.run_sub_dir,
+                app.framework,
+            );
+            if let Ok(mut spec) = build_site_spec_for_app(
+                domain,
+                aliases,
+                &effective_root,
+                &config.wwwroot,
+                app.framework,
+                app.internal_port,
+                app.ssl_enabled,
+                app.force_https,
+            ) {
+                spec.http3_quic = app.http3_quic;
+                spec.websocket_enabled = app.websocket_enabled;
+                spec.rate_limit_rps = app.rate_limit_rps;
+                if let Ok(rendered) = webserver.upsert_and_apply_site(&spec, None).await {
+                    app.url_rewrite_rules = rendered.content;
+                    app.nginx_vhost = rendered.config_path.display().to_string();
+                }
+            }
+        }
+    }
 
     let git_head_path = safe_working.as_path().join(".git/HEAD");
     let commit_ref = if let Ok(raw_head) = std::fs::read_to_string(&git_head_path) {
@@ -791,7 +1452,11 @@ pub async fn update_app_config(
         let unit_file = unit.unit_file_name();
         let unit_path = config.systemd_unit_dir.join(&unit_file);
         let safe_working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
-        let exec_start = validate_exec_start(&app.exec_command)?;
+        let (normalized_exec, _) =
+            normalize_zero_node_exec_command(app.framework, &app.exec_command, safe_working.as_path());
+        let exec_start = validate_exec_start(&normalized_exec)?;
+        app.exec_command = exec_start.clone();
+        ensure_default_js_envs(app.framework, app.internal_port, &mut validated_envs);
         let content = render_systemd_unit(
             &app.name,
             &domain,
@@ -900,10 +1565,12 @@ pub async fn update_site_settings(
     }
 
     let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+    let effective_doc_root =
+        resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
     let mut spec = build_site_spec_for_app(
         domain,
         aliases,
-        working.as_path(),
+        &effective_doc_root,
         &config.wwwroot,
         app.framework,
         app.internal_port,
@@ -969,10 +1636,12 @@ pub async fn renew_ssl(
     let updated_cert = webserver.ssl.read_cert_status(&domain).await?;
     if updated_cert.present && !app.ssl_enabled {
         let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+        let effective_doc_root =
+            resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
         let mut spec = build_site_spec_for_app(
             domain,
             aliases,
-            working.as_path(),
+            &effective_doc_root,
             &config.wwwroot,
             app.framework,
             app.internal_port,
