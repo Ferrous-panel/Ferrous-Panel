@@ -34,6 +34,7 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
     }
     let bind_addr = config.bind.clone();
     let bind_port = config.port;
+    let pma_port = config.pma_port;
     let (state, initial_password) =
         AppState::init(config).context("failed to initialize ferrous-panel state")?;
 
@@ -55,7 +56,12 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
     }
 
     let shared_state = web::Data::new(state);
-    tracing::info!(bind = %bind_addr, port = bind_port, "starting ferrous-panel control plane");
+    tracing::info!(
+        bind = %bind_addr,
+        port = bind_port,
+        pma_port = pma_port,
+        "starting ferrous-panel control plane + built-in Pure-Rust FerrousAdmin (/phpadmin/)"
+    );
 
     // Record initial real telemetry point and sample every 60s for real historical chart data.
     let _ = shared_state.record_telemetry_sample(true);
@@ -72,15 +78,37 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         }
     });
 
-    HttpServer::new(move || {
+    let mut server = HttpServer::new(move || {
         let app_state = shared_state.clone();
         App::new().configure(move |cfg| configure_app(cfg, app_state))
     })
     .bind((bind_addr.as_str(), bind_port))
-    .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"))?
-    .run()
-    .await
-    .context("http server terminated unexpectedly")?;
+    .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"))?;
+
+    if pma_port > 0 && pma_port != bind_port && !is_reserved_website_port(pma_port) {
+        match server.bind(("127.0.0.1", pma_port)) {
+            Ok(bound) => {
+                server = bound;
+                tracing::info!(
+                    pma_bind = "127.0.0.1",
+                    pma_port = pma_port,
+                    "Pure-Rust FerrousAdmin (/phpadmin/) loopback listener active (Zero PHP)"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    pma_port = pma_port,
+                    error = %err,
+                    "could not bind Pure-Rust FerrousAdmin loopback port 127.0.0.1:{pma_port}; /phpadmin/ remains available on main panel port {bind_port}"
+                );
+            }
+        }
+    }
+
+    server
+        .run()
+        .await
+        .context("http server terminated unexpectedly")?;
 
     Ok(())
 }

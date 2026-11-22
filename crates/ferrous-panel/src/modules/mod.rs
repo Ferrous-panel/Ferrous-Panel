@@ -11,7 +11,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -42,14 +42,18 @@ pub struct CronRunMeta {
 #[derive(Debug)]
 pub struct ModuleStore {
     conn: Mutex<Connection>,
+    data_dir: PathBuf,
 }
 
 impl ModuleStore {
     pub fn open(db_path: &Path) -> Result<Self, PanelError> {
-        if let Some(parent) = db_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        let data_dir = db_path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        if !data_dir.as_os_str().is_empty() && data_dir != Path::new(".") {
+            std::fs::create_dir_all(&data_dir)?;
         }
         let conn = Connection::open(db_path)?;
         conn.execute_batch(
@@ -109,7 +113,18 @@ impl ModuleStore {
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
+            data_dir,
         })
+    }
+
+    #[must_use]
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    #[must_use]
+    pub fn sqlite_databases_dir(&self) -> PathBuf {
+        self.data_dir.join("databases")
     }
 
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>, PanelError> {

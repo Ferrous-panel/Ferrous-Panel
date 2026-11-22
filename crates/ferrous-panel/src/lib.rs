@@ -6,6 +6,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod modules;
+pub mod pma_web;
 pub mod state;
 pub mod system;
 pub mod web;

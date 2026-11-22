@@ -673,19 +673,27 @@ export function usePanelController(
     password?: string;
     collation: string;
     linkedAppId: string;
-  }) => {
+  }): Promise<{ ok: boolean; error?: string }> => {
     try {
       const res = await authenticatedFetch('/api/databases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
+      const body = await res.json().catch(() => null);
       if (res.ok) {
-        const dbs = await res.json();
-        setDatabases(Array.isArray(dbs) ? dbs : []);
+        setDatabases(Array.isArray(body) ? body : []);
+        return { ok: true };
       }
+      return {
+        ok: false,
+        error:
+          (body && (body.error || body.message)) ||
+          `HTTP ${res.status} — không thể tạo database`
+      };
     } catch (err) {
       console.error('[FerrousPanel] handleCreateDatabase error:', err);
+      return { ok: false, error: String(err) };
     }
   };
 
@@ -749,6 +757,119 @@ export function usePanelController(
         affectedRows: 0,
         columns: ['error'],
         rows: [{ error: 'Failed to execute query: Network error or server timeout' }],
+        error: String(err)
+      };
+    }
+  };
+
+  const handleBrowseTableRows = async (
+    dbId: string,
+    table: string,
+    limit = 100,
+    offset = 0
+  ): Promise<SqlQueryResponse> => {
+    try {
+      const res = await authenticatedFetch(
+        `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
+          table
+        )}/rows?limit=${limit}&offset=${offset}`
+      );
+      return (await res.json()) as SqlQueryResponse;
+    } catch (err) {
+      return {
+        success: false,
+        commandTag: 'ERROR',
+        executionTimeMs: 0,
+        affectedRows: 0,
+        columns: [],
+        rows: [],
+        error: String(err)
+      };
+    }
+  };
+
+  const handleDropTable = async (dbId: string, table: string) => {
+    try {
+      const res = await authenticatedFetch(
+        `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
+          table
+        )}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) {
+        const dbs = await res.json();
+        setDatabases(Array.isArray(dbs) ? dbs : []);
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleDropTable error:', err);
+    }
+  };
+
+  const handleTruncateTable = async (dbId: string, table: string) => {
+    try {
+      const res = await authenticatedFetch(
+        `/api/databases/${encodeURIComponent(dbId)}/tables/${encodeURIComponent(
+          table
+        )}/truncate`,
+        { method: 'POST' }
+      );
+      if (res.ok) {
+        const dbs = await res.json();
+        setDatabases(Array.isArray(dbs) ? dbs : []);
+      }
+    } catch (err) {
+      console.error('[FerrousPanel] handleTruncateTable error:', err);
+    }
+  };
+
+  const handleExportDatabaseSql = async (
+    dbId: string
+  ): Promise<{ ok: boolean; sql?: string; error?: string }> => {
+    try {
+      const res = await authenticatedFetch(
+        `/api/databases/${encodeURIComponent(dbId)}/export`
+      );
+      const body = await res.json().catch(() => null);
+      if (res.ok && body && typeof body.sql === 'string') {
+        return { ok: true, sql: body.sql };
+      }
+      return {
+        ok: false,
+        error: (body && (body.error || body.message)) || `HTTP ${res.status}`
+      };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  };
+
+  const handleImportDatabaseSql = async (
+    dbId: string,
+    sql: string
+  ): Promise<SqlQueryResponse> => {
+    try {
+      const res = await authenticatedFetch(
+        `/api/databases/${encodeURIComponent(dbId)}/import`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sql })
+        }
+      );
+      const data: SqlQueryResponse = await res.json();
+      const dbRes = await authenticatedFetch('/api/databases');
+      if (dbRes.ok) {
+        const dbs = await dbRes.json();
+        setDatabases(Array.isArray(dbs) ? dbs : []);
+      }
+      return data;
+    } catch (err) {
+      return {
+        success: false,
+        commandTag: 'IMPORT_ERROR',
+        executionTimeMs: 0,
+        affectedRows: 0,
+        columns: [],
+        rows: [],
         error: String(err)
       };
     }
@@ -1822,6 +1943,11 @@ export function usePanelController(
     handleChangeDatabasePassword,
     handleDeleteDatabase,
     handleExecuteSqlQuery,
+    handleBrowseTableRows,
+    handleDropTable,
+    handleTruncateTable,
+    handleExportDatabaseSql,
+    handleImportDatabaseSql,
     handleUpdateMysqlConfig,
     handleAddMailDomain,
     handleCreateMailbox,

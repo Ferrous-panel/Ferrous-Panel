@@ -564,7 +564,12 @@ pub async fn create_backup(
         let dump_file = staging_dir.join("database.sql");
         let dump_str = dump_file.display().to_string();
 
-        if db_meta.engine.to_ascii_lowercase().contains("postgres") {
+        if db_meta.engine.to_ascii_lowercase().contains("sqlite") {
+            let sql_dump =
+                crate::modules::databases::export_database_sql(store, executor, &db_meta.id)
+                    .await?;
+            std::fs::write(&dump_file, sql_dump.as_bytes())?;
+        } else if db_meta.engine.to_ascii_lowercase().contains("postgres") {
             if !executor.is_binary_available(AllowedBinary::PgDump) {
                 let _ = std::fs::remove_dir_all(&staging_dir);
                 return Err(PanelError::Conflict(

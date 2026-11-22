@@ -18,6 +18,10 @@ pub struct Config {
     #[arg(long, env = "FERROUS_PORT", default_value_t = 8443)]
     pub port: u16,
 
+    /// Internal loopback TCP port for built-in Pure-Rust FerrousAdmin (/phpadmin/, 0 to disable).
+    #[arg(long, env = "FERROUS_PMA_PORT", default_value_t = 888)]
+    pub pma_port: u16,
+
     /// Persistent state directory (SQLite DB and 0600 credentials file).
     #[arg(long, env = "FERROUS_DATA_DIR", default_value = "/var/lib/ferrous-panel")]
     pub data_dir: PathBuf,
@@ -78,6 +82,7 @@ impl Config {
         Self {
             bind: "127.0.0.1".to_string(),
             port: 8443,
+            pma_port: 0,
             data_dir,
             wwwroot,
             admin_username: "admin_ferrous".to_string(),

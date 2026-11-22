@@ -704,154 +704,13 @@ ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 # [5/7] Configure Active Web Server Engine (Nginx or FerrousX) & phpMyAdmin Proxy
 # ==============================================================================
 setup_phpmyadmin_proxy() {
-  mkdir -p /etc/ferrousx /var/lib/phpmyadmin
-  chown www-data:www-data /var/lib/phpmyadmin 2>/dev/null || true
-
-  if [ -f "${FERROUSX_SRC_DIR}/scripts/pma-router.php" ]; then
-    install -m 0644 "${FERROUSX_SRC_DIR}/scripts/pma-router.php" /etc/ferrousx/pma-router.php
-  else
-    cat > /etc/ferrousx/pma-router.php <<'EOF_PMA_PHP'
-<?php
-// Managed by FerrousPanel — phpMyAdmin Internal Loopback Router (127.0.0.1:888)
-$remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
-if ($remoteAddr !== '127.0.0.1' && $remoteAddr !== '::1') {
-    http_response_code(403);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo '403 Forbidden: Direct external access to phpMyAdmin internal port is disabled.';
-    exit;
-}
-
-$docRoot = '/usr/share/phpmyadmin';
-$realDocRoot = realpath($docRoot);
-if ($realDocRoot === false) {
-    http_response_code(500);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo '500 Internal Server Error: phpMyAdmin directory not found.';
-    exit;
-}
-
-$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
-if (!is_string($uri) || $uri === '' || strpos($uri, "\0") !== false) {
-    http_response_code(400);
-    exit;
-}
-
-if (preg_match('#^/(phpadmin|phpmyadmin)(/.*)?$#i', $uri, $m)) {
-    $uri = isset($m[2]) && $m[2] !== '' ? $m[2] : '/';
-}
-
-if (
-    strpos($uri, '..') !== false ||
-    preg_match('#^/setup(/|$)#i', $uri) ||
-    preg_match('#/\.(ht|env|git)#i', $uri)
-) {
-    http_response_code(403);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo '403 Forbidden';
-    exit;
-}
-
-$target = $realDocRoot . $uri;
-if (is_dir($target)) {
-    $target = rtrim($target, '/') . '/index.php';
-}
-
-$realTarget = realpath($target);
-if (
-    $realTarget === false ||
-    ($realTarget !== $realDocRoot && strpos($realTarget, $realDocRoot . DIRECTORY_SEPARATOR) !== 0) ||
-    !is_file($realTarget)
-) {
-    http_response_code(404);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo '404 Not Found';
-    exit;
-}
-
-$ext = strtolower(pathinfo($realTarget, PATHINFO_EXTENSION));
-$staticMimes = [
-    'css'   => 'text/css; charset=utf-8',
-    'js'    => 'application/javascript; charset=utf-8',
-    'png'   => 'image/png',
-    'gif'   => 'image/gif',
-    'jpg'   => 'image/jpeg',
-    'jpeg'  => 'image/jpeg',
-    'svg'   => 'image/svg+xml',
-    'ico'   => 'image/x-icon',
-    'woff'  => 'font/woff',
-    'woff2' => 'font/woff2',
-    'ttf'   => 'font/ttf',
-    'json'  => 'application/json; charset=utf-8',
-];
-if (isset($staticMimes[$ext])) {
-    header('Content-Type: ' . $staticMimes[$ext]);
-    header('X-Content-Type-Options: nosniff');
-    readfile($realTarget);
-    return true;
-}
-
-if ($ext === 'php') {
-    chdir(dirname($realTarget));
-    $_SERVER['SCRIPT_FILENAME'] = $realTarget;
-    $_SERVER['SCRIPT_NAME'] = $uri;
-    $_SERVER['DOCUMENT_ROOT'] = $realDocRoot;
-    require $realTarget;
-    return true;
-}
-
-http_response_code(403);
-echo '403 Forbidden';
-return true;
-EOF_PMA_PHP
-    chmod 0644 /etc/ferrousx/pma-router.php
+  # Pure-Rust FerrousAdmin (/phpadmin/) is built directly into ferrous-panel (Actix-Web on 127.0.0.1:888).
+  # Stop and disable any legacy PHP phpMyAdmin service so port 888 is exclusively owned by Rust ferrous-panel.
+  if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
+    systemctl disable --now ferrous-pma.service 2>/dev/null || true
   fi
-
-  cat > /etc/systemd/system/ferrous-pma.service <<'EOF_PMA_SVC'
-[Unit]
-Description=FerrousPanel phpMyAdmin Internal Loopback Service (127.0.0.1:888 -> /phpadmin/)
-After=network.target mariadb.service mysql.service
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-User=www-data
-Group=www-data
-WorkingDirectory=/usr/share/phpmyadmin
-Environment="PHP_CLI_SERVER_WORKERS=4"
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-ExecStart=/usr/bin/php -S 127.0.0.1:888 -t /usr/share/phpmyadmin /etc/ferrousx/pma-router.php
-Restart=always
-RestartSec=2
-NoNewPrivileges=true
-PrivateTmp=true
-PrivateDevices=true
-ProtectHome=true
-ProtectSystem=strict
-ReadWritePaths=-/var/lib/phpmyadmin /tmp /var/tmp
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectKernelLogs=true
-ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-SystemCallArchitectures=native
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=ferrous-pma
-
-[Install]
-WantedBy=multi-user.target
-EOF_PMA_SVC
+  rm -f /etc/systemd/system/ferrous-pma.service /etc/ferrousx/pma-router.php 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
-
-  if [ -d /usr/share/phpmyadmin ] && [ -x /usr/bin/php ]; then
-    systemctl enable --now ferrous-pma.service 2>/dev/null || true
-    systemctl restart ferrous-pma.service 2>/dev/null || true
-  fi
 }
 
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
@@ -1181,7 +1040,7 @@ if [ "${PANEL_BIND}" = "127.0.0.1" ] || [ "${PANEL_BIND}" = "::1" ]; then
 else
   echo -e "  Internet Panel URL: ${BOLD}http://${VPS_PUBLIC_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}${NC}"
   echo -e "  Internal Panel URL: http://${VPS_LOCAL_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}"
-  echo -e "  phpMyAdmin Proxy  : http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}/phpadmin/ (backend 127.0.0.1:888)"
+  echo -e "  Rust SQL Admin    : http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}/phpadmin/ (100% Pure Rust on 127.0.0.1:888 · Zero PHP)"
 fi
 echo -e "  Admin Username    : ${BOLD}${ADMIN_USER}${NC}"
 if [ -n "${GENERATED_PASS}" ] && [[ "${GENERATED_PASS}" != "(already"* ]]; then

@@ -3139,7 +3139,6 @@ pub async fn watchdog_heal(
             "nginx.service",
             "mariadb.service",
             "postgresql.service",
-            "ferrous-pma.service",
             "php8.3-fpm.service",
         ];
         for unit in candidates {
@@ -4402,7 +4401,6 @@ pub async fn run_panel_cli_action(
                     "mariadb.service",
                     "postgresql.service",
                     "php8.3-fpm.service",
-                    "ferrous-pma.service",
                     "fail2ban.service",
                 ] {
                     let st = executor

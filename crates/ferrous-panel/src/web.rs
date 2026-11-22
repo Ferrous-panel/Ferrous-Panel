@@ -85,8 +85,13 @@ async fn serve_asset_or_spa(req: HttpRequest) -> HttpResponse {
     serve_index().await
 }
 
-/// Registers embedded static asset serving and SPA client-route fallback.
+/// Registers embedded static asset serving, Pure-Rust FerrousAdmin (`/phpadmin/`),
+/// and SPA client-route fallback.
 pub fn configure_web(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/").route(web::get().to(serve_index)))
+        .service(web::resource("/phpadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
+        .service(web::resource("/phpadmin/").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
+        .service(web::resource("/phpmyadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
+        .service(web::resource("/phpmyadmin/").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
         .service(web::resource("/{tail:.*}").route(web::get().to(serve_asset_or_spa)));
 }

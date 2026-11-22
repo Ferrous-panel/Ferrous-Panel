@@ -36,13 +36,25 @@ interface SqlDatabaseViewProps {
     name: string;
     engine: SqlDatabase['engine'];
     username: string;
-    password: string;
+    password?: string;
     collation: string;
     linkedAppId: string;
-  }) => Promise<void>;
+  }) => Promise<{ ok: boolean; error?: string } | void>;
   onChangeDatabasePassword?: (id: string, password: string) => Promise<void>;
   onDeleteDatabase: (id: string) => Promise<void>;
   onExecuteQuery: (dbId: string, query: string) => Promise<SqlQueryResponse>;
+  onBrowseTableRows?: (
+    dbId: string,
+    table: string,
+    limit?: number,
+    offset?: number
+  ) => Promise<SqlQueryResponse>;
+  onDropTable?: (dbId: string, table: string) => Promise<void>;
+  onTruncateTable?: (dbId: string, table: string) => Promise<void>;
+  onExportSql?: (
+    dbId: string
+  ) => Promise<{ ok: boolean; sql?: string; error?: string }>;
+  onImportSql?: (dbId: string, sql: string) => Promise<SqlQueryResponse>;
   onUpdateMysqlConfig: (
     payload: Partial<MysqlPhpMyAdminConfig>
   ) => Promise<void>;
@@ -93,6 +105,11 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   onChangeDatabasePassword,
   onDeleteDatabase,
   onExecuteQuery,
+  onBrowseTableRows,
+  onDropTable,
+  onTruncateTable,
+  onExportSql,
+  onImportSql,
   onUpdateMysqlConfig
 }) => {
   const [selectedDbId, setSelectedDbId] = useState<string>(
@@ -108,14 +125,26 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
     'tables' | 'query' | 'phpmyadmin' | 'mysql_tuning' | 'create'
   >('phpmyadmin');
 
-  // phpMyAdmin 5.2 internal workspace state
+  // Pure-Rust FerrousAdmin (phpMyAdmin Compatible) workspace state
   const [pmaActiveTab, setPmaActiveTab] = useState<
-    'databases' | 'structure' | 'browse' | 'sql' | 'new_table' | 'nginx_guard'
+    | 'databases'
+    | 'structure'
+    | 'browse'
+    | 'sql'
+    | 'new_table'
+    | 'import_sql'
+    | 'nginx_guard'
   >('databases');
   const [pmaQuickDbName, setPmaQuickDbName] = useState('');
+  const [pmaQuickDbEngine, setPmaQuickDbEngine] = useState<
+    SqlDatabase['engine']
+  >('SQLite 3 (WAL)');
   const [pmaQuickDbCollation, setPmaQuickDbCollation] = useState(
     'utf8mb4_unicode_ci'
   );
+  const [pmaImportSql, setPmaImportSql] = useState('');
+  const [pmaImporting, setPmaImporting] = useState(false);
+  const [pmaErrorBanner, setPmaErrorBanner] = useState<string | null>(null);
   const [pmaNewTableName, setPmaNewTableName] = useState('');
   const [pmaNewTableCol1, setPmaNewTableCol1] = useState('id');
   const [pmaNewTableCol2, setPmaNewTableCol2] = useState('title');
@@ -262,12 +291,34 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
     setTimeout(() => setCopiedConn(false), 2000);
   };
 
-  const handleExportSqlDump = () => {
+  const handleExportSqlDump = async () => {
     if (!activeDb) {
       setPmaQuickInsertToast(
         'Vui lòng tạo hoặc chọn ít nhất 1 Database trước khi xuất tệp .SQL'
       );
       setTimeout(() => setPmaQuickInsertToast(null), 3000);
+      return;
+    }
+    setPmaErrorBanner(null);
+    if (onExportSql) {
+      const res = await onExportSql(activeDb.id);
+      if (res.ok && typeof res.sql === 'string') {
+        const blob = new Blob([res.sql], {
+          type: 'application/sql;charset=utf-8'
+        });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${activeDb.name}_backup.sql`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setPmaQuickInsertToast(
+          `[FerrousAdmin Rust] Đã xuất bản dump .SQL thực tế cho "${activeDb.name}" (${res.sql.length.toLocaleString()} bytes).`
+        );
+        setTimeout(() => setPmaQuickInsertToast(null), 4000);
+        return;
+      }
+      setPmaErrorBanner(res.error || 'Không thể xuất file .SQL từ backend');
       return;
     }
     const lines: string[] = [
@@ -289,7 +340,7 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
       for (const row of tbl.rows) {
         const colNames = Object.keys(row).join(', ');
         const vals = Object.values(row)
-          .map((v) => (typeof v === 'string' ? `'${v}'` : String(v)))
+          .map((v) => (typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : String(v)))
           .join(', ');
         lines.push(
           `INSERT INTO ${tbl.tableName} (${colNames}) VALUES (${vals});`
@@ -359,18 +410,23 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newDbName.trim()) return;
+    setPmaErrorBanner(null);
     const finalPassword =
       newPassword.trim() || generateStrongSqlPassword();
-    await onCreateDatabase({
+    const result = await onCreateDatabase({
       name: newDbName.trim(),
       engine: newEngine,
       username: newUsername.trim() || `${newDbName.trim()}_user`,
-      password: finalPassword,
+      password: newEngine.includes('SQLite') ? undefined : finalPassword,
       collation: newCollation,
       linkedAppId: newLinkedAppId || apps[0]?.id || ''
     });
+    if (result && !result.ok) {
+      setPmaErrorBanner(result.error || 'Không thể tạo cơ sở dữ liệu');
+      return;
+    }
     setConfigSavedBanner(
-      `Đã tạo Database "${newDbName.trim()}" qua Rust DatabaseManager (src/database.rs) và đồng bộ vào phpMyAdmin 5.2!`
+      `Đã tạo Database "${newDbName.trim()}" (${newEngine}) qua Rust Engine và đồng bộ vào FerrousAdmin (/phpadmin/)!`
     );
     setTimeout(() => setConfigSavedBanner(null), 4500);
     setNewDbName('');
@@ -382,21 +438,28 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
 
   const handlePmaCreateQuickDatabase = async (e: React.FormEvent) => {
     e.preventDefault();
+    setPmaErrorBanner(null);
     const clean = pmaQuickDbName.trim().replace(/[^a-zA-Z0-9_]/g, '_');
     if (!clean) return;
     const autoUser = `${clean.slice(0, 16)}_usr`;
     const autoPass = generateStrongSqlPassword();
-    await onCreateDatabase({
+    const result = await onCreateDatabase({
       name: clean,
-      engine: 'MariaDB 11.4',
+      engine: pmaQuickDbEngine,
       username: autoUser,
-      password: autoPass,
-      collation: pmaQuickDbCollation,
+      password: pmaQuickDbEngine.includes('SQLite') ? undefined : autoPass,
+      collation: pmaQuickDbEngine.includes('SQLite')
+        ? 'UTF-8'
+        : pmaQuickDbCollation,
       linkedAppId: apps[0]?.id || ''
     });
+    if (result && !result.ok) {
+      setPmaErrorBanner(result.error || 'Không thể tạo cơ sở dữ liệu');
+      return;
+    }
     setPmaQuickDbName('');
     setPmaQuickInsertToast(
-      `[phpMyAdmin 5.2] CREATE DATABASE \`${clean}\` DEFAULT CHARACTER SET utf8mb4 COLLATE ${pmaQuickDbCollation}; (User: ${autoUser})`
+      `[FerrousAdmin Rust] Đã tạo DB "${clean}" (${pmaQuickDbEngine}) thành công!`
     );
     setPmaActiveTab('structure');
     setTimeout(() => setPmaQuickInsertToast(null), 4500);
@@ -405,19 +468,50 @@ export const SqlDatabaseView: React.FC<SqlDatabaseViewProps> = ({
   const handlePmaCreateTable = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeDb || !pmaNewTableName.trim()) return;
+    setPmaErrorBanner(null);
     const tName = pmaNewTableName.trim().replace(/[^a-zA-Z0-9_]/g, '_');
     const c1 = pmaNewTableCol1.trim() || 'id';
     const c2 = pmaNewTableCol2.trim() || 'title';
     const c3 = pmaNewTableCol3.trim() || 'created_at';
-    const q = `CREATE TABLE ${tName} (${c1} INT PRIMARY KEY, ${c2} VARCHAR(255) NOT NULL, ${c3} TIMESTAMP);`;
-    await onExecuteQuery(activeDb.id, q);
+    const isSqlite = activeDb.engine.toLowerCase().includes('sqlite');
+    const isPg = activeDb.engine.toLowerCase().includes('postgres');
+    const q = isSqlite
+      ? `CREATE TABLE ${tName} (${c1} INTEGER PRIMARY KEY AUTOINCREMENT, ${c2} TEXT NOT NULL, ${c3} TEXT DEFAULT (datetime('now')));`
+      : isPg
+      ? `CREATE TABLE ${tName} (${c1} BIGSERIAL PRIMARY KEY, ${c2} VARCHAR(255) NOT NULL, ${c3} TIMESTAMPTZ DEFAULT NOW());`
+      : `CREATE TABLE \`${tName}\` (\`${c1}\` BIGINT AUTO_INCREMENT PRIMARY KEY, \`${c2}\` VARCHAR(255) NOT NULL, \`${c3}\` TIMESTAMP DEFAULT CURRENT_TIMESTAMP);`;
+    const res = await onExecuteQuery(activeDb.id, q);
+    if (!res.success) {
+      setPmaErrorBanner(res.error || 'Tạo bảng thất bại');
+      return;
+    }
     setPmaNewTableName('');
     setSelectedTableName(tName);
     setPmaActiveTab('structure');
-    setPmaQuickInsertToast(
-      `[phpMyAdmin 5.2] Đã thực thi: ${q}`
-    );
+    setPmaQuickInsertToast(`[FerrousAdmin Rust] Đã tạo bảng "${tName}" thành công.`);
     setTimeout(() => setPmaQuickInsertToast(null), 4000);
+  };
+
+  const handlePmaImportSql = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeDb || !pmaImportSql.trim() || !onImportSql) return;
+    setPmaErrorBanner(null);
+    setPmaImporting(true);
+    try {
+      const res = await onImportSql(activeDb.id, pmaImportSql);
+      if (!res.success) {
+        setPmaErrorBanner(res.error || 'Import script SQL thất bại');
+        return;
+      }
+      setPmaImportSql('');
+      setPmaQuickInsertToast(
+        `[FerrousAdmin Rust] Đã nhập script .SQL vào "${activeDb.name}" (${res.executionTimeMs} ms).`
+      );
+      setTimeout(() => setPmaQuickInsertToast(null), 4500);
+      setPmaActiveTab('structure');
+    } finally {
+      setPmaImporting(false);
+    }
   };
 
   const handleRotatePasswordSubmit = async (e: React.FormEvent) => {
@@ -1040,6 +1134,17 @@ ${
                   </button>
                   <button
                     type="button"
+                    onClick={() => setPmaActiveTab('import_sql')}
+                    className={`px-3 py-1.5 rounded transition-colors cursor-pointer ${
+                      pmaActiveTab === 'import_sql'
+                        ? 'bg-orange-600 text-white font-semibold'
+                        : 'text-slate-300 hover:bg-slate-700'
+                    }`}
+                  >
+                    Import .SQL
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setPmaActiveTab('nginx_guard')}
                     className={`px-3 py-1.5 rounded transition-colors cursor-pointer ${
                       pmaActiveTab === 'nginx_guard'
@@ -1047,9 +1152,22 @@ ${
                         : 'text-slate-300 hover:bg-slate-700'
                     }`}
                   >
-                    Cấu hình Nginx (:888)
+                    Proxy (:888 Pure Rust)
                   </button>
                 </div>
+
+                {pmaErrorBanner && (
+                  <div className="px-4 py-2.5 bg-rose-600 text-white text-xs font-mono flex items-center justify-between">
+                    <span>Lỗi SQL: {pmaErrorBanner}</span>
+                    <button
+                      type="button"
+                      onClick={() => setPmaErrorBanner(null)}
+                      className="text-white/80 hover:text-white text-[11px] underline cursor-pointer"
+                    >
+                      Đóng
+                    </button>
+                  </div>
+                )}
 
                 {pmaQuickInsertToast && (
                   <div className="px-4 py-2.5 bg-emerald-600 text-white text-xs font-mono flex items-center justify-between">
@@ -1169,7 +1287,7 @@ ${
                         >
                           <div className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
                             <Plus className="w-3.5 h-3.5 text-orange-500" />
-                            Tạo Cơ sở dữ liệu mới trực tiếp trong phpMyAdmin 5.2
+                            Tạo Cơ sở dữ liệu mới trực tiếp trong FerrousAdmin (100% Pure Rust · Zero PHP)
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
                             <input
@@ -1178,8 +1296,23 @@ ${
                               value={pmaQuickDbName}
                               onChange={(e) => setPmaQuickDbName(e.target.value)}
                               placeholder="Nhập tên CSDL (VD: shop_db)..."
-                              className="flex-1 min-w-[160px] px-3 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                              className="flex-1 min-w-[150px] px-3 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
                             />
+                            <select
+                              value={pmaQuickDbEngine}
+                              onChange={(e) =>
+                                setPmaQuickDbEngine(
+                                  e.target.value as SqlDatabase['engine']
+                                )
+                              }
+                              className="px-2.5 py-1.5 text-xs font-mono rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-900 dark:text-white"
+                            >
+                              <option value="SQLite 3 (WAL)">
+                                SQLite 3 (WAL · Pure Rust)
+                              </option>
+                              <option value="MariaDB 11.4">MariaDB 11.4</option>
+                              <option value="PostgreSQL 17">PostgreSQL 17</option>
+                            </select>
                             <select
                               value={pmaQuickDbCollation}
                               onChange={(e) =>
@@ -1339,14 +1472,27 @@ ${
                                       <td className="py-2.5 px-3">
                                         {tbl.rowCount.toLocaleString()}
                                       </td>
-                                      <td className="py-2.5 px-3">InnoDB</td>
+                                      <td className="py-2.5 px-3">
+                                        {activeDb.engine.includes('SQLite')
+                                          ? 'SQLite WAL'
+                                          : activeDb.engine.includes('PostgreSQL')
+                                          ? 'PG Heap'
+                                          : 'InnoDB'}
+                                      </td>
                                       <td className="py-2.5 px-3">{tbl.sizeKb} KB</td>
                                       <td className="py-2.5 px-3 text-right space-x-2">
                                         <button
                                           type="button"
-                                          onClick={() => {
+                                          onClick={async () => {
                                             setSelectedTableName(tbl.tableName);
                                             setPmaActiveTab('browse');
+                                            if (onBrowseTableRows) {
+                                              const res = await onBrowseTableRows(
+                                                activeDb.id,
+                                                tbl.tableName
+                                              );
+                                              setQueryResult(res);
+                                            }
                                           }}
                                           className="text-sky-600 dark:text-sky-400 hover:underline cursor-pointer"
                                         >
@@ -1364,6 +1510,34 @@ ${
                                         >
                                           SQL
                                         </button>
+                                        {onTruncateTable && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              onTruncateTable(
+                                                activeDb.id,
+                                                tbl.tableName
+                                              )
+                                            }
+                                            className="text-amber-600 dark:text-amber-400 hover:underline cursor-pointer"
+                                          >
+                                            Empty
+                                          </button>
+                                        )}
+                                        {onDropTable && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              onDropTable(
+                                                activeDb.id,
+                                                tbl.tableName
+                                              )
+                                            }
+                                            className="text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
+                                          >
+                                            Drop
+                                          </button>
+                                        )}
                                       </td>
                                     </tr>
                                   ))}
@@ -1614,12 +1788,59 @@ ${
                       </div>
                     )}
 
+                    {/* PMA TAB 5B: IMPORT .SQL */}
+                    {pmaActiveTab === 'import_sql' && (
+                      <div className="space-y-3">
+                        {!activeDb ? (
+                          <div className="p-6 text-center text-xs text-slate-500">
+                            Hãy chọn hoặc tạo một Database trước khi nhập script .SQL.
+                          </div>
+                        ) : (
+                          <form onSubmit={handlePmaImportSql} className="space-y-3">
+                            <div className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                              Import file / script .SQL vào `{activeDb.name}` ({activeDb.engine})
+                            </div>
+                            <input
+                              type="file"
+                              accept=".sql,.txt"
+                              onChange={(ev) => {
+                                const file = ev.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = () =>
+                                  setPmaImportSql(String(reader.result || ''));
+                                reader.readAsText(file);
+                              }}
+                              className="block w-full text-xs font-mono text-slate-600 dark:text-slate-300"
+                            />
+                            <textarea
+                              rows={6}
+                              spellCheck={false}
+                              value={pmaImportSql}
+                              onChange={(e) => setPmaImportSql(e.target.value)}
+                              placeholder="Dán nội dung SQL dump (CREATE TABLE / INSERT INTO ...) hoặc chọn tệp .sql ở trên..."
+                              className="w-full p-3 rounded-lg bg-slate-950 text-slate-100 font-mono text-xs border border-slate-800"
+                            />
+                            <button
+                              type="submit"
+                              disabled={pmaImporting || !pmaImportSql.trim()}
+                              className="px-4 py-1.5 bg-orange-600 hover:bg-orange-500 disabled:opacity-50 text-white text-xs font-semibold rounded cursor-pointer"
+                            >
+                              {pmaImporting
+                                ? 'Đang Import...'
+                                : 'Thực thi Import .SQL (Pure Rust)'}
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+
                     {/* PMA TAB 6: NGINX VHOST PREVIEW */}
                     {pmaActiveTab === 'nginx_guard' && (
                       <div className="space-y-2">
                         <div className="text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
                           <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                          Cấu hình Nginx Vhost bảo vệ phpMyAdmin (`/etc/nginx/conf.d/ferrous-phpmyadmin.conf`)
+                          Reverse Proxy tới Pure-Rust FerrousAdmin (`127.0.0.1:{pmaPort}` · Zero PHP)
                         </div>
                         <pre className="p-3.5 rounded-lg bg-slate-950 text-slate-200 font-mono text-[11px] overflow-x-auto leading-relaxed border border-slate-800">
                           {nginxPmaConfigPreview}

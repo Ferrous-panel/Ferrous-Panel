@@ -38,7 +38,7 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         .route("/apps/{id}/renew-ssl", web::post().to(apps::renew_ssl))
         .route("/apps/{id}", web::delete().to(apps::delete_app))
         .route("/nginx/validate", web::post().to(apps::validate_nginx))
-        // SQL Databases & MariaDB/PostgreSQL CLI (static mysql-config before dynamic {id})
+        // SQL Databases & Pure-Rust FerrousAdmin (SQLite 3 WAL, MariaDB, PostgreSQL)
         .route("/databases", web::get().to(databases::list_databases))
         .route("/databases", web::post().to(databases::create_database))
         .route(
@@ -54,6 +54,26 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             web::put().to(databases::change_password),
         )
         .route("/databases/{id}/query", web::post().to(databases::execute_query))
+        .route(
+            "/databases/{id}/export",
+            web::get().to(databases::export_database),
+        )
+        .route(
+            "/databases/{id}/import",
+            web::post().to(databases::import_database),
+        )
+        .route(
+            "/databases/{id}/tables/{table}/rows",
+            web::get().to(databases::browse_table_rows),
+        )
+        .route(
+            "/databases/{id}/tables/{table}/truncate",
+            web::post().to(databases::truncate_table),
+        )
+        .route(
+            "/databases/{id}/tables/{table}",
+            web::delete().to(databases::drop_table),
+        )
         .route("/databases/{id}", web::delete().to(databases::delete_database))
         // SafePath File Manager (static ops before dynamic {file_id})
         .route("/files/{app_id}", web::get().to(files::list_files))
@@ -300,8 +320,52 @@ fn register_extended_routes(cfg: &mut web::ServiceConfig) {
         );
 }
 
-/// Mounts `/api` scope protected by authentication middleware on all routes
-/// except `GET /api/health` and `POST /api/auth/login`.
+fn register_pma_api_routes(cfg: &mut web::ServiceConfig) {
+    cfg.route("/health", web::get().to(health::health))
+        .route("/auth/login", web::post().to(auth::login))
+        .route("/auth/session", web::get().to(auth::session))
+        .route("/auth/logout", web::post().to(auth::logout))
+        .route("/databases", web::get().to(databases::list_databases))
+        .route("/databases", web::post().to(databases::create_database))
+        .route(
+            "/databases/mysql-config",
+            web::get().to(databases::get_mysql_config),
+        )
+        .route(
+            "/databases/mysql-config",
+            web::put().to(databases::update_mysql_config),
+        )
+        .route(
+            "/databases/{id}/password",
+            web::put().to(databases::change_password),
+        )
+        .route("/databases/{id}/query", web::post().to(databases::execute_query))
+        .route(
+            "/databases/{id}/export",
+            web::get().to(databases::export_database),
+        )
+        .route(
+            "/databases/{id}/import",
+            web::post().to(databases::import_database),
+        )
+        .route(
+            "/databases/{id}/tables/{table}/rows",
+            web::get().to(databases::browse_table_rows),
+        )
+        .route(
+            "/databases/{id}/tables/{table}/truncate",
+            web::post().to(databases::truncate_table),
+        )
+        .route(
+            "/databases/{id}/tables/{table}",
+            web::delete().to(databases::drop_table),
+        )
+        .route("/databases/{id}", web::delete().to(databases::delete_database))
+        .default_service(web::to(not_implemented));
+}
+
+/// Mounts `/api`, `/phpadmin/api`, and `/phpmyadmin/api` scopes protected by
+/// authentication middleware on all routes except public health/login endpoints.
 pub fn configure_api(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api")
@@ -323,5 +387,15 @@ pub fn configure_api(cfg: &mut web::ServiceConfig) {
                     .default_service(web::to(not_implemented)),
             )
             .default_service(web::to(not_implemented)),
+    )
+    .service(
+        web::scope("/phpadmin/api")
+            .wrap(from_fn(require_auth))
+            .configure(register_pma_api_routes),
+    )
+    .service(
+        web::scope("/phpmyadmin/api")
+            .wrap(from_fn(require_auth))
+            .configure(register_pma_api_routes),
     );
 }

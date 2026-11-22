@@ -25,8 +25,16 @@ struct UnauthorizedBody<'a> {
 }
 
 fn is_public_api_route(method: &Method, path: &str) -> bool {
-    (method == Method::GET && path == "/api/health")
-        || (method == Method::POST && path == "/api/auth/login")
+    (method == Method::GET
+        && matches!(
+            path,
+            "/api/health" | "/phpadmin/api/health" | "/phpmyadmin/api/health"
+        ))
+        || (method == Method::POST
+            && matches!(
+                path,
+                "/api/auth/login" | "/phpadmin/api/auth/login" | "/phpmyadmin/api/auth/login"
+            ))
 }
 
 /// Extracts bearer / header / cookie token from an incoming HTTP request.

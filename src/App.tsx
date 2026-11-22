@@ -34,6 +34,12 @@ export default function App() {
   const { lang, setLang, toggleLang, tr } = usePanelLanguage();
   const [activeTab, setActiveTabState] = useState<ActiveTab>(() => {
     try {
+      if (
+        typeof window !== 'undefined' &&
+        /^\/(phpadmin|phpmyadmin)(\/|$)/i.test(window.location.pathname)
+      ) {
+        return 'databases';
+      }
       const saved = localStorage.getItem('fp_active_tab') as ActiveTab | null;
       return saved || 'overview';
     } catch {
@@ -390,6 +396,11 @@ export default function App() {
                   }
                   onDeleteDatabase={controller.handleDeleteDatabase}
                   onExecuteQuery={controller.handleExecuteSqlQuery}
+                  onBrowseTableRows={controller.handleBrowseTableRows}
+                  onDropTable={controller.handleDropTable}
+                  onTruncateTable={controller.handleTruncateTable}
+                  onExportSql={controller.handleExportDatabaseSql}
+                  onImportSql={controller.handleImportDatabaseSql}
                   onUpdateMysqlConfig={controller.handleUpdateMysqlConfig}
                 />
               )}
