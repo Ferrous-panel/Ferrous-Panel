@@ -885,7 +885,16 @@ pub trait CommandExecutor: fmt::Debug + Send + Sync {
         connect_addr: SocketAddr,
         host: &'a Domain,
         timeout: Duration,
-    ) -> BoxFuture<'a, Result<u16, PanelError>>;
+    ) -> BoxFuture<'a, Result<u16, PanelError>> {
+        let host_owned = host.as_str().to_string();
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                http_probe_blocking(connect_addr, &host_owned, timeout)
+            })
+            .await
+            .map_err(|_| PanelError::BadGateway("HTTP probe worker cancelled".to_string()))?
+        })
+    }
 }
 
 /// Real Ubuntu host executor delegating strictly to `system::cmd::run` and `std::net::TcpStream`.

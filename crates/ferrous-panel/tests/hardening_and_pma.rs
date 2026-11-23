@@ -136,8 +136,8 @@ impl CommandExecutor for MinimalMockExecutor {
         host: &'a Domain,
         timeout: Duration,
     ) -> BoxFuture<'a, Result<u16, PanelError>> {
-        let real = SystemCommandExecutor;
-        real.http_probe(connect_addr, host, timeout)
+        static REAL: SystemCommandExecutor = SystemCommandExecutor;
+        REAL.http_probe(connect_addr, host, timeout)
     }
 }
 

@@ -302,8 +302,8 @@ impl CommandExecutor for FakeExecutor {
         timeout: Duration,
     ) -> BoxFuture<'a, Result<u16, PanelError>> {
         if self.probe_use_real_tcp.load(AtomicOrdering::SeqCst) {
-            let real = SystemCommandExecutor;
-            real.http_probe(connect_addr, host, timeout)
+            static REAL: SystemCommandExecutor = SystemCommandExecutor;
+            REAL.http_probe(connect_addr, host, timeout)
         } else {
             let status_opt = self.probe_fixed_status.lock().ok().and_then(|g| *g);
             Box::pin(async move {
