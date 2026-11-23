@@ -197,9 +197,11 @@ export async function renderPhpSoftware(container) {
                           <div class="row" style="justify-content:flex-end">
                             <button type="button" class="btn btn-sm" data-pkg-cfg="${esc(p.id)}">Cấu hình</button>
                             ${p.status === 'not_installed' || p.status === 'missing'
-                              ? `<button type="button" class="btn btn-sm btn-primary" data-pkg-act="install" data-id="${esc(p.id)}">Cài đặt</button>`
-                              : `<button type="button" class="btn btn-sm" data-pkg-act="restart" data-id="${esc(p.id)}">Restart</button>
-                                 <button type="button" class="btn btn-sm" data-pkg-act="stop" data-id="${esc(p.id)}">Stop</button>`}
+                              ? `<button type="button" class="btn btn-sm btn-primary" data-pkg-act="install" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Cài đặt</button>`
+                              : (['pkg-bun', 'pkg-tailwindcss', 'pkg-deno'].includes(p.id)
+                                ? `<button type="button" class="btn btn-sm" data-pkg-act="install" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Cập nhật</button>`
+                                : `<button type="button" class="btn btn-sm" data-pkg-act="restart" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Restart</button>
+                                   <button type="button" class="btn btn-sm btn-danger" data-pkg-act="stop" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Stop</button>`)}
                           </div>
                         </td>
                       </tr>`).join('')
@@ -364,14 +366,60 @@ export async function renderPhpSoftware(container) {
       });
     });
 
-    container.querySelectorAll('[data-pkg-act]').forEach((btn) => {
-      btn.addEventListener('click', () => withBusy(btn, async () => {
+    async function waitForPanelReconnect(maxWaitMs = 10000) {
+      const deadline = Date.now() + maxWaitMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 700));
         try {
-          await api('POST', `/api/software/${encodeURIComponent(btn.dataset.id)}/action`, { action: btn.dataset.pkgAct });
-          toast(`Đã thực thi '${btn.dataset.pkgAct}' cho gói dịch vụ.`);
-          await renderPhpSoftware(container);
-        } catch (err) { toast(err.message, 'err'); }
-      }));
+          const resp = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
+          if (resp.ok) return true;
+        } catch (_) {
+          // still restarting
+        }
+      }
+      return false;
+    }
+
+    container.querySelectorAll('[data-pkg-act]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const pkgId = btn.dataset.id;
+        const pkgName = btn.dataset.name || pkgId;
+        const act = btn.dataset.pkgAct;
+        const isWebEngine = pkgId === 'pkg-ferrousx' || pkgId === 'pkg-nginx';
+
+        const runAct = () => withBusy(btn, async () => {
+          try {
+            await api('POST', `/api/software/${encodeURIComponent(pkgId)}/action`, { action: act });
+            toast(`Đã thực thi '${act}' cho ${pkgName}.`);
+            await renderPhpSoftware(container);
+          } catch (err) {
+            const transientProxyDrop =
+              isWebEngine &&
+              act === 'restart' &&
+              (!err.status || err.status === 502 || err.status === 503 || err.status === 504);
+            if (transientProxyDrop) {
+              toast(`Đang khởi động lại ${pkgName}, chờ kết nối lại…`);
+              const back = await waitForPanelReconnect(10000);
+              if (back) {
+                toast(`${pkgName} đã khởi động lại và hoạt động bình thường.`);
+                await renderPhpSoftware(container);
+                return;
+              }
+            }
+            toast(err.message, 'err');
+          }
+        });
+
+        if (isWebEngine && act === 'stop') {
+          confirmAction(
+            `Dừng ${pkgName}`,
+            `Dừng ${pkgName} sẽ tạm ngắt cổng 80/443 (có thể làm mất kết nối nếu bạn truy cập Panel qua tên miền proxy). Bạn chắc chắn muốn dừng?`,
+            runAct,
+          );
+        } else {
+          runAct();
+        }
+      });
     });
 
     container.querySelectorAll('[data-php-act]').forEach((btn) => {

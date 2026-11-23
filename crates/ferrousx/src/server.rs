@@ -51,6 +51,28 @@ fn perform_hot_reload(
     Ok((epoch, count))
 }
 
+async fn bind_tcp_with_retry(addr: SocketAddr) -> Result<TcpListener, ServerError> {
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..12 {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse && attempt < 11 => {
+                tracing::warn!(
+                    addr = %addr,
+                    attempt = attempt + 1,
+                    "port briefly busy during restart; retrying bind"
+                );
+                last_err = Some(err);
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            Err(err) => return Err(ServerError::Io(err)),
+        }
+    }
+    Err(ServerError::Io(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AddrInUse, "port unavailable")
+    })))
+}
+
 impl FerrousxServer {
     /// Loads and validates config, builds TLS SNI/ALPN acceptor, binds HTTP+HTTPS sockets,
     /// and starts the Admin UDS IPC listener when `control_socket` is configured.
@@ -79,8 +101,8 @@ impl FerrousxServer {
 
         let runtime = Arc::new(AppRuntime::new(initial));
 
-        let http_listener = TcpListener::bind(bind_http).await?;
-        let https_listener = TcpListener::bind(bind_https).await?;
+        let http_listener = bind_tcp_with_retry(bind_http).await?;
+        let https_listener = bind_tcp_with_retry(bind_https).await?;
         let http_addr = http_listener.local_addr()?;
         let https_addr = https_listener.local_addr()?;
 

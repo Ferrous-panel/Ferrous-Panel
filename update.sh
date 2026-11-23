@@ -378,8 +378,9 @@ RuntimeDirectoryMode=0750
 ExecStartPre=/usr/local/bin/ferrousx-bin --check-config --config ${FERROUSX_CONFIG}
 ExecStart=/usr/local/bin/ferrousx-bin --config ${FERROUSX_CONFIG}
 ExecReload=/bin/kill -HUP $MAINPID
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
 LimitNOFILE=65535
 NoNewPrivileges=true
 PrivateTmp=true
@@ -729,6 +730,8 @@ if [ "$UPDATE_PANEL" = true ]; then
 
   if [ -f /etc/systemd/system/ferrous-panel.service ]; then
     if ! grep -q '^EnvironmentFile=-/etc/ferrous-panel/panel.env$' /etc/systemd/system/ferrous-panel.service 2>/dev/null \
+      || ! grep -q '^Restart=always$' /etc/systemd/system/ferrous-panel.service 2>/dev/null \
+      || ! grep -q '^TimeoutStopSec=' /etc/systemd/system/ferrous-panel.service 2>/dev/null \
       || grep -qE '(^Environment=.*FERROUS_PORT=|^ExecStart=.*--port)' /etc/systemd/system/ferrous-panel.service 2>/dev/null; then
       cat > /etc/systemd/system/ferrous-panel.service <<'EOF_SVC'
 [Unit]
@@ -741,8 +744,9 @@ Type=simple
 User=root
 EnvironmentFile=-/etc/ferrous-panel/panel.env
 ExecStart=/usr/local/bin/ferrous-panel serve
-Restart=on-failure
-RestartSec=3
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
 LimitNOFILE=65535
 NoNewPrivileges=true
 PrivateTmp=true

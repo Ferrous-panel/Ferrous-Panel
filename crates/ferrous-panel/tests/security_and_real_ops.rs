@@ -9,7 +9,7 @@ use ferrous_panel::api::contract::OneClickDeployRequest;
 use ferrous_panel::config::{Config, RuntimeMode};
 use ferrous_panel::configure_app;
 use ferrous_panel::error::PanelError;
-use ferrous_panel::modules::extended::{mail, oneclick, ssh_admin};
+use ferrous_panel::modules::extended::{mail, oneclick, software, ssh_admin};
 use ferrous_panel::modules::{databases, files, security, ModuleStore};
 use ferrous_panel::state::AppState;
 use ferrous_panel::system::cmd::{validate_no_flag_injection, AllowedBinary, CmdOutput};
@@ -1049,6 +1049,114 @@ fn oneclick_wordpress_preflight_returns_409_and_api_rejects_invalid_json_with_40
             &format!(
                 "WordPress 1-Click missing prerequisites must return 409 Conflict, got: {wp_res:?}"
             ),
+        )?;
+
+        Ok(())
+    })
+}
+
+// ============================================================================
+// FerrousX Restart Pre-Check & Automatic Competing Web Server Rollback
+// ============================================================================
+
+#[test]
+fn ferrousx_restart_aborts_before_stopping_nginx_when_config_check_fails() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("fx-precheck")?;
+        let wwwroot = ws.path().join("wwwroot");
+        std::fs::create_dir_all(&wwwroot)?;
+        let mut cfg = Config::for_test(ws.path().to_path_buf(), wwwroot);
+        cfg.mode = RuntimeMode::Production;
+        let store = ModuleStore::open(&ws.path().join("panel.db"))?;
+
+        let exec = MockExecutor::new(
+            &[
+                AllowedBinary::Ferrousx,
+                AllowedBinary::Nginx,
+                AllowedBinary::Systemctl,
+            ],
+            |bin, args, _, _| match bin {
+                AllowedBinary::Ferrousx => {
+                    fail_out(1, "ferrousx: config check failed: missing /etc/ferrousx/ferrousx.toml")
+                }
+                AllowedBinary::Systemctl
+                    if args.first().map(String::as_str) == Some("is-active")
+                        && args.get(1).map(String::as_str) == Some("nginx.service") =>
+                {
+                    ok_out("active\n")
+                }
+                _ => ok_out("inactive\n"),
+            },
+        );
+
+        let res = software::software_package_action(&store, &cfg, &exec, "pkg-ferrousx", "restart")
+            .await;
+        ensure(
+            matches!(res, Err(PanelError::Conflict(_))),
+            &format!("expected 409 Conflict on invalid ferrousx config, got: {res:?}"),
+        )?;
+
+        let calls = exec.recorded();
+        ensure(
+            !calls
+                .iter()
+                .any(|c| c.binary == "systemctl" && c.args == vec!["stop", "nginx.service"]),
+            "nginx.service must NEVER be stopped when ferrousx --check-config fails",
+        )?;
+
+        Ok(())
+    })
+}
+
+#[test]
+fn ferrousx_restart_rolls_back_to_nginx_when_ferrousx_fails_to_stay_active() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("fx-rollback")?;
+        let wwwroot = ws.path().join("wwwroot");
+        std::fs::create_dir_all(&wwwroot)?;
+        let mut cfg = Config::for_test(ws.path().to_path_buf(), wwwroot);
+        cfg.mode = RuntimeMode::Production;
+        let store = ModuleStore::open(&ws.path().join("panel.db"))?;
+
+        let exec = MockExecutor::new(
+            &[
+                AllowedBinary::Ferrousx,
+                AllowedBinary::Nginx,
+                AllowedBinary::Systemctl,
+                AllowedBinary::Journalctl,
+            ],
+            |bin, args, _, _| match bin {
+                AllowedBinary::Ferrousx => ok_out("ferrousx: config syntax OK\n"),
+                AllowedBinary::Systemctl => {
+                    let sub = args.first().map(String::as_str).unwrap_or("");
+                    let unit = args.get(1).map(String::as_str).unwrap_or("");
+                    match (sub, unit) {
+                        ("cat", "ferrousx.service") => ok_out("[Unit]\nDescription=FerrousX\n"),
+                        ("is-active", "nginx.service") => ok_out("active\n"),
+                        ("is-active", "ferrousx.service") => fail_out(3, "failed\n"),
+                        ("restart", "ferrousx.service") => fail_out(1, "Job for ferrousx.service failed"),
+                        ("stop", _) | ("start", "nginx.service") => ok_out(""),
+                        _ => ok_out("inactive\n"),
+                    }
+                }
+                AllowedBinary::Journalctl => ok_out("ferrousx: bind failed"),
+                _ => ok_out(""),
+            },
+        );
+
+        let res = software::software_package_action(&store, &cfg, &exec, "pkg-ferrousx", "restart")
+            .await;
+        ensure(
+            matches!(res, Err(PanelError::Conflict(_))),
+            &format!("expected 409 Conflict with rollback on ferrousx failure, got: {res:?}"),
+        )?;
+
+        let calls = exec.recorded();
+        ensure(
+            calls
+                .iter()
+                .any(|c| c.binary == "systemctl" && c.args == vec!["start", "nginx.service"]),
+            "nginx.service must be automatically restarted on ferrousx restart failure rollback",
         )?;
 
         Ok(())

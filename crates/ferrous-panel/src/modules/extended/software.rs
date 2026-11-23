@@ -272,8 +272,8 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             category: "Web Server".to_string(),
             version: "2.5.0 (Tokio + Hyper + Rustls)".to_string(),
             description: "Memory-safe HTTP/1.1, HTTP/2, TLS SNI, WebSocket, PHP FastCGI, and native Zero-Node.js Static/SPA server (.br/.gz precompressed + clean URLs + immutable JS/CSS cache).".to_string(),
-            installed: ferrousx_avail || !nginx_avail,
-            status: if ferrousx_avail || !nginx_avail { "running" } else { "stopped" }.to_string(),
+            installed: ferrousx_avail,
+            status: if ferrousx_avail { "stopped" } else { "not_installed" }.to_string(),
             memory_mb: 11.4,
             config_path: "/etc/ferrousx/ferrousx.toml".to_string(),
             is_rust_native: true,
@@ -499,6 +499,225 @@ pub async fn list_software_packages(
     Ok(pkgs)
 }
 
+async fn validate_and_activate_service(
+    id: &str,
+    meta: &PackageSystemMeta,
+    action: &str,
+    executor: &dyn CommandExecutor,
+) -> Result<(), PanelError> {
+    if !executor.is_binary_available(AllowedBinary::Systemctl) {
+        return Err(PanelError::Conflict(format!(
+            "thiếu systemctl để thực hiện '{action}' trên '{}'",
+            meta.systemd_unit
+        )));
+    }
+    if !executor.is_binary_available(meta.binary) {
+        let hint = if id == "pkg-ferrousx" {
+            " (chạy `sudo bash update.sh --ferrousx` để cài FerrousX)"
+        } else {
+            ""
+        };
+        return Err(PanelError::Conflict(format!(
+            "Chưa cài đặt binary '{}' cho dịch vụ '{}'{hint}. Không thay đổi trạng thái dịch vụ đang chạy.",
+            meta.binary.label(),
+            meta.systemd_unit
+        )));
+    }
+
+    // 1. Validate web server configuration BEFORE stopping any running web server or service.
+    if id == "pkg-ferrousx" {
+        let chk = executor
+            .run(
+                AllowedBinary::Ferrousx,
+                &["--check-config", "--config", meta.real_config_path],
+                CMD_TIMEOUT,
+            )
+            .await?;
+        if !chk.success {
+            let detail = if chk.stderr.trim().is_empty() {
+                chk.stdout.trim()
+            } else {
+                chk.stderr.trim()
+            };
+            return Err(PanelError::Conflict(format!(
+                "Kiểm tra cấu hình FerrousX thất bại trước khi khởi động lại (đã hủy để tránh sập dịch vụ): {detail}"
+            )));
+        }
+    } else if id == "pkg-nginx" {
+        let chk = executor
+            .run(AllowedBinary::Nginx, &["-t"], CMD_TIMEOUT)
+            .await?;
+        if !chk.success {
+            let detail = if chk.stderr.trim().is_empty() {
+                chk.stdout.trim()
+            } else {
+                chk.stderr.trim()
+            };
+            return Err(PanelError::Conflict(format!(
+                "Kiểm tra cấu hình Nginx (-t) thất bại trước khi khởi động lại (đã hủy để tránh sập dịch vụ): {detail}"
+            )));
+        }
+    }
+
+    // 2. Verify systemd unit file exists BEFORE stopping any competing web server.
+    let unit_cat = executor
+        .run(AllowedBinary::Systemctl, &["cat", meta.systemd_unit], CMD_TIMEOUT)
+        .await?;
+    if !unit_cat.success {
+        let hint = if id == "pkg-ferrousx" {
+            " Hãy chạy `sudo bash update.sh --ferrousx` để tạo unit ferrousx.service."
+        } else {
+            ""
+        };
+        return Err(PanelError::Conflict(format!(
+            "Không tìm thấy systemd unit '{}'.{hint} Đã hủy để giữ nguyên dịch vụ hiện tại.",
+            meta.systemd_unit
+        )));
+    }
+
+    // 3. Stop competing web server on ports 80/443 if active, remembering state for rollback.
+    let competing = if id == "pkg-nginx" {
+        Some("ferrousx.service")
+    } else if id == "pkg-ferrousx" {
+        Some("nginx.service")
+    } else {
+        None
+    };
+
+    let mut stopped_other: Option<&'static str> = None;
+    if let Some(other_unit) = competing {
+        let other_active = executor
+            .run(AllowedBinary::Systemctl, &["is-active", other_unit], CMD_TIMEOUT)
+            .await
+            .map(|o| o.success && o.stdout.trim() == "active")
+            .unwrap_or(false);
+        if other_active {
+            let stop_other = executor
+                .run(AllowedBinary::Systemctl, &["stop", other_unit], CMD_TIMEOUT)
+                .await?;
+            if !stop_other.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: stop_other.exit_code,
+                    stderr: if stop_other.stderr.is_empty() {
+                        stop_other.stdout
+                    } else {
+                        stop_other.stderr
+                    },
+                });
+            }
+            stopped_other = Some(other_unit);
+        }
+    }
+
+    // 4. Execute start / restart / enable --now on the target unit.
+    let cmd_res = match action {
+        "enable-now" => {
+            executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["enable", "--now", meta.systemd_unit],
+                    CMD_TIMEOUT,
+                )
+                .await
+        }
+        other => {
+            executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &[other, meta.systemd_unit],
+                    CMD_TIMEOUT,
+                )
+                .await
+        }
+    };
+
+    let mut failure_reason: Option<String> = match cmd_res {
+        Ok(out) if out.success => None,
+        Ok(out) => Some(if out.stderr.trim().is_empty() {
+            out.stdout.trim().to_string()
+        } else {
+            out.stderr.trim().to_string()
+        }),
+        Err(err) => Some(err.to_string()),
+    };
+
+    // 5. Verify Type=simple daemon actually stays active (not immediately crashing after fork).
+    if failure_reason.is_none() {
+        let mut is_active = false;
+        for attempt in 0..6 {
+            let check = executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["is-active", meta.systemd_unit],
+                    CMD_TIMEOUT,
+                )
+                .await;
+            if let Ok(out) = check {
+                if out.success && out.stdout.trim() == "active" {
+                    is_active = true;
+                    break;
+                }
+            }
+            if attempt < 5 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+        if !is_active {
+            failure_reason = Some(format!(
+                "dịch vụ '{}' không đạt trạng thái active sau khi {action}",
+                meta.systemd_unit
+            ));
+        }
+    }
+
+    if let Some(reason) = failure_reason {
+        let journal_tail = if executor.is_binary_available(AllowedBinary::Journalctl) {
+            executor
+                .run(
+                    AllowedBinary::Journalctl,
+                    &["-u", meta.systemd_unit, "-n", "12", "--no-pager"],
+                    CMD_TIMEOUT,
+                )
+                .await
+                .ok()
+                .map(|o| {
+                    if o.stdout.trim().is_empty() {
+                        o.stderr.trim().to_string()
+                    } else {
+                        o.stdout.trim().to_string()
+                    }
+                })
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        // Rollback: ensure failed unit is stopped and restore previously active competing web server.
+        let _ = executor
+            .run(AllowedBinary::Systemctl, &["stop", meta.systemd_unit], CMD_TIMEOUT)
+            .await;
+        let rollback_note = if let Some(other_unit) = stopped_other {
+            let _ = executor
+                .run(AllowedBinary::Systemctl, &["start", other_unit], CMD_TIMEOUT)
+                .await;
+            format!(" Đã tự động khôi phục '{other_unit}' để không làm gián đoạn máy chủ.")
+        } else {
+            String::new()
+        };
+
+        let log_suffix = journal_tail
+            .map(|j| format!("\nLog gần nhất:\n{j}"))
+            .unwrap_or_default();
+        return Err(PanelError::Conflict(format!(
+            "Không thể {action} '{}': {reason}.{rollback_note}{log_suffix}",
+            meta.systemd_unit
+        )));
+    }
+
+    Ok(())
+}
+
 pub async fn software_package_action(
     store: &ModuleStore,
     config: &Config,
@@ -547,53 +766,7 @@ pub async fn software_package_action(
                             }
                         }
                         if !m.systemd_unit.is_empty() {
-                            if !executor.is_binary_available(AllowedBinary::Systemctl) {
-                                return Err(PanelError::Conflict(format!(
-                                    "thiếu systemctl để kích hoạt dịch vụ '{}'",
-                                    m.systemd_unit
-                                )));
-                            }
-                            // Prevent port 80/443 collision between FerrousX and Nginx
-                            let competing = if id == "pkg-nginx" {
-                                Some("ferrousx.service")
-                            } else if id == "pkg-ferrousx" {
-                                Some("nginx.service")
-                            } else {
-                                None
-                            };
-                            if let Some(other_unit) = competing {
-                                let other_active = executor
-                                    .run(AllowedBinary::Systemctl, &["is-active", other_unit], CMD_TIMEOUT)
-                                    .await
-                                    .map(|o| o.success && o.stdout.trim() == "active")
-                                    .unwrap_or(false);
-                                if other_active {
-                                    let stop_other = executor
-                                        .run(AllowedBinary::Systemctl, &["stop", other_unit], CMD_TIMEOUT)
-                                        .await?;
-                                    if !stop_other.success {
-                                        return Err(PanelError::CommandFailed {
-                                            binary: "systemctl",
-                                            exit_code: stop_other.exit_code,
-                                            stderr: if stop_other.stderr.is_empty() {
-                                                stop_other.stdout
-                                            } else {
-                                                stop_other.stderr
-                                            },
-                                        });
-                                    }
-                                }
-                            }
-                            let en = executor
-                                .run(AllowedBinary::Systemctl, &["enable", "--now", m.systemd_unit], CMD_TIMEOUT)
-                                .await?;
-                            if !en.success {
-                                return Err(PanelError::CommandFailed {
-                                    binary: "systemctl",
-                                    exit_code: en.exit_code,
-                                    stderr: if en.stderr.is_empty() { en.stdout } else { en.stderr },
-                                });
-                            }
+                            validate_and_activate_service(id, m, "enable-now", executor).await?;
                         }
                     }
                 }
@@ -673,52 +846,7 @@ pub async fn software_package_action(
             if prod {
                 if let Some(ref m) = meta {
                     if !m.is_cli_tool && !m.systemd_unit.is_empty() {
-                        if !executor.is_binary_available(AllowedBinary::Systemctl) {
-                            return Err(PanelError::Conflict(format!(
-                                "thiếu systemctl để thực hiện '{action}' trên '{}'",
-                                m.systemd_unit
-                            )));
-                        }
-                        let competing = if id == "pkg-nginx" {
-                            Some("ferrousx.service")
-                        } else if id == "pkg-ferrousx" {
-                            Some("nginx.service")
-                        } else {
-                            None
-                        };
-                        if let Some(other_unit) = competing {
-                            let other_active = executor
-                                .run(AllowedBinary::Systemctl, &["is-active", other_unit], CMD_TIMEOUT)
-                                .await
-                                .map(|o| o.success && o.stdout.trim() == "active")
-                                .unwrap_or(false);
-                            if other_active {
-                                let stop_other = executor
-                                    .run(AllowedBinary::Systemctl, &["stop", other_unit], CMD_TIMEOUT)
-                                    .await?;
-                                if !stop_other.success {
-                                    return Err(PanelError::CommandFailed {
-                                        binary: "systemctl",
-                                        exit_code: stop_other.exit_code,
-                                        stderr: if stop_other.stderr.is_empty() {
-                                            stop_other.stdout
-                                        } else {
-                                            stop_other.stderr
-                                        },
-                                    });
-                                }
-                            }
-                        }
-                        let res = executor
-                            .run(AllowedBinary::Systemctl, &[action, m.systemd_unit], CMD_TIMEOUT)
-                            .await?;
-                        if !res.success {
-                            return Err(PanelError::CommandFailed {
-                                binary: "systemctl",
-                                exit_code: res.exit_code,
-                                stderr: if res.stderr.is_empty() { res.stdout } else { res.stderr },
-                            });
-                        }
+                        validate_and_activate_service(id, m, action, executor).await?;
                     }
                 }
             }

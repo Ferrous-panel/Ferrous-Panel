@@ -1129,12 +1129,30 @@ fn schedule_panel_service_restart(config: &Config) {
     }
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_millis(450)).await;
-        let _ = crate::system::cmd::run(
+        match crate::system::cmd::run(
             AllowedBinary::Systemctl,
-            &["restart", "ferrous-panel.service"],
+            &["restart", "--no-block", "ferrous-panel.service"],
             CMD_TIMEOUT,
         )
-        .await;
+        .await
+        {
+            Ok(out) if out.success => {
+                tracing::info!("enqueued non-blocking restart for ferrous-panel.service");
+            }
+            Ok(out) => {
+                tracing::error!(
+                    exit_code = ?out.exit_code,
+                    stderr = %out.stderr.trim(),
+                    "failed to enqueue restart for ferrous-panel.service"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to spawn systemctl restart --no-block ferrous-panel.service"
+                );
+            }
+        }
     });
 }
 

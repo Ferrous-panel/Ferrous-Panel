@@ -110,14 +110,50 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         None
     };
 
+    let mut main_listener: Option<std::net::TcpListener> = None;
+    let mut last_bind_err: Option<std::io::Error> = None;
+    for attempt in 0..10 {
+        match std::net::TcpListener::bind((bind_addr.as_str(), bind_port)) {
+            Ok(listener) => {
+                main_listener = Some(listener);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse && attempt < 9 => {
+                tracing::warn!(
+                    bind = %bind_addr,
+                    port = bind_port,
+                    attempt = attempt + 1,
+                    "panel port briefly busy during restart; retrying bind"
+                );
+                last_bind_err = Some(err);
+                actix_web::rt::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Err(err) => {
+                last_bind_err = Some(err);
+                break;
+            }
+        }
+    }
+    let main_listener = match main_listener {
+        Some(listener) => listener,
+        None => {
+            let err = last_bind_err.unwrap_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::AddrInUse, "port unavailable")
+            });
+            return Err(anyhow::Error::new(err))
+                .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"));
+        }
+    };
+
     let mut server = HttpServer::new(move || {
         let app_state = shared_state.clone();
         App::new()
             .wrap(from_fn(security_headers_middleware))
             .configure(move |cfg| configure_app(cfg, app_state))
     })
-    .bind((bind_addr.as_str(), bind_port))
-    .with_context(|| format!("failed to bind {bind_addr}:{bind_port}"))?;
+    .shutdown_timeout(5)
+    .listen(main_listener)
+    .with_context(|| format!("failed to attach listener on {bind_addr}:{bind_port}"))?;
 
     if let Some(listener) = pma_listener {
         server = server

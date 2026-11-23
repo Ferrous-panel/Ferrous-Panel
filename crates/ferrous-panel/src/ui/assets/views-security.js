@@ -614,6 +614,7 @@ export async function renderSettingsJobs(container) {
         <p class="page-desc">Theo dõi hàng đợi tác vụ nền thuần Rust và thay đổi cổng panel (mặc định 8443; cổng 80/443 dành riêng cho website).</p>
       </div>
       <div class="row">
+        <button type="button" class="btn" id="set-restart-panel-btn">Khởi động lại FerrousPanel</button>
         <button type="button" class="btn btn-danger" id="set-logout-btn">Đăng xuất ngay</button>
       </div>
     </div>
@@ -677,6 +678,43 @@ export async function renderSettingsJobs(container) {
   `;
 
   document.getElementById('set-logout-btn')?.addEventListener('click', handleLogout);
+  const restartPanelBtn = document.getElementById('set-restart-panel-btn');
+  restartPanelBtn?.addEventListener('click', () => {
+    confirmAction(
+      'Khởi động lại FerrousPanel',
+      'Dịch vụ ferrous-panel.service sẽ được khởi động lại trong 2–5 giây và tự động kết nối lại.',
+      () => withBusy(restartPanelBtn, async () => {
+        try {
+          await api('POST', '/api/panel-admin/cli-action', { option: 1 });
+          toast('Đã gửi lệnh khởi động lại ferrous-panel.service — đang chờ kết nối lại…');
+          await new Promise((r) => setTimeout(r, 1200));
+          const deadline = Date.now() + 15000;
+          let ready = false;
+          while (Date.now() < deadline) {
+            try {
+              const r = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
+              if (r.ok) {
+                ready = true;
+                break;
+              }
+            } catch (_) {
+              // still restarting
+            }
+            await new Promise((r) => setTimeout(r, 600));
+          }
+          if (ready) {
+            toast('FerrousPanel đã khởi động lại thành công.');
+            await renderSettingsJobs(container);
+          } else {
+            toast('Không nhận được phản hồi /api/health sau 15 giây — hãy kiểm tra `sudo fp logs`.', 'err');
+          }
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      }),
+      false,
+    );
+  });
   container.querySelectorAll('[data-job-open]').forEach((b) => {
     b.addEventListener('click', () => openJobDrawer(b.dataset.jobOpen));
   });
