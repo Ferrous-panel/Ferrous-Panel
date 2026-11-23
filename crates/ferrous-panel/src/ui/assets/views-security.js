@@ -15,9 +15,10 @@ export async function renderSecurity(container) {
 
   const ufw = sec.ufwRules || [];
   const jails = sec.fail2banJails || [];
-  const hardening = sec.hardeningChecks || [];
-  const waf = sec.wafRules || [];
-  const ddosMode = sec.ddosShield?.protectionMode || sec.ddosShield?.mode || 'normal';
+  const hardening = sec.hardeningDirectives || [];
+  const shield = sec.antiDdosShield || {};
+  const waf = shield.wafRules || [];
+  const ddosMode = shield.protectionMode || 'normal';
   const ufwDis = capDisabledAttr('ufw');
   const f2bDis = capDisabledAttr('fail2ban');
 
@@ -27,15 +28,34 @@ export async function renderSecurity(container) {
     <div class="page-head">
       <div>
         <h1 class="page-title">Bảo mật, Tường lửa UFW & Nhật ký kiểm toán</h1>
-        <p class="page-desc">Quản lý quy tắc UFW thật (kèm chống tự khóa cổng SSH/Panel), Fail2ban ban/unban, bảo vệ DDoS, WAF L7 và SHA-256 FIM.</p>
+        <p class="page-desc">Quản lý UFW thật (chống tự khóa SSH/Panel), Fail2ban, Kernel SYN Anti-DDoS, WAF L7 và quét toàn vẹn tệp BLAKE3 + SHA-256.</p>
       </div>
       <div class="row">
-        <button type="button" class="btn" id="sec-fim-btn">Quét SHA-256 FIM</button>
+        <button type="button" class="btn" id="sec-fim-btn">Quét BLAKE3 + SHA-256 FIM</button>
         <button type="button" class="btn btn-primary" id="sec-add-ufw" ${ufwDis}>Thêm luật UFW</button>
       </div>
     </div>
 
     ${capBannerHtml(['ufw', 'fail2ban', 'ebpf_xdp'])}
+
+    <div class="kv-grid">
+      <div class="kv-item">
+        <span class="kv-label">Kernel Anti-DDoS</span>
+        <span class="kv-value mono"><span class="${statusClass(shield.synCookiesEnabled ? 'active' : 'warning')}">${shield.synCookiesEnabled ? 'SYN Cookies Bật' : 'SYN Cookies Tắt'}</span> · backlog ${esc(shield.synRateLimitPps ?? 4096)}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Gói Drop (Kernel /proc/net)</span>
+        <span class="kv-value mono">${esc(shield.droppedPacketsTotal ?? 0)} packets</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Fail2ban Tổng chặn</span>
+        <span class="kv-value mono">${esc(shield.blockedL7AttacksToday ?? 0)} lượt (${bannedRows.length} đang chặn)</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Toàn vẹn tệp (BLAKE3 FIM)</span>
+        <span class="kv-value mono" title="${esc(shield.fimIntegrityStatus || '')}">${esc(shield.fimIntegrityStatus || 'Chưa quét')}</span>
+      </div>
+    </div>
 
     <div class="grid-2">
       <section class="surface">
@@ -74,11 +94,11 @@ export async function renderSecurity(container) {
 
       <section class="surface">
         <div class="surface-head">
-          <h2 class="surface-title">Fail2ban (${bannedRows.length} IP đang bị chặn) & Hardening</h2>
+          <h2 class="surface-title">Fail2ban (${jails.length} jails · ${bannedRows.length} IP) & Hardening</h2>
           <button type="button" class="btn btn-sm" id="sec-ban-ip" ${f2bDis}>Chặn IP</button>
         </div>
         <div class="meta-line" style="margin-bottom:10px">
-          ${jails.map((j) => `<span>${esc(j.name)}: <strong class="mono">${esc((j.bannedIps || []).length)}</strong> IP</span>`).join('<span>·</span>') || '<span>Fail2ban sẵn sàng</span>'}
+          ${jails.map((j) => `<span><strong>${esc(j.name)}</strong>: <span class="mono">${esc(j.currentlyBanned ?? (j.bannedIps || []).length)}</span> chặn · maxretry=<span class="mono">${esc(j.maxRetry ?? 5)}</span> · bantime=<span class="mono">${esc(j.banTimeSec ?? 600)}s</span></span>`).join('<span>·</span>') || '<span>Fail2ban chưa kích hoạt jail nào</span>'}
         </div>
         ${bannedRows.length ? `
           <div class="row" style="margin-bottom:12px">
@@ -91,15 +111,20 @@ export async function renderSecurity(container) {
         ` : ''}
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Cấu hình bảo mật hệ thống</th><th>Trạng thái</th><th class="right">Chuyển đổi</th></tr></thead>
+            <thead><tr><th>Chỉ thị Hardening (Kernel / SSH)</th><th>Hiện tại / Chuẩn</th><th class="right">Áp dụng</th></tr></thead>
             <tbody>
               ${
-                hardening.slice(0, 6).map((h) => `
-                  <tr>
-                    <td>${esc(h.title || h.key)}</td>
-                    <td><span class="${h.enabled ? 'st-ok' : 'st-warn'}">${h.enabled ? 'Đã bật' : 'Chưa bật'}</span></td>
-                    <td class="right"><button type="button" class="btn btn-sm" data-harden-id="${esc(h.id)}">${h.enabled ? 'Tắt' : 'Bật'}</button></td>
-                  </tr>`).join('')
+                hardening.length
+                  ? hardening.map((h) => `
+                    <tr>
+                      <td>
+                        <div class="mono"><strong>${esc(h.key)}</strong></div>
+                        <div class="meta-line">${esc(h.category || '')}${h.description ? ` · ${esc(h.description)}` : ''}</div>
+                      </td>
+                      <td class="mono"><span class="${h.enabled ? 'st-ok' : 'st-warn'}">${esc(h.currentValue || '—')}</span> / ${esc(h.recommendedValue || '—')}</td>
+                      <td class="right"><button type="button" class="btn btn-sm" data-harden-id="${esc(h.id)}">${h.enabled ? 'Đạt chuẩn' : 'Bật chuẩn'}</button></td>
+                    </tr>`).join('')
+                  : '<tr><td colspan="3" class="empty-state">Không có chỉ thị hardening nào.</td></tr>'
               }
             </tbody>
           </table>
@@ -108,12 +133,15 @@ export async function renderSecurity(container) {
     </div>
 
     <section class="surface">
-      <div class="surface-head"><h2 class="surface-title">L7 WAF Rules (${waf.length})</h2></div>
+      <div class="surface-head">
+        <h2 class="surface-title">L7 WAF Rules (${waf.length})</h2>
+        <span class="meta-line">${esc(shield.xdpStatus || '')}</span>
+      </div>
       <div class="row">
-        ${waf.map((w) => `
-          <button type="button" class="btn btn-sm" data-waf-toggle="${esc(w.id)}">
-            ${esc(w.name)}: <strong class="${w.enabled ? 'st-ok' : 'st-muted'}">${w.enabled ? 'Bật' : 'Tắt'}</strong>
-          </button>`).join('')}
+        ${waf.length ? waf.map((w) => `
+          <button type="button" class="btn btn-sm" data-waf-toggle="${esc(w.id)}" title="${esc(w.description || '')}">
+            <span class="mono">${esc(w.code || '')}</span> ${esc(w.category || w.name)}: <strong class="${w.enabled ? 'st-ok' : 'st-muted'}">${w.enabled ? 'Bật' : 'Tắt'}</strong>
+          </button>`).join('') : '<span class="st-muted">Chưa cấu hình luật WAF.</span>'}
       </div>
     </section>
 
@@ -144,8 +172,8 @@ export async function renderSecurity(container) {
   const fimBtn = document.getElementById('sec-fim-btn');
   fimBtn?.addEventListener('click', () => withBusy(fimBtn, async () => {
     try {
-      await api('POST', '/api/security/fim-scan', {});
-      toast('Đã hoàn tất quét toàn vẹn SHA-256 FIM.');
+      const res = await api('POST', '/api/security/fim-scan', {});
+      toast(`Đã quét toàn vẹn ${res.scannedFiles ?? 0} tệp bằng BLAKE3 + SHA-256.`);
       await renderSecurity(container);
     } catch (err) { toast(err.message, 'err'); }
   }));
@@ -284,13 +312,15 @@ export async function renderOptimizer(container) {
   const activeId = opt.activeProfileId || '';
   const sysctls = opt.sysctlParams || [];
   const guard = opt.antiCrashGuard || {};
+  const wd = opt.watchdog || {};
+  const oomMap = guard.oomImmunityMap || [];
   const optDis = capDisabledAttr('optimizer_sysctl');
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Tối ưu hệ thống, Kernel Sysctl & Chẩn đoán VPS</h1>
-        <p class="page-desc">Áp dụng /etc/sysctl.d/99-ferrous-optimizer.conf kèm đọc lại /proc/sys + rollback, Anti-Crash Guard và Watchdog.</p>
+        <p class="page-desc">Áp dụng /etc/sysctl.d/99-ferrous-optimizer.conf + MariaDB tuning, cấu hình ZRAM swap thật qua zramctl và đọc trực tiếp từ /proc.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="opt-reclaim">Giải phóng RAM</button>
@@ -299,6 +329,25 @@ export async function renderOptimizer(container) {
     </div>
 
     ${capBannerHtml(['optimizer_sysctl'])}
+
+    <div class="kv-grid">
+      <div class="kv-item">
+        <span class="kv-label">Panel Daemon (/proc/self/status)</span>
+        <span class="kv-value mono">PID ${esc(wd.daemonPid ?? 0)} · RSS ${Number(wd.residentRamMb || 0).toFixed(1)} MB · Heap ${Number(wd.allocatedRamMb || 0).toFixed(1)} MB</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Threads & OOM Score</span>
+        <span class="kv-value mono">${esc(wd.workerThreadsActive ?? 0)} threads (${esc(wd.workerThreadsTotal ?? 1)} cores) · OOM ${esc(wd.oomScoreAdj ?? 0)}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">ZRAM Kernel Swap (/sys/block/zram0)</span>
+        <span class="kv-value mono"><span class="${statusClass(guard.zramEnabled ? 'active' : 'muted')}">${guard.zramEnabled ? 'Đang bật' : 'Chưa bật'}</span> · ${esc(guard.zramSizeMb ?? 0)} MB (${esc(guard.zramCompressionAlgo || 'zstd')})</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Watchdog & Mitigation</span>
+        <span class="kv-value mono">${esc(wd.circuitBreakerStatus || 'closed')} · ${esc(guard.mitigationCount ?? 0)} lần xử lý</span>
+      </div>
+    </div>
 
     <div class="grid-3">
       ${profiles.map((p) => `
@@ -336,15 +385,20 @@ export async function renderOptimizer(container) {
       </section>
 
       <section class="surface">
-        <div class="surface-head"><h2 class="surface-title">Anti-Crash Guard & Cứu hộ khẩn cấp</h2></div>
+        <div class="surface-head"><h2 class="surface-title">Anti-Crash Guard, ZRAM Swap & Cứu hộ</h2></div>
         <form id="opt-ac-form" style="margin-bottom:14px">
           <div class="form-grid">
             <div class="field"><label>Ngưỡng xả tải CPU (%)</label><input class="input mono" name="cpuShedThresholdPercent" type="number" min="50" max="99" value="${esc(guard.cpuShedThresholdPercent || 92)}" /></div>
             <div class="field"><label>Ngưỡng xả tải RAM (%)</label><input class="input mono" name="ramShedThresholdPercent" type="number" min="50" max="99" value="${esc(guard.ramShedThresholdPercent || 90)}" /></div>
+            <div class="field"><label>Dung lượng ZRAM Swap (MB)</label><input class="input mono" name="zramSizeMb" type="number" min="128" max="16384" value="${esc(guard.zramSizeMb || 1024)}" /></div>
+            <div class="field"><label>Slow Query Auto-Kill (s)</label><input class="input mono" name="slowQueryAutoKillSec" type="number" min="5" max="600" value="${esc(guard.slowQueryAutoKillSec || 30)}" /></div>
           </div>
-          <div class="row" style="justify-content:space-between">
-            <label class="checkbox-row"><input type="checkbox" name="loadSheddingEnabled" ${guard.loadSheddingEnabled !== false ? 'checked' : ''} /><span>Bật Load Shedding</span></label>
-            <button type="submit" class="btn btn-sm btn-primary" id="opt-ac-sub">Lưu ngưỡng</button>
+          <div class="row" style="justify-content:space-between;margin-top:4px">
+            <div class="row">
+              <label class="checkbox-row"><input type="checkbox" name="loadSheddingEnabled" ${guard.loadSheddingEnabled !== false ? 'checked' : ''} /><span>Load Shedding</span></label>
+              <label class="checkbox-row"><input type="checkbox" name="zramEnabled" ${guard.zramEnabled ? 'checked' : ''} /><span>Bật ZRAM (zramctl)</span></label>
+            </div>
+            <button type="submit" class="btn btn-sm btn-primary" id="opt-ac-sub">Lưu & Áp dụng</button>
           </div>
         </form>
         <hr class="divider" />
@@ -356,21 +410,43 @@ export async function renderOptimizer(container) {
       </section>
     </div>
 
+    ${oomMap.length ? `
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">Bản đồ bảo vệ OOM Dịch vụ hệ thống (systemd thật · ${oomMap.length})</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Service</th><th class="right">PID</th><th class="right">OOM Score</th><th>Chính sách bảo vệ</th></tr></thead>
+            <tbody>
+              ${oomMap.map((o) => `
+                <tr>
+                  <td class="mono"><strong>${esc(o.service)}</strong></td>
+                  <td class="right mono">${esc(o.pid || '—')}</td>
+                  <td class="right mono">${esc(o.oomScoreAdj)}</td>
+                  <td>${esc(o.policy || '—')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    ` : ''}
+
     <section class="surface">
       <div class="surface-head"><h2 class="surface-title">Chẩn đoán hệ thống (${diag.length} hạng mục)</h2></div>
       <div class="table-wrap">
         <table class="data-table">
-          <thead><tr><th>Hạng mục</th><th>Trạng thái</th><th>Chi tiết</th></tr></thead>
+          <thead><tr><th>Phân hệ</th><th>Đối tượng</th><th>Trạng thái</th><th class="right">Độ trễ</th><th>Chi tiết</th></tr></thead>
           <tbody>
             ${
               Array.isArray(diag) && diag.length
                 ? diag.map((d) => `
                   <tr>
-                    <td><strong>${esc(d.label || d.name || d.id)}</strong></td>
+                    <td><strong>${esc(d.subsystem || d.id)}</strong></td>
+                    <td class="mono">${esc(d.target || '—')}</td>
                     <td><span class="${statusClass(d.status)}">${esc(d.status)}</span></td>
-                    <td>${esc(d.detail || d.message || '—')}</td>
+                    <td class="right mono">${esc(d.latencyMs ?? 0)} ms</td>
+                    <td>${esc(d.detail || '—')}</td>
                   </tr>`).join('')
-                : '<tr><td colspan="3" class="empty-state">Không có dữ liệu chẩn đoán.</td></tr>'
+                : '<tr><td colspan="5" class="empty-state">Không có dữ liệu chẩn đoán.</td></tr>'
             }
           </tbody>
         </table>
@@ -391,7 +467,7 @@ export async function renderOptimizer(container) {
   }));
 
   container.querySelectorAll('[data-opt-profile]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
-    try { await api('POST', '/api/optimizer/apply-profile', { profileId: b.dataset.optProfile }); toast('Đã áp dụng hồ sơ sysctl và xác nhận qua /proc/sys.'); await renderOptimizer(container); }
+    try { await api('POST', '/api/optimizer/apply-profile', { profileId: b.dataset.optProfile }); toast('Đã áp dụng hồ sơ sysctl + MariaDB tuning và xác nhận qua /proc/sys.'); await renderOptimizer(container); }
     catch (err) { toast(err.message, 'err'); }
   })));
 
@@ -409,8 +485,12 @@ export async function renderOptimizer(container) {
           loadSheddingEnabled: fd.get('loadSheddingEnabled') === 'on',
           cpuShedThresholdPercent: Number(fd.get('cpuShedThresholdPercent') || 92),
           ramShedThresholdPercent: Number(fd.get('ramShedThresholdPercent') || 90),
+          zramEnabled: fd.get('zramEnabled') === 'on',
+          zramSizeMb: Number(fd.get('zramSizeMb') || 1024),
+          slowQueryAutoKillSec: Number(fd.get('slowQueryAutoKillSec') || 30),
         });
-        toast('Đã lưu ngưỡng Anti-Crash Guard.');
+        toast('Đã lưu ngưỡng Anti-Crash Guard & cấu hình ZRAM.');
+        await renderOptimizer(container);
       } catch (err) { toast(err.message, 'err'); }
     });
   });
@@ -444,6 +524,7 @@ export async function renderSsh(container) {
         <p class="page-desc">Cấu hình OpenSSH daemon (kiểm tra sshd -t + rollback + xác nhận đổi cổng), khóa Ed25519 thật và lệnh chẩn đoán allowlist.</p>
       </div>
       <div class="row">
+        <button type="button" class="btn" id="ssh-add-key" ${sshDis}>Thêm Public Key</button>
         <button type="button" class="btn btn-primary" id="ssh-gen-key" ${sshDis}>Sinh cặp khóa Ed25519</button>
       </div>
     </div>
@@ -487,7 +568,7 @@ export async function renderSsh(container) {
                 keys.length
                   ? keys.map((k) => `
                     <tr>
-                      <td><strong>${esc(k.label)}</strong></td>
+                      <td><strong>${esc(k.label)}</strong><div class="meta-line mono">${esc(k.algorithm || '')}</div></td>
                       <td class="mono">${esc(k.fingerprint || k.publicKey?.slice(0, 48) || '')}</td>
                       <td class="right"><button type="button" class="btn btn-sm btn-danger" data-ssh-del="${esc(k.id)}" data-label="${esc(k.label)}">Thu hồi</button></td>
                     </tr>`).join('')
@@ -502,14 +583,17 @@ export async function renderSsh(container) {
         <div class="surface-head"><h2 class="surface-title">Phiên SSH đang hoạt động (${sessions.length})</h2></div>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>User & TTY</th><th>IP nguồn</th><th class="right">Ngắt phiên</th></tr></thead>
+            <thead><tr><th>User & PTS</th><th>IP nguồn / Thời gian</th><th class="right">Ngắt phiên</th></tr></thead>
             <tbody>
               ${
                 sessions.length
                   ? sessions.map((s) => `
                     <tr>
-                      <td class="mono"><strong>${esc(s.user || 'root')}</strong> · ${esc(s.tty || 'pts/0')}</td>
-                      <td class="mono">${esc(s.remoteIp || '—')}</td>
+                      <td class="mono"><strong>${esc(s.user || 'root')}</strong> · ${esc(s.pts || 'pts/0')} ${s.pid ? `(PID ${esc(s.pid)})` : ''}</td>
+                      <td>
+                        <div class="mono">${esc(s.clientIp || '—')}</div>
+                        <div class="meta-line mono">${esc(s.connectedAt || '')}</div>
+                      </td>
                       <td class="right"><button type="button" class="btn btn-sm btn-danger" data-ssh-kick="${esc(s.id)}">Ngắt</button></td>
                     </tr>`).join('')
                   : '<tr><td colspan="3" class="empty-state">Không có phiên SSH nào đang kết nối.</td></tr>'
@@ -566,6 +650,35 @@ export async function renderSsh(container) {
         outEl.textContent = `[LỖI] ${err.message}`;
         toast(err.message, 'err');
       }
+    });
+  });
+
+  document.getElementById('ssh-add-key')?.addEventListener('click', () => {
+    openModal('Thêm SSH Public Key vào authorized_keys', `
+      <form id="ssh-import-form">
+        <div class="field"><label>Nhãn thiết bị</label><input class="input" name="label" placeholder="macbook-pro" required /></div>
+        <div class="field"><label>SSH Public Key (ssh-ed25519 / ssh-rsa)</label><textarea class="textarea" name="publicKey" placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... user@host" required></textarea></div>
+        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="ssh-import-sub">Lưu Public Key</button></div>
+      </form>
+    `, {
+      onMount(body) {
+        body.querySelector('#ssh-import-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          await withBusy(body.querySelector('#ssh-import-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/ssh/keys', {
+                label: fd.get('label'),
+                publicKey: fd.get('publicKey'),
+                clientHint: 'web-ui',
+              });
+              closeModal();
+              toast('Đã thêm SSH Public Key vào authorized_keys.');
+              await renderSsh(container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
+        });
+      },
     });
   });
 

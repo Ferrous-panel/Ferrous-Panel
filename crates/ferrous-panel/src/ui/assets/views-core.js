@@ -174,8 +174,18 @@ export async function renderOverview(container) {
     btn.addEventListener('click', () => openJobDrawer(btn.dataset.viewJob));
   });
 
-  state.refreshTimer = setInterval(() => {
-    if (state.route === 'overview') renderOverview(container);
+  if (state.refreshTimer) clearInterval(state.refreshTimer);
+  state.refreshTimer = setInterval(async () => {
+    if (state.route !== 'overview') return;
+    const modalOpen = Boolean(document.getElementById('modal-root')?.innerHTML);
+    if (modalOpen) return;
+    const y = window.scrollY;
+    try {
+      await renderOverview(container);
+      window.scrollTo(0, y);
+    } catch (_) {
+      // silent background poll
+    }
   }, 15000);
 }
 
@@ -1039,20 +1049,27 @@ export async function renderDatabases(container) {
       <div class="table-wrap">
         <table class="data-table">
           <thead>
-            <tr><th>Tên Database</th><th>Engine</th><th>Tài khoản</th><th class="right">Bảng / Kích thước</th><th class="right">Thao tác</th></tr>
+            <tr><th>Tên Database</th><th>Engine & Trạng thái</th><th>Tài khoản</th><th class="right">Kết nối / Bảng / Dung lượng</th><th class="right">Thao tác</th></tr>
           </thead>
           <tbody>
             ${
               Array.isArray(dbs) && dbs.length
-                ? dbs.map((d) => `
+                ? dbs.map((d) => {
+                  const tblCount = Array.isArray(d.tables) ? d.tables.length : 0;
+                  const connStr = `${d.activeConnections ?? 0}/${d.maxConnections ?? 0}`;
+                  return `
                   <tr>
                     <td><strong class="mono">${esc(d.name)}</strong></td>
-                    <td>${esc(d.engine)}</td>
+                    <td>
+                      <div>${esc(d.engine)}</div>
+                      <div class="meta-line"><span class="${statusClass(d.status)}">${esc(d.status || 'online')}</span></div>
+                    </td>
                     <td class="mono">${esc(d.username)}</td>
-                    <td class="right mono">${esc(d.tablesCount ?? 0)} bảng · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
+                    <td class="right mono">${esc(connStr)} conn · ${esc(tblCount)} bảng · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
                     <td class="right">
                       <div class="row" style="justify-content:flex-end">
                         <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">Chạy SQL</button>
+                        <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">Đổi MK</button>
                         <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">Xuất .sql</button>
                         <label class="btn btn-sm" style="cursor:pointer">
                           Nhập .sql
@@ -1061,7 +1078,8 @@ export async function renderDatabases(container) {
                         <button type="button" class="btn btn-sm btn-danger" data-db-del="${esc(d.id)}" data-name="${esc(d.name)}">Xóa</button>
                       </div>
                     </td>
-                  </tr>`).join('')
+                  </tr>`;
+                }).join('')
                 : '<tr><td colspan="5" class="empty-state">Chưa có cơ sở dữ liệu nào. Bạn có thể tạo ngay SQLite 3 (WAL · Pure Rust) mà không cần cài đặt thêm dịch vụ.</td></tr>'
             }
           </tbody>
@@ -1208,6 +1226,38 @@ export async function renderDatabases(container) {
       } catch (err) {
         toast(err.message, 'err');
       }
+    });
+  });
+
+  container.querySelectorAll('[data-db-pw]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      openModal(`Đổi mật khẩu Database — ${btn.dataset.name}`, `
+        <form id="db-pw-form">
+          <div class="field">
+            <label>Mật khẩu mới (tối thiểu 8 ký tự)</label>
+            <input class="input mono" name="password" type="password" minlength="8" required />
+          </div>
+          <div class="row" style="justify-content:flex-end">
+            <button type="submit" class="btn btn-primary" id="db-pw-sub">Cập nhật mật khẩu</button>
+          </div>
+        </form>
+      `, {
+        onMount(body) {
+          body.querySelector('#db-pw-form')?.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await withBusy(body.querySelector('#db-pw-sub'), async () => {
+              const password = String(new FormData(e.target).get('password') || '');
+              try {
+                await api('PUT', `/api/databases/${encodeURIComponent(btn.dataset.dbPw)}/password`, { password });
+                closeModal();
+                toast(`Đã cập nhật mật khẩu cho ${btn.dataset.name}.`);
+              } catch (err) {
+                toast(err.message, 'err');
+              }
+            });
+          });
+        },
+      });
     });
   });
 

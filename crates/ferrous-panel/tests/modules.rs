@@ -86,6 +86,7 @@ impl Drop for TempWorkspace {
 #[derive(Debug, Clone)]
 struct RecordedCall {
     binary: &'static str,
+    #[allow(dead_code)]
     args: Vec<String>,
 }
 

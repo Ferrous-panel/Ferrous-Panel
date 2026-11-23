@@ -64,9 +64,9 @@ export function fmtTime(iso) {
 
 export function statusClass(status) {
   const s = String(status || '').toLowerCase();
-  if (['running', 'active', 'online', 'completed', 'ok', 'healthy', 'installed', 'enabled', 'pass', 'ready', 'verified'].includes(s)) return 'st-ok';
-  if (['queued', 'pending', 'building', 'warning', 'warn', 'elevated', 'degraded', 'experimental', 'unverified', 'staged'].includes(s)) return 'st-warn';
-  if (['failed', 'error', 'stopped', 'critical', 'under_attack', 'offline', 'missing', 'unavailable', 'not-installed', 'not_installed'].includes(s)) return 'st-err';
+  if (['running', 'active', 'online', 'completed', 'ok', 'healthy', 'installed', 'enabled', 'pass', 'ready', 'verified', 'connected', 'enforced'].includes(s)) return 'st-ok';
+  if (['queued', 'pending', 'building', 'warning', 'warn', 'elevated', 'degraded', 'experimental', 'unverified', 'staged', 'standby', 'paused'].includes(s)) return 'st-warn';
+  if (['failed', 'error', 'stopped', 'critical', 'under_attack', 'offline', 'missing', 'unavailable', 'not-installed', 'not_installed', 'engine_not_installed'].includes(s)) return 'st-err';
   return 'st-muted';
 }
 
@@ -450,6 +450,77 @@ function updateShellChrome() {
   document.body.classList.toggle('nav-open', state.mobileNavOpen);
 }
 
+function renderSkeleton(container) {
+  container.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:16px" aria-busy="true" aria-label="Đang tải dữ liệu">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div class="skel skel-title"></div>
+        <div class="skel skel-sub"></div>
+      </div>
+      <div class="kpi-grid">
+        <div class="skel skel-kpi"></div>
+        <div class="skel skel-kpi"></div>
+        <div class="skel skel-kpi"></div>
+        <div class="skel skel-kpi"></div>
+      </div>
+      <div class="skel skel-table"></div>
+    </div>
+  `;
+}
+
+export function openQuickJump() {
+  const allItems = NAV_GROUPS.flatMap((g) => g.items.map((it) => ({ ...it, group: g.label })));
+  openModal('Chuyển nhanh phân hệ (Ctrl+K)', `
+    <input class="input" id="cmdk-input" placeholder="Gõ tên phân hệ (Website, SQL, PHP, Mail, Security, Edge…)" autocomplete="off" />
+    <div class="cmdk-list" id="cmdk-list"></div>
+  `, {
+    onMount(body) {
+      const input = body.querySelector('#cmdk-input');
+      const listEl = body.querySelector('#cmdk-list');
+      let selectedIdx = 0;
+      let filtered = allItems;
+
+      function drawList() {
+        const q = (input?.value || '').trim().toLowerCase();
+        filtered = q
+          ? allItems.filter((it) => it.label.toLowerCase().includes(q) || it.id.includes(q) || it.group.toLowerCase().includes(q))
+          : allItems;
+        if (selectedIdx >= filtered.length) selectedIdx = 0;
+        listEl.innerHTML = filtered.length
+          ? filtered.map((it, idx) => `
+              <button type="button" class="cmdk-item ${idx === selectedIdx ? 'active' : ''}" data-cmdk-route="${esc(it.id)}">
+                <span><strong>${esc(it.label)}</strong></span>
+                <span class="cmdk-group">${esc(it.group)}</span>
+              </button>`).join('')
+          : '<div class="empty-state" style="padding:16px">Không tìm thấy phân hệ phù hợp.</div>';
+        listEl.querySelectorAll('[data-cmdk-route]').forEach((b) => {
+          b.addEventListener('click', () => {
+            closeModal();
+            navigate(b.dataset.cmdkRoute);
+          });
+        });
+      }
+
+      input?.addEventListener('input', () => { selectedIdx = 0; drawList(); });
+      input?.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (filtered.length) { selectedIdx = (selectedIdx + 1) % filtered.length; drawList(); }
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (filtered.length) { selectedIdx = (selectedIdx - 1 + filtered.length) % filtered.length; drawList(); }
+        } else if (e.key === 'Enter' && filtered[selectedIdx]) {
+          e.preventDefault();
+          closeModal();
+          navigate(filtered[selectedIdx].id);
+        }
+      });
+      drawList();
+      setTimeout(() => input?.focus(), 20);
+    },
+  });
+}
+
 export async function renderCurrentView(forceCaps = false) {
   if (state.refreshTimer) {
     clearInterval(state.refreshTimer);
@@ -457,7 +528,7 @@ export async function renderCurrentView(forceCaps = false) {
   }
   const container = document.getElementById('view-container');
   if (!container) return;
-  container.innerHTML = `<div class="surface"><div class="empty-state">Đang tải dữ liệu từ Rust daemon…</div></div>`;
+  renderSkeleton(container);
 
   try {
     await loadCapabilities(forceCaps);
@@ -597,6 +668,7 @@ function renderShell() {
             </div>
           </div>
           <div class="topbar-actions">
+            <button type="button" class="btn btn-sm hide-mobile" id="topbar-cmdk-btn" title="Chuyển nhanh phân hệ">Chuyển nhanh <span class="kbd-hint">Ctrl+K</span></button>
             <a class="btn btn-sm hide-mobile" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
             <button type="button" class="btn btn-sm" id="topbar-refresh-btn">Làm mới</button>
             <button type="button" class="btn btn-sm hide-mobile" id="theme-toggle-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
@@ -627,6 +699,7 @@ function renderShell() {
     state.mobileNavOpen = false;
     updateShellChrome();
   });
+  document.getElementById('topbar-cmdk-btn')?.addEventListener('click', openQuickJump);
   document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => renderCurrentView(true));
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.getElementById('sidebar-theme-btn')?.addEventListener('click', toggleTheme);
@@ -646,7 +719,7 @@ function renderLogin(errorMessage = '') {
           <div class="brand-mark">FP</div>
           <div>
             <h1 class="login-title">FerrousPanel</h1>
-            <p class="login-sub">Pure-Rust VPS Control Plane · Cổng <span class="mono">${esc(port)}</span> · Zero Node.js</p>
+            <p class="login-sub">VPS Control Plane · Cổng <span class="mono">${esc(port)}</span></p>
           </div>
         </div>
         ${errorMessage ? `<div class="alert-err" id="login-error">${esc(errorMessage)}</div>` : '<div id="login-error"></div>'}
@@ -739,6 +812,13 @@ window.addEventListener('hashchange', () => {
 });
 
 window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    if (state.user) {
+      e.preventDefault();
+      openQuickJump();
+    }
+    return;
+  }
   if (e.key !== 'Escape') return;
   if (state.mobileNavOpen) {
     state.mobileNavOpen = false;

@@ -156,13 +156,21 @@ export async function renderPhpSoftware(container) {
   ]);
 
   let tab = 'software';
+  let pkgFilter = 'all';
 
   function draw() {
+    const cliPkgs = ['pkg-bun', 'pkg-tailwindcss', 'pkg-deno', 'pkg-wasmtime'];
+    const filteredPkgs = pkgs.filter((p) => {
+      if (pkgFilter === 'installed') return p.installed && p.status !== 'not_installed' && p.status !== 'missing';
+      if (pkgFilter === 'missing') return !p.installed || p.status === 'not_installed' || p.status === 'missing';
+      return true;
+    });
+
     container.innerHTML = `
       <div class="page-head">
         <div>
           <h1 class="page-title">PHP-FPM & Kho Phần mềm Hệ thống</h1>
-          <p class="page-desc">Quản lý gói dịch vụ hệ thống, cấu hình php.ini có kiểm tra php-fpm -t + rollback và chuyển đổi phiên bản PHP từng site.</p>
+          <p class="page-desc">Quản lý dịch vụ hệ thống thật (Postfix, Dovecot, Rspamd, Podman, WireGuard, Wasmtime, PHP-FPM), cấu hình có rollback và xem log journalctl.</p>
         </div>
         <div class="row">
           <div class="tabs">
@@ -177,35 +185,50 @@ export async function renderPhpSoftware(container) {
 
       ${tab === 'software' ? `
         <section class="surface">
+          <div class="surface-head">
+            <div class="tabs">
+              <button type="button" class="tab-btn ${pkgFilter === 'all' ? 'active' : ''}" data-pkg-filter="all">Tất cả (${pkgs.length})</button>
+              <button type="button" class="tab-btn ${pkgFilter === 'installed' ? 'active' : ''}" data-pkg-filter="installed">Đã cài (${pkgs.filter((x) => x.installed && x.status !== 'not_installed').length})</button>
+              <button type="button" class="tab-btn ${pkgFilter === 'missing' ? 'active' : ''}" data-pkg-filter="missing">Chưa cài (${pkgs.filter((x) => !x.installed || x.status === 'not_installed').length})</button>
+            </div>
+            <span class="meta-line"><span>Hiển thị <strong class="mono">${filteredPkgs.length}</strong> gói</span></span>
+          </div>
           <div class="table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>Gói dịch vụ</th><th>Phiên bản</th><th>Trạng thái</th><th class="right">Điều khiển</th></tr>
+                <tr><th>Gói dịch vụ</th><th>Phiên bản</th><th class="right">RAM cgroup</th><th>Trạng thái</th><th class="right">Điều khiển</th></tr>
               </thead>
               <tbody>
                 ${
-                  pkgs.length
-                    ? pkgs.map((p) => `
+                  filteredPkgs.length
+                    ? filteredPkgs.map((p) => {
+                      const isMissing = !p.installed || p.status === 'not_installed' || p.status === 'missing';
+                      const isCli = cliPkgs.includes(p.id);
+                      const hasLogs = Array.isArray(p.logs) && p.logs.length > 0;
+                      return `
                       <tr>
                         <td>
                           <div><strong>${esc(p.name)}</strong></div>
                           <div class="meta-line"><span>${esc(p.category || '')}</span><span>·</span><span>${esc(p.description || '')}</span></div>
                         </td>
                         <td class="mono">${esc(p.version || '—')}</td>
+                        <td class="right mono">${Number(p.memoryMb || 0) > 0 ? `${Number(p.memoryMb).toFixed(1)} MB` : '—'}</td>
                         <td><span class="${statusClass(p.status)}">${esc(p.status)}</span></td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
-                            <button type="button" class="btn btn-sm" data-pkg-cfg="${esc(p.id)}">Cấu hình</button>
-                            ${p.status === 'not_installed' || p.status === 'missing'
+                            ${hasLogs ? `<button type="button" class="btn btn-sm" data-pkg-logs="${esc(p.id)}">Log</button>` : ''}
+                            ${p.configPath ? `<button type="button" class="btn btn-sm" data-pkg-cfg="${esc(p.id)}">Cấu hình</button>` : ''}
+                            ${isMissing
                               ? `<button type="button" class="btn btn-sm btn-primary" data-pkg-act="install" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Cài đặt</button>`
-                              : (['pkg-bun', 'pkg-tailwindcss', 'pkg-deno'].includes(p.id)
+                              : (isCli
                                 ? `<button type="button" class="btn btn-sm" data-pkg-act="install" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Cập nhật</button>`
                                 : `<button type="button" class="btn btn-sm" data-pkg-act="restart" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Restart</button>
                                    <button type="button" class="btn btn-sm btn-danger" data-pkg-act="stop" data-id="${esc(p.id)}" data-name="${esc(p.name)}">Stop</button>`)}
                           </div>
                         </td>
-                      </tr>`).join('')
-                    : '<tr><td colspan="4" class="empty-state">Chưa có danh sách gói phần mềm.</td></tr>'
+                      </tr>`;
+                    }).join('')
+                    : '<tr><td colspan="5" class="empty-state">Không có gói phần mềm nào trong bộ lọc này.</td></tr>'
                 }
               </tbody>
             </table>
@@ -219,26 +242,36 @@ export async function renderPhpSoftware(container) {
                 <section class="surface">
                   <div class="surface-head">
                     <div>
-                      <h3 class="surface-title">PHP ${esc(p.version)}</h3>
-                      <div class="meta-line"><span>${esc(p.fpmSocket || '')}</span><span>·</span><span class="${statusClass(p.status)}">${esc(p.status)}</span></div>
+                      <h3 class="surface-title">PHP ${esc(p.version)} <span class="meta-line" style="display:inline;margin-left:6px;font-weight:400">${esc(p.fullVersion || '')}</span></h3>
+                      <div class="meta-line">
+                        <span class="mono">${esc(p.fpmSocket || '')}</span>
+                        <span>·</span>
+                        <span class="${statusClass(p.status)}">${esc(p.status)}</span>
+                        <span>·</span>
+                        <span class="mono">${esc(p.activeWorkers ?? 0)}/${esc(p.maxChildren ?? 0)} workers</span>
+                        <span>·</span>
+                        <span class="mono">${Number(p.memoryUsageMb || 0).toFixed(1)} MB</span>
+                      </div>
                     </div>
                     <div class="row">
-                      <button type="button" class="btn btn-sm" data-php-cfg="${esc(p.version)}">Chỉnh php.ini</button>
+                      <button type="button" class="btn btn-sm" data-php-cfg="${esc(p.version)}" ${p.installed ? '' : 'disabled'}>Chỉnh php.ini</button>
                       <button type="button" class="btn btn-sm" data-php-act="restart" data-ver="${esc(p.version)}" ${p.installed ? '' : 'disabled'}>Restart</button>
-                      <button type="button" class="btn btn-sm" data-php-act="install" data-ver="${esc(p.version)}">Cài / Sửa</button>
+                      <button type="button" class="btn btn-sm ${p.installed ? '' : 'btn-primary'}" data-php-act="install" data-ver="${esc(p.version)}">${p.installed ? 'Sửa gói' : 'Cài đặt'}</button>
                     </div>
                   </div>
-                  <div class="meta-line" style="margin-bottom:8px">
+                  <div class="meta-line" style="margin-bottom:10px">
                     <span>Memory: <strong class="mono">${esc(p.memoryLimit || '256M')}</strong></span>
                     <span>·</span>
                     <span>Upload: <strong class="mono">${esc(p.uploadMaxFilesize || '64M')}</strong></span>
                     <span>·</span>
                     <span>Max Exec: <strong class="mono">${esc(p.maxExecutionTime || 60)}s</strong></span>
+                    <span>·</span>
+                    <span>OPcache: <strong class="${p.opcacheEnabled ? 'st-ok' : 'st-muted'}">${p.opcacheEnabled ? 'Bật' : 'Tắt'}</strong></span>
                   </div>
                   <div class="row">
-                    ${(p.extensions || []).slice(0, 10).map((ext) => `
+                    ${(p.extensions || []).map((ext) => `
                       <button type="button" class="btn btn-sm" data-php-ext="${esc(ext.name)}" data-ver="${esc(p.version)}" ${p.installed ? '' : 'disabled'}>
-                        ${esc(ext.name)}: ${ext.enabled ? 'Bật' : 'Tắt'}
+                        ${esc(ext.name)}: <strong class="${ext.enabled ? 'st-ok' : 'st-muted'}">${ext.enabled ? 'Bật' : 'Tắt'}</strong>
                       </button>`).join('')}
                   </div>
                 </section>`).join('')
@@ -250,6 +283,17 @@ export async function renderPhpSoftware(container) {
 
     document.getElementById('sw-tab-pkgs')?.addEventListener('click', () => { tab = 'software'; draw(); });
     document.getElementById('sw-tab-php')?.addEventListener('click', () => { tab = 'php'; draw(); });
+    container.querySelectorAll('[data-pkg-filter]').forEach((b) => {
+      b.addEventListener('click', () => { pkgFilter = b.dataset.pkgFilter; draw(); });
+    });
+    container.querySelectorAll('[data-pkg-logs]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const pkg = pkgs.find((x) => x.id === btn.dataset.pkgLogs);
+        if (!pkg) return;
+        const text = (pkg.logs || []).join('\n') || 'Chưa có log journalctl.';
+        openModal(`Journalctl Logs — ${pkg.name}`, `<pre class="terminal-box">${esc(text)}</pre>`, { large: true });
+      });
+    });
 
     document.getElementById('php-switch-site-btn')?.addEventListener('click', () => {
       openModal('Đổi phiên bản PHP-FPM cho Website', `
@@ -760,13 +804,14 @@ export async function renderMail(container) {
   const domains = data.domains || [];
   const mailboxes = data.mailboxes || [];
   const forwarders = data.forwarders || [];
+  const messages = data.messages || [];
   const mailDis = capDisabledAttr('mail_server');
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Máy chủ Mail (Postfix / Dovecot / Rspamd)</h1>
-        <p class="page-desc">Quản lý tên miền thư điện tử với khóa DKIM RSA-2048 thật, kiểm chứng DNS TXT (SPF/DKIM/DMARC), hộp thư và forwarders.</p>
+        <p class="page-desc">Quản lý tên miền thư điện tử với khóa DKIM RSA-2048 thật, kiểm chứng DNS TXT (SPF/DKIM/DMARC), hộp thư Maildir thật và forwarders.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="mail-add-dom" ${mailDis}>Thêm tên miền</button>
@@ -778,16 +823,28 @@ export async function renderMail(container) {
 
     ${capBannerHtml(['mail_server'])}
 
+    <div class="kv-grid">
+      <div class="kv-item">
+        <span class="kv-label">Postfix MTA</span>
+        <span class="kv-value mono"><span class="${statusClass(data.postfixStatus)}">${esc(data.postfixStatus || 'unknown')}</span> · ${esc(data.postfixVersion || '—')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Dovecot IMAP</span>
+        <span class="kv-value mono"><span class="${statusClass(data.dovecotStatus)}">${esc(data.dovecotStatus || 'unknown')}</span> · ${esc(data.dovecotVersion || '—')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Rspamd Anti-Spam</span>
+        <span class="kv-value mono"><span class="${statusClass(data.rspamdStatus)}">${esc(data.rspamdStatus || 'unknown')}</span> · ${esc(data.rspamdVersion || '—')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Hàng đợi / Đã gửi / Chặn Spam</span>
+        <span class="kv-value mono">${esc(data.queueCount ?? 0)} queue · ${esc(data.sentToday ?? 0)} sent · ${esc(data.spamBlockedToday ?? 0)} spam</span>
+      </div>
+    </div>
+
     <section class="surface">
       <div class="surface-head">
         <h2 class="surface-title">Tên miền Mail & Kiểm chứng DNS (${domains.length})</h2>
-        <div class="meta-line">
-          <span>Postfix: <strong class="${statusClass(data.postfixStatus || 'unknown')}">${esc(data.postfixStatus || '—')}</strong></span>
-          <span>·</span>
-          <span>Dovecot: <strong class="${statusClass(data.dovecotStatus || 'unknown')}">${esc(data.dovecotStatus || '—')}</strong></span>
-          <span>·</span>
-          <span>Rspamd: <strong class="${statusClass(data.rspamdStatus || 'unknown')}">${esc(data.rspamdStatus || '—')}</strong></span>
-        </div>
       </div>
       <div class="table-wrap">
         <table class="data-table">
@@ -816,17 +873,17 @@ export async function renderMail(container) {
 
     <div class="grid-2">
       <section class="surface">
-        <div class="surface-head"><h2 class="surface-title">Hộp thư (${mailboxes.length})</h2></div>
+        <div class="surface-head"><h2 class="surface-title">Hộp thư Maildir (${mailboxes.length})</h2></div>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Địa chỉ Email</th><th class="right">Hạn mức</th><th class="right">Xóa</th></tr></thead>
+            <thead><tr><th>Địa chỉ Email</th><th class="right">Đã dùng / Hạn mức</th><th class="right">Xóa</th></tr></thead>
             <tbody>
               ${
                 mailboxes.length
                   ? mailboxes.map((m) => `
                     <tr>
                       <td class="mono"><strong>${esc(m.email)}</strong></td>
-                      <td class="right mono">${esc(m.quotaMb || 1024)} MB</td>
+                      <td class="right mono">${Number(m.usedMb || 0).toFixed(2)} / ${esc(m.quotaMb || 1024)} MB</td>
                       <td class="right"><button type="button" class="btn btn-sm btn-danger" data-mb-del="${esc(m.id)}" data-email="${esc(m.email)}" ${mailDis}>Xóa</button></td>
                     </tr>`).join('')
                   : '<tr><td colspan="3" class="empty-state">Chưa có hộp thư nào.</td></tr>'
@@ -857,7 +914,55 @@ export async function renderMail(container) {
         </div>
       </section>
     </div>
+
+    <section class="surface">
+      <div class="surface-head">
+        <h2 class="surface-title">Hộp thư đến & Thư đã gửi (Maildir thật · ${messages.length})</h2>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr><th>Thư mục</th><th>Người gửi / Người nhận</th><th>Tiêu đề</th><th class="right">Thời gian</th><th class="right">Xem</th></tr></thead>
+          <tbody>
+            ${
+              messages.length
+                ? messages.slice(0, 25).map((msg, idx) => `
+                  <tr>
+                    <td class="mono">${esc(msg.folder || 'inbox')}</td>
+                    <td>
+                      <div class="mono">${esc(msg.from || '—')}</div>
+                      <div class="meta-line mono">→ ${esc(msg.to || '—')}</div>
+                    </td>
+                    <td>
+                      <div><strong>${esc(msg.subject || '(Không tiêu đề)')}</strong></div>
+                      <div class="meta-line">${esc(msg.snippet || '')}</div>
+                    </td>
+                    <td class="right mono">${esc(msg.timestamp || '—')}</td>
+                    <td class="right"><button type="button" class="btn btn-sm" data-mail-read="${idx}">Đọc</button></td>
+                  </tr>`).join('')
+                : '<tr><td colspan="5" class="empty-state">Chưa có email nào trong Maildir / lịch sử gửi.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    </section>
   `;
+
+  container.querySelectorAll('[data-mail-read]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const msg = messages[Number(b.dataset.mailRead)];
+      if (!msg) return;
+      openModal(msg.subject || '(Không tiêu đề)', `
+        <div class="meta-line" style="margin-bottom:12px">
+          <span>From: <strong class="mono">${esc(msg.from)}</strong></span>
+          <span>·</span>
+          <span>To: <strong class="mono">${esc(msg.to)}</strong></span>
+          <span>·</span>
+          <span class="mono">${esc(msg.timestamp)}</span>
+        </div>
+        <pre class="terminal-box">${esc(msg.body || msg.snippet || '')}</pre>
+      `, { large: true });
+    });
+  });
 
   document.getElementById('mail-add-dom')?.addEventListener('click', () => {
     openModal('Thêm tên miền Mail (sinh khóa RSA-2048 DKIM)', `
@@ -1010,37 +1115,66 @@ export async function renderEdgePolyglot(container) {
   const workers = edge.wasiWorkers || [];
   const containers = edge.ociContainers || [];
   const peers = edge.wireguardPeers || [];
+  const snapshots = edge.blake3Snapshots || [];
 
   container.innerHTML = `
     <div class="page-head">
       <div>
-        <h1 class="page-title">Edge Cloud & Polyglot FFI (Tùy chọn / Thử nghiệm)</h1>
-        <p class="page-desc">Các tính năng mở rộng yêu cầu binary tương ứng trên VPS (wasmtime, podman/docker, wireguard-tools, rustc). Nút sẽ bị khóa nếu thiếu công cụ.</p>
+        <h1 class="page-title">Edge Cloud & Polyglot FFI</h1>
+        <p class="page-desc">Vận hành thật với Wasmtime, Podman/Docker, WireGuard VPN, BLAKE3 Merkle Snapshots và Rust C-ABI (.so). Có thể cài 1-click trong Kho Phần mềm.</p>
       </div>
       <div class="row">
+        <button type="button" class="btn btn-sm" id="edge-add-wasi" ${capDisabledAttr('edge_cloud_wasi')}>Thêm WASI Worker</button>
         <button type="button" class="btn btn-sm" id="edge-add-oci" ${capDisabledAttr('edge_cloud_oci')}>Chạy OCI Container</button>
         <button type="button" class="btn btn-sm" id="edge-add-wg" ${capDisabledAttr('edge_cloud_wireguard')}>Thêm WireGuard Peer</button>
-        <button type="button" class="btn btn-sm btn-primary" id="edge-compile-ffi" ${capDisabledAttr('polyglot_ffi')}>Biên dịch Polyglot FFI (.so)</button>
+        <button type="button" class="btn btn-sm" id="edge-add-snap">Tạo BLAKE3 Snapshot</button>
+        <button type="button" class="btn btn-sm btn-primary" id="edge-compile-ffi" ${capDisabledAttr('polyglot_ffi')}>Biên dịch FFI (.so)</button>
       </div>
     </div>
 
     ${capBannerHtml(['edge_cloud_wasi', 'edge_cloud_oci', 'edge_cloud_wireguard', 'polyglot_ffi'])}
+
+    <div class="kv-grid">
+      <div class="kv-item">
+        <span class="kv-label">Wasmtime Engine</span>
+        <span class="kv-value mono">${esc(edge.wasmtimeVersion || 'Not installed')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">OCI Container Runtime</span>
+        <span class="kv-value mono">${esc(edge.youkiVersion || 'Not installed')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">WireGuard (${esc(edge.wireguardInterface || 'wg0')}:${esc(edge.wireguardListenPort || 51820)})</span>
+        <span class="kv-value mono" title="${esc(edge.serverPublicKey || '')}">${esc(edge.boringtunVersion || 'Not installed')}</span>
+      </div>
+      <div class="kv-item">
+        <span class="kv-label">Server Public Key / BLAKE3</span>
+        <span class="kv-value mono" title="${esc(edge.serverPublicKey || '')}">${esc(edge.serverPublicKey ? `${edge.serverPublicKey.slice(0, 22)}…` : (edge.blake3EngineVersion || 'blake3 1.5'))}</span>
+      </div>
+    </div>
 
     <div class="grid-2">
       <section class="surface">
         <div class="surface-head"><h2 class="surface-title">OCI Containers (${containers.length})</h2></div>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Tên & Image</th><th>Trạng thái</th><th class="right">Thao tác</th></tr></thead>
+            <thead><tr><th>Tên & Image</th><th>Trạng thái & Tài nguyên</th><th class="right">Thao tác</th></tr></thead>
             <tbody>
               ${
                 containers.length
                   ? containers.map((c) => `
                     <tr>
-                      <td><strong>${esc(c.name)}</strong><div class="meta-line mono">${esc(c.image)}</div></td>
-                      <td><span class="${statusClass(c.status)}">${esc(c.status)}</span></td>
+                      <td>
+                        <strong>${esc(c.name)}</strong>
+                        <div class="meta-line mono">${esc(c.image)} · :${esc(c.hostPort)}→${esc(c.containerPort)}</div>
+                      </td>
+                      <td>
+                        <div><span class="${statusClass(c.status)}">${esc(c.status)}</span> ${c.internalIp ? `· <span class="mono">${esc(c.internalIp)}</span>` : ''}</div>
+                        <div class="meta-line mono">CPU ${Number(c.cpuUsagePercent || 0).toFixed(1)}% · RAM ${Number(c.memoryUsedMb || 0).toFixed(1)}/${esc(c.memoryMaxMb || 256)} MB · PIDs ${esc(c.pidsCurrent ?? 0)}</div>
+                      </td>
                       <td class="right">
                         <div class="row" style="justify-content:flex-end">
+                          <button type="button" class="btn btn-sm" data-oci-act="${c.status === 'running' ? 'stop' : 'start'}" data-id="${esc(c.id)}" ${capDisabledAttr('edge_cloud_oci')}>${c.status === 'running' ? 'Stop' : 'Start'}</button>
                           <button type="button" class="btn btn-sm" data-oci-act="restart" data-id="${esc(c.id)}" ${capDisabledAttr('edge_cloud_oci')}>Restart</button>
                           <button type="button" class="btn btn-sm btn-danger" data-oci-act="delete" data-id="${esc(c.id)}" ${capDisabledAttr('edge_cloud_oci')}>Xóa</button>
                         </div>
@@ -1054,20 +1188,93 @@ export async function renderEdgePolyglot(container) {
       </section>
 
       <section class="surface">
-        <div class="surface-head"><h2 class="surface-title">WireGuard Peers (${peers.length}) & WASI (${workers.length})</h2></div>
+        <div class="surface-head">
+          <h2 class="surface-title">WireGuard Mesh Peers (${peers.length})</h2>
+          <span class="meta-line mono">${esc(edge.meshSubnetCidr || '10.66.0.0/24')}</span>
+        </div>
         <div class="table-wrap">
           <table class="data-table">
-            <thead><tr><th>Peer</th><th>Allowed IPs</th><th class="right">Xóa</th></tr></thead>
+            <thead><tr><th>Peer & Key</th><th>Allowed IPs / Lưu lượng</th><th class="right">Thao tác</th></tr></thead>
             <tbody>
               ${
                 peers.length
                   ? peers.map((p) => `
                     <tr>
-                      <td><strong>${esc(p.name)}</strong><div class="meta-line mono">${esc(p.publicKey?.slice(0, 24) || '')}…</div></td>
-                      <td class="mono">${esc(p.allowedIps)}</td>
-                      <td class="right"><button type="button" class="btn btn-sm btn-danger" data-wg-del="${esc(p.id)}" ${capDisabledAttr('edge_cloud_wireguard')}>Xóa</button></td>
+                      <td>
+                        <strong>${esc(p.name)}</strong> <span class="${statusClass(p.status)}" style="margin-left:6px;font-size:12px">${esc(p.status)}</span>
+                        <div class="meta-line mono">${esc(p.publicKey?.slice(0, 24) || '')}…</div>
+                      </td>
+                      <td>
+                        <div class="mono">${esc(p.allowedIps)}</div>
+                        <div class="meta-line mono">RX ${Number(p.rxMb || 0).toFixed(2)} MB · TX ${Number(p.txMb || 0).toFixed(2)} MB</div>
+                      </td>
+                      <td class="right">
+                        <div class="row" style="justify-content:flex-end">
+                          <button type="button" class="btn btn-sm" data-wg-toggle="${esc(p.id)}" ${capDisabledAttr('edge_cloud_wireguard')}>${p.status === 'connected' ? 'Tạm ngắt' : 'Kích hoạt'}</button>
+                          <button type="button" class="btn btn-sm btn-danger" data-wg-del="${esc(p.id)}" ${capDisabledAttr('edge_cloud_wireguard')}>Xóa</button>
+                        </div>
+                      </td>
                     </tr>`).join('')
                   : '<tr><td colspan="3" class="empty-state">Chưa có WireGuard peer nào.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid-2">
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">WASI Edge Workers (${workers.length})</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Worker & Route</th><th>Thực thi / BLAKE3</th><th class="right">Thao tác</th></tr></thead>
+            <tbody>
+              ${
+                workers.length
+                  ? workers.map((w) => `
+                    <tr>
+                      <td>
+                        <strong>${esc(w.name)}</strong> <span class="${statusClass(w.status)}" style="margin-left:6px;font-size:12px">${esc(w.status)}</span>
+                        <div class="meta-line mono">${esc(w.routePattern)} · ${esc(w.targetDomain || '—')}</div>
+                      </td>
+                      <td class="mono">
+                        <div>${esc(w.invocations24h ?? 0)} lần · ${esc(w.avgExecutionUs ?? 0)} µs</div>
+                        <div class="meta-line">${esc((w.blake3Hash || '').slice(0, 16))}…</div>
+                      </td>
+                      <td class="right">
+                        <div class="row" style="justify-content:flex-end">
+                          <button type="button" class="btn btn-sm btn-primary" data-wasi-invoke="${esc(w.id)}" ${capDisabledAttr('edge_cloud_wasi')}>Chạy</button>
+                          <button type="button" class="btn btn-sm" data-wasi-toggle="${esc(w.id)}" ${capDisabledAttr('edge_cloud_wasi')}>${w.status === 'active' ? 'Tắt' : 'Bật'}</button>
+                          <button type="button" class="btn btn-sm btn-danger" data-wasi-del="${esc(w.id)}">Xóa</button>
+                        </div>
+                      </td>
+                    </tr>`).join('')
+                  : '<tr><td colspan="3" class="empty-state">Chưa có WASI worker nào.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="surface-head"><h2 class="surface-title">BLAKE3 Merkle Snapshots (${snapshots.length})</h2></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Snapshot & Tài nguyên</th><th>Merkle Root (BLAKE3)</th><th class="right">Xóa</th></tr></thead>
+            <tbody>
+              ${
+                snapshots.length
+                  ? snapshots.map((s) => `
+                    <tr>
+                      <td>
+                        <strong>${esc(s.snapshotName)}</strong>
+                        <div class="meta-line mono">${esc(s.targetResource)} · ${Number(s.storedSizeMb || 0).toFixed(2)} MB</div>
+                      </td>
+                      <td class="mono" title="${esc(s.merkleRootBlake3 || '')}">${esc((s.merkleRootBlake3 || '').slice(0, 20))}…</td>
+                      <td class="right"><button type="button" class="btn btn-sm btn-danger" data-snap-del="${esc(s.id)}">Xóa</button></td>
+                    </tr>`).join('')
+                  : '<tr><td colspan="3" class="empty-state">Chưa có BLAKE3 snapshot nào.</td></tr>'
               }
             </tbody>
           </table>
@@ -1079,7 +1286,7 @@ export async function renderEdgePolyglot(container) {
       <div class="surface-head"><h2 class="surface-title">Polyglot FFI Toolchains (${toolchains.length})</h2></div>
       <div class="table-wrap">
         <table class="data-table">
-          <thead><tr><th>Ngôn ngữ đích</th><th>Giao thức Bridge</th><th>Trạng thái</th></tr></thead>
+          <thead><tr><th>Ngôn ngữ đích</th><th>Giao thức Bridge</th><th>Trạng thái trên VPS</th></tr></thead>
           <tbody>
             ${
               toolchains.length
@@ -1096,6 +1303,69 @@ export async function renderEdgePolyglot(container) {
       </div>
     </section>
   `;
+
+  document.getElementById('edge-add-wasi')?.addEventListener('click', () => {
+    openModal('Tạo WASI Edge Worker (Wasmtime)', `
+      <form id="wasi-form">
+        <div class="form-grid">
+          <div class="field"><label>Tên worker</label><input class="input mono" name="name" placeholder="edge-auth-check" required /></div>
+          <div class="field"><label>Route Pattern</label><input class="input mono" name="routePattern" value="/edge/*" required /></div>
+          <div class="field"><label>Tên miền áp dụng</label><input class="input mono" name="targetDomain" placeholder="example.com" /></div>
+          <div class="field"><label>Memory Limit (KB)</label><input class="input mono" name="memoryLimitKb" type="number" value="16384" /></div>
+        </div>
+        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="wasi-sub">Tạo Worker</button></div>
+      </form>
+    `, {
+      onMount(body) {
+        body.querySelector('#wasi-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          await withBusy(body.querySelector('#wasi-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/edge-cloud/workers', {
+                name: fd.get('name'),
+                routePattern: fd.get('routePattern'),
+                targetDomain: fd.get('targetDomain') || '',
+                memoryLimitKb: Number(fd.get('memoryLimitKb') || 16384),
+              });
+              closeModal();
+              toast('Đã tạo WASI Edge Worker.');
+              await renderEdgePolyglot(container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
+        });
+      },
+    });
+  });
+
+  document.getElementById('edge-add-snap')?.addEventListener('click', () => {
+    openModal('Tạo BLAKE3 Merkle Snapshot', `
+      <form id="snap-form">
+        <div class="field"><label>Tên snapshot</label><input class="input mono" name="snapshotName" placeholder="daily-wwwroot-snap" required /></div>
+        <div class="field"><label>Thư mục nguồn (trong /www/wwwroot hoặc data_dir)</label><input class="input mono" name="targetResource" value="/www/wwwroot" required /></div>
+        <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="snap-sub">Tính BLAKE3 & Lưu</button></div>
+      </form>
+    `, {
+      onMount(body) {
+        body.querySelector('#snap-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          await withBusy(body.querySelector('#snap-sub'), async () => {
+            const fd = new FormData(e.target);
+            try {
+              await api('POST', '/api/edge-cloud/snapshots', {
+                snapshotName: fd.get('snapshotName'),
+                targetResource: fd.get('targetResource'),
+                bucket: 'local-blake3-store',
+              });
+              closeModal();
+              toast('Đã tạo BLAKE3 Merkle Snapshot thành công.');
+              await renderEdgePolyglot(container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
+        });
+      },
+    });
+  });
 
   document.getElementById('edge-add-oci')?.addEventListener('click', () => {
     openModal('Triển khai OCI Container (Podman/Docker)', `
@@ -1184,7 +1454,7 @@ export async function renderEdgePolyglot(container) {
                 targetLanguage: fd.get('targetLanguage'),
                 optimizationLevel: 'release',
                 enableZeroCopyIpc: true,
-                customFunctions: ['verify_token'],
+                customFunctions: ['fnv1a_mix', 'proc_uptime_secs', 'proc_mem_available_mb'],
               });
               closeModal();
               openModal('Kết quả biên dịch FFI', `<pre class="terminal-box">${esc(res.compilerOutput || '')}</pre>`, { large: true });
@@ -1208,10 +1478,56 @@ export async function renderEdgePolyglot(container) {
     else run();
   }));
 
+  container.querySelectorAll('[data-wg-toggle]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
+    try {
+      await api('POST', `/api/edge-cloud/wireguard/${encodeURIComponent(b.dataset.wgToggle)}/toggle`, {});
+      toast('Đã cập nhật trạng thái WireGuard peer.');
+      await renderEdgePolyglot(container);
+    } catch (err) { toast(err.message, 'err'); }
+  })));
+
   container.querySelectorAll('[data-wg-del]').forEach((b) => b.addEventListener('click', () => {
     confirmAction('Xóa WireGuard Peer', 'Xác nhận xóa peer này khỏi giao diện wg0?', () => withBusy(b, async () => {
       try {
         await api('DELETE', `/api/edge-cloud/wireguard/${encodeURIComponent(b.dataset.wgDel)}`);
+        await renderEdgePolyglot(container);
+      } catch (err) { toast(err.message, 'err'); }
+    }));
+  }));
+
+  container.querySelectorAll('[data-wasi-invoke]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
+    try {
+      const res = await api('POST', `/api/edge-cloud/workers/${encodeURIComponent(b.dataset.wasiInvoke)}/invoke`, { payload: '{}' });
+      const r = res.result || res;
+      openModal(
+        `Kết quả WASI Worker (HTTP ${r.statusCode ?? 200} · ${r.executionTimeUs ?? 0} µs)`,
+        `<div class="meta-line mono" style="margin-bottom:10px">Cold start: ${esc(r.coldStartUs ?? 0)} µs · Peak RAM: ${esc(r.memoryPeakKb ?? 0)} KB · Fuel: ${esc(r.fuelConsumed ?? 0)}</div><pre class="terminal-box">${esc(r.responseBody || JSON.stringify(r, null, 2))}</pre>`,
+        { large: true }
+      );
+      await renderEdgePolyglot(container);
+    } catch (err) { toast(err.message, 'err'); }
+  })));
+
+  container.querySelectorAll('[data-wasi-toggle]').forEach((b) => b.addEventListener('click', () => withBusy(b, async () => {
+    try {
+      await api('POST', `/api/edge-cloud/workers/${encodeURIComponent(b.dataset.wasiToggle)}/toggle`, {});
+      await renderEdgePolyglot(container);
+    } catch (err) { toast(err.message, 'err'); }
+  })));
+
+  container.querySelectorAll('[data-wasi-del]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Xóa WASI Worker', 'Xác nhận xóa WASI Edge Worker này?', () => withBusy(b, async () => {
+      try {
+        await api('DELETE', `/api/edge-cloud/workers/${encodeURIComponent(b.dataset.wasiDel)}`);
+        await renderEdgePolyglot(container);
+      } catch (err) { toast(err.message, 'err'); }
+    }));
+  }));
+
+  container.querySelectorAll('[data-snap-del]').forEach((b) => b.addEventListener('click', () => {
+    confirmAction('Xóa BLAKE3 Snapshot', 'Xác nhận xóa snapshot này?', () => withBusy(b, async () => {
+      try {
+        await api('DELETE', `/api/edge-cloud/snapshots/${encodeURIComponent(b.dataset.snapDel)}`);
         await renderEdgePolyglot(container);
       } catch (err) { toast(err.message, 'err'); }
     }));

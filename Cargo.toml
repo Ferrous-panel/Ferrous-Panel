@@ -4,7 +4,6 @@ members = [
     "crates/ferrous-panel",
     "crates/ferrousx",
 ]
-exclude = ["_archive"]
 
 [workspace.package]
 version = "2.5.0"
