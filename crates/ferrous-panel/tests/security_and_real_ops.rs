@@ -463,7 +463,10 @@ fn capabilities_endpoint_and_runtime_mode_report_honest_host_state() -> Result<(
         )
         .await
         .map_err(|e| anyhow::anyhow!("login error: {e}"))?;
-        let login_json: Value = serde_json::from_slice(&to_bytes(login.into_body()).await?)?;
+        let login_bytes = to_bytes(login.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read login body error: {e}"))?;
+        let login_json: Value = serde_json::from_slice(&login_bytes)?;
         let token = login_json["token"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing token"))?;
@@ -479,7 +482,10 @@ fn capabilities_endpoint_and_runtime_mode_report_honest_host_state() -> Result<(
         .map_err(|e| anyhow::anyhow!("GET /api/capabilities error: {e}"))?;
         ensure_eq(&res.status(), &StatusCode::OK, "GET /api/capabilities ok")?;
 
-        let body: Value = serde_json::from_slice(&to_bytes(res.into_body()).await?)?;
+        let res_bytes = to_bytes(res.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read capabilities body error: {e}"))?;
+        let body: Value = serde_json::from_slice(&res_bytes)?;
         ensure_eq(&body["mode"], &json!("test"), "capabilities runtime mode")?;
         let caps = body["capabilities"]
             .as_array()
@@ -949,7 +955,10 @@ fn oneclick_wordpress_preflight_returns_409_and_api_rejects_invalid_json_with_40
         )
         .await
         .map_err(|e| anyhow::anyhow!("login error: {e}"))?;
-        let login_json: Value = serde_json::from_slice(&to_bytes(login.into_body()).await?)?;
+        let login_bytes = to_bytes(login.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read login body error: {e}"))?;
+        let login_json: Value = serde_json::from_slice(&login_bytes)?;
         let token = login_json["token"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing token"))?;

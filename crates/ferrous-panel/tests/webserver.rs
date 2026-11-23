@@ -6,6 +6,7 @@ use actix_web::test::{init_service, try_call_service, TestRequest};
 use actix_web::App;
 use anyhow::{bail, Context, Result};
 use chrono::{TimeZone, Utc};
+use ferrous_panel::auth::store::AuthStore;
 use ferrous_panel::config::Config;
 use ferrous_panel::configure_app;
 use ferrous_panel::error::PanelError;
@@ -948,7 +949,10 @@ fn api_webserver_endpoints_enforce_auth_validation_501_and_409() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("login failed: {e}"))?;
         ensure_eq(&login_res.status(), &StatusCode::OK, "login status")?;
-        let login_json: Value = serde_json::from_slice(&to_bytes(login_res.into_body()).await?)?;
+        let login_bytes = to_bytes(login_res.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read login body failed: {e}"))?;
+        let login_json: Value = serde_json::from_slice(&login_bytes)?;
         let token = login_json["token"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("missing token"))?
@@ -1015,7 +1019,10 @@ fn api_webserver_endpoints_enforce_auth_validation_501_and_409() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("PUT valid sites error: {e}"))?;
         ensure_eq(&put_ok_res.status(), &StatusCode::OK, "PUT /api/webserver ok")?;
-        let put_json: Value = serde_json::from_slice(&to_bytes(put_ok_res.into_body()).await?)?;
+        let put_bytes = to_bytes(put_ok_res.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read PUT body failed: {e}"))?;
+        let put_json: Value = serde_json::from_slice(&put_bytes)?;
         ensure_eq(&put_json["frontendEngine"], &json!("nginx"), "frontendEngine default nginx")?;
         ensure_eq(&put_json["sitesCount"], &json!(1), "sitesCount updated")?;
 
@@ -1046,7 +1053,10 @@ fn api_webserver_endpoints_enforce_auth_validation_501_and_409() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("POST switch ok error: {e}"))?;
         let _ = join_srv.join();
         ensure_eq(&switch_ok.status(), &StatusCode::OK, "switch ok status")?;
-        let switch_json: Value = serde_json::from_slice(&to_bytes(switch_ok.into_body()).await?)?;
+        let switch_bytes = to_bytes(switch_ok.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read switch body failed: {e}"))?;
+        let switch_json: Value = serde_json::from_slice(&switch_bytes)?;
         ensure_eq(&switch_json["activeEngine"], &json!("ferrousx"), "switched activeEngine")?;
 
         // 7. GET /api/webserver reflects persisted frontendEngine = "ferrousx"
@@ -1060,7 +1070,10 @@ fn api_webserver_endpoints_enforce_auth_validation_501_and_409() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("GET after switch error: {e}"))?;
         ensure_eq(&get_after.status(), &StatusCode::OK, "GET /api/webserver after switch")?;
-        let get_json: Value = serde_json::from_slice(&to_bytes(get_after.into_body()).await?)?;
+        let get_bytes = to_bytes(get_after.into_body())
+            .await
+            .map_err(|e| anyhow::anyhow!("read GET body failed: {e}"))?;
+        let get_json: Value = serde_json::from_slice(&get_bytes)?;
         ensure_eq(&get_json["frontendEngine"], &json!("ferrousx"), "GET persisted frontendEngine")?;
 
         Ok(())
