@@ -53,51 +53,85 @@ pub fn list_rust_source_files() -> Vec<RustSourceFile> {
 
 pub fn list_polyglot_toolchains() -> Vec<PolyglotToolchainSpec> {
     let rustc_ready = AllowedBinary::Rustc.is_available() || AllowedBinary::Cargo.is_available();
-    let tc_status = if rustc_ready { "ready" } else { "rustc_missing" };
+    let js_ready = AllowedBinary::Bun.is_available() || AllowedBinary::Deno.is_available();
+    let py_ready = AllowedBinary::Python3.is_available();
+    let php_ready = AllowedBinary::Php84.is_available()
+        || AllowedBinary::Php83.is_available()
+        || AllowedBinary::Php82.is_available();
+    let go_ready = AllowedBinary::Go.is_available();
+
+    let status_for = |runtime_ok: bool| -> String {
+        if !rustc_ready {
+            "rustc_missing".to_string()
+        } else if !runtime_ok {
+            "runtime_missing".to_string()
+        } else {
+            "ready".to_string()
+        }
+    };
+
     vec![
         PolyglotToolchainSpec {
             id: "tc-ts-napi".to_string(),
             language: "TypeScript / Bun / Deno (Zero-Node.js FFI)".to_string(),
-            runtime_version: "Bun 1.x bun:ffi + Deno.dlopen (C-ABI)".to_string(),
+            runtime_version: if AllowedBinary::Bun.is_available() {
+                "Bun bun:ffi (installed)".to_string()
+            } else if AllowedBinary::Deno.is_available() {
+                "Deno.dlopen (installed)".to_string()
+            } else {
+                "Bun / Deno (not installed)".to_string()
+            },
             bridge_protocol: "Rust cdylib (.so) + bun:ffi dlopen (Zero-Node.js)".to_string(),
             compiler_command: "rustc --crate-type cdylib --edition 2021 -C opt-level=3".to_string(),
             output_artifact: "libferrous_bridge.so".to_string(),
             zero_copy_ipc: true,
             systemd_env_vars: vec!["LD_LIBRARY_PATH=/usr/local/lib".to_string()],
-            status: tc_status.to_string(),
+            status: status_for(js_ready),
         },
         PolyglotToolchainSpec {
             id: "tc-python-pyo3".to_string(),
             language: "Python (PyO3 / FastAPI / ctypes)".to_string(),
-            runtime_version: "Python 3.12 (C-ABI / ABI3 Stable)".to_string(),
+            runtime_version: if py_ready {
+                "Python 3 (installed)".to_string()
+            } else {
+                "Python 3 (not installed)".to_string()
+            },
             bridge_protocol: "Rust cdylib (.so) + ctypes.CDLL / PyO3".to_string(),
             compiler_command: "rustc --crate-type cdylib --edition 2021 -C opt-level=3".to_string(),
             output_artifact: "libferrous_bridge.so".to_string(),
             zero_copy_ipc: true,
             systemd_env_vars: vec!["LD_LIBRARY_PATH=/usr/local/lib".to_string()],
-            status: tc_status.to_string(),
+            status: status_for(py_ready),
         },
         PolyglotToolchainSpec {
             id: "tc-php-ffi".to_string(),
-            language: "PHP 8.3 / 8.4 (Zend FFI)".to_string(),
-            runtime_version: "PHP 8.3 / 8.4 Zend FFI::cdef".to_string(),
+            language: "PHP 8.x (Zend FFI)".to_string(),
+            runtime_version: if php_ready {
+                "PHP CLI/FPM Zend FFI (installed)".to_string()
+            } else {
+                "PHP CLI/FPM (not installed)".to_string()
+            },
             bridge_protocol: "C-ABI Shared Library + ferrous_bridge.h".to_string(),
             compiler_command: "rustc --crate-type cdylib --edition 2021 -C opt-level=3".to_string(),
             output_artifact: "libferrous_bridge.so".to_string(),
             zero_copy_ipc: true,
             systemd_env_vars: vec!["ffi.enable=preload".to_string()],
-            status: tc_status.to_string(),
+            status: status_for(php_ready),
         },
         PolyglotToolchainSpec {
             id: "tc-go-cgo".to_string(),
             language: "Go (Golang CGO)".to_string(),
-            runtime_version: "Go 1.23 CGO Linker".to_string(),
+            runtime_version: if go_ready {
+                "Go CGO Linker (installed)".to_string()
+            } else {
+                "Go toolchain (not installed)".to_string()
+            },
             bridge_protocol: "C-ABI Shared/Static Library + ferrous_bridge.h".to_string(),
             compiler_command: "cargo build --release --manifest-path Cargo.toml".to_string(),
             output_artifact: "libferrous_bridge.so".to_string(),
             zero_copy_ipc: true,
             systemd_env_vars: vec!["CGO_ENABLED=1".to_string()],
-            status: tc_status.to_string(),
+            status: status_for(go_ready),
         },
     ]
 }
@@ -129,8 +163,9 @@ pub async fn compile_polyglot_bridge(
 
     let fn_list = if req.custom_functions.is_empty() {
         vec![
-            "verify_argon2_token".to_string(),
-            "query_host_telemetry".to_string(),
+            "fnv1a_mix_u32".to_string(),
+            "read_host_uptime_secs".to_string(),
+            "read_mem_available_mb".to_string(),
         ]
     } else {
         req.custom_functions.clone()
@@ -152,8 +187,35 @@ pub async fn compile_polyglot_bridge(
         } else {
             safe_fn
         };
+        let lower_fn = safe_fn.to_ascii_lowercase();
+        let body = if lower_fn.contains("uptime") {
+            "    std::fs::read_to_string(\"/proc/uptime\")\n\
+                 .ok()\n\
+                 .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse::<f64>().ok()))\n\
+                 .map(|secs| secs as u32)\n\
+                 .unwrap_or(input_code)"
+        } else if lower_fn.contains("mem") || lower_fn.contains("telemetry") {
+            "    std::fs::read_to_string(\"/proc/meminfo\")\n\
+                 .ok()\n\
+                 .and_then(|raw| {\n\
+                     raw.lines().find_map(|l| {\n\
+                         l.strip_prefix(\"MemAvailable:\")\n\
+                             .and_then(|r| r.split_whitespace().next())\n\
+                             .and_then(|v| v.parse::<u64>().ok())\n\
+                     })\n\
+                 })\n\
+                 .map(|kb| (kb / 1024) as u32)\n\
+                 .unwrap_or(input_code)"
+        } else {
+            "    // Deterministic FNV-1a 32-bit mixing + avalanche\n\
+                 let mut h: u32 = 2166136261u32 ^ input_code;\n\
+                 h = h.wrapping_mul(16777619);\n\
+                 h ^= h >> 16;\n\
+                 h = h.wrapping_mul(0x85ebca6b);\n\
+                 h ^ (h >> 13)"
+        };
         rust_fns.push_str(&format!(
-            "#[no_mangle]\npub extern \"C\" fn {clean_mod}_{safe_fn}(input_code: u32) -> u32 {{\n    input_code.wrapping_add(200)\n}}\n\n"
+            "#[no_mangle]\npub extern \"C\" fn {clean_mod}_{safe_fn}(input_code: u32) -> u32 {{\n{body}\n}}\n\n"
         ));
         c_decls.push_str(&format!(
             "uint32_t {clean_mod}_{safe_fn}(uint32_t input_code);\n"

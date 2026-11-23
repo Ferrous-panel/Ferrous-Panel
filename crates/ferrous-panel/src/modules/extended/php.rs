@@ -1,45 +1,47 @@
 use super::common::*;
+use std::collections::HashSet;
 
 // ============================================================================
-// 3. Multi-PHP FPM Pools
+// 3. Multi-PHP FPM Pools (Live php-cli/php-fpm probing + real config sync)
 // ============================================================================
 
-fn default_php_extensions() -> Vec<PhpExtensionItem> {
+fn default_php_extensions(prod: bool) -> Vec<PhpExtensionItem> {
+    let default_on = !prod;
     vec![
         PhpExtensionItem {
             name: "opcache".to_string(),
             category: "Performance".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "Zend OPcache bytecode accelerator + Tracing JIT compiler.".to_string(),
         },
         PhpExtensionItem {
             name: "pdo_mysql".to_string(),
             category: "Database".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "MariaDB / MySQL native PDO driver (mysqlnd).".to_string(),
         },
         PhpExtensionItem {
             name: "pdo_pgsql".to_string(),
             category: "Database".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "PostgreSQL native libpq PDO driver.".to_string(),
         },
         PhpExtensionItem {
             name: "redis".to_string(),
             category: "Cache".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "PhpRedis C extension for high-speed session & object caching.".to_string(),
         },
         PhpExtensionItem {
             name: "curl".to_string(),
             category: "Network".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "libcurl HTTP/TLS client bindings.".to_string(),
         },
         PhpExtensionItem {
             name: "mbstring".to_string(),
             category: "Core".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "Multibyte UTF-8 string manipulation functions.".to_string(),
         },
         PhpExtensionItem {
@@ -51,10 +53,30 @@ fn default_php_extensions() -> Vec<PhpExtensionItem> {
         PhpExtensionItem {
             name: "ffi".to_string(),
             category: "Rust Bridge".to_string(),
-            enabled: true,
+            enabled: default_on,
             description: "Zend Foreign Function Interface for loading Rust C-ABI shared libraries (.so).".to_string(),
         },
     ]
+}
+
+fn apt_package_for_php_ext(version: &str, ext_name: &str) -> Option<String> {
+    let pkg_suffix = match ext_name {
+        "pdo_mysql" | "mysqli" | "mysqlnd" => "mysql",
+        "pdo_pgsql" | "pgsql" => "pgsql",
+        "redis" => "redis",
+        "imagick" => "imagick",
+        "mbstring" => "mbstring",
+        "curl" => "curl",
+        "xml" | "dom" | "simplexml" => "xml",
+        "zip" => "zip",
+        "gd" => "gd",
+        "intl" => "intl",
+        "bcmath" => "bcmath",
+        "sqlite3" | "pdo_sqlite" => "sqlite3",
+        "opcache" | "ffi" => "common",
+        _ => return None,
+    };
+    Some(format!("php{version}-{pkg_suffix}"))
 }
 
 fn validate_php_ini_value(val: &str, field: &str) -> Result<String, PanelError> {
@@ -120,6 +142,165 @@ fn render_fpm_pool(inst: &PhpVersionInstance) -> String {
     )
 }
 
+fn parse_ini_kv<'a>(content: &'a str, target_key: &str) -> Option<&'a str> {
+    let mut result = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.starts_with('[') {
+            continue;
+        }
+        if let Some((k, v)) = trimmed.split_once('=') {
+            if k.trim().eq_ignore_ascii_case(target_key) {
+                let clean = v.split(';').next().unwrap_or(v).trim().trim_matches('"');
+                if !clean.is_empty() {
+                    result = Some(clean);
+                }
+            }
+        }
+    }
+    result
+}
+
+fn sync_php_ini_from_disk(inst: &mut PhpVersionInstance) {
+    let override_ini = PathBuf::from(format!("/etc/php/{}/fpm/conf.d/99-ferrous.ini", inst.version));
+    let main_ini = PathBuf::from(format!("/etc/php/{}/fpm/php.ini", inst.version));
+    let pool_conf = PathBuf::from(format!("/etc/php/{}/fpm/pool.d/www.conf", inst.version));
+
+    for path in [&main_ini, &override_ini] {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Some(v) = parse_ini_kv(&raw, "memory_limit") {
+                inst.memory_limit = v.to_string();
+            }
+            if let Some(v) = parse_ini_kv(&raw, "upload_max_filesize") {
+                inst.upload_max_filesize = v.to_string();
+            }
+            if let Some(v) = parse_ini_kv(&raw, "post_max_size") {
+                inst.post_max_size = v.to_string();
+            }
+            if let Some(v) = parse_ini_kv(&raw, "max_execution_time").and_then(|s| s.parse::<u32>().ok()) {
+                inst.max_execution_time = v;
+            }
+            if let Some(v) = parse_ini_kv(&raw, "max_input_vars").and_then(|s| s.parse::<u32>().ok()) {
+                inst.max_input_vars = v;
+            }
+            if let Some(v) = parse_ini_kv(&raw, "display_errors") {
+                inst.display_errors = matches!(v.to_ascii_lowercase().as_str(), "on" | "1" | "true");
+            }
+            if let Some(v) = parse_ini_kv(&raw, "opcache.enable") {
+                inst.opcache_enabled = matches!(v.to_ascii_lowercase().as_str(), "on" | "1" | "true");
+            }
+            if let Some(v) = parse_ini_kv(&raw, "opcache.jit_buffer_size") {
+                inst.opcache_jit_buffer = v.to_string();
+            }
+            if let Some(v) = parse_ini_kv(&raw, "disable_functions") {
+                inst.disable_functions = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect();
+            }
+        }
+    }
+
+    if let Ok(raw_override) = std::fs::read_to_string(&override_ini) {
+        if !raw_override.trim().is_empty() && raw_override.len() <= 64 * 1024 {
+            inst.raw_php_ini = raw_override;
+        }
+    }
+
+    if let Ok(raw_pool) = std::fs::read_to_string(&pool_conf) {
+        if let Some(v) = parse_ini_kv(&raw_pool, "pm.max_children").and_then(|s| s.parse::<u32>().ok()) {
+            inst.max_children = v;
+        }
+        if !raw_pool.trim().is_empty() && raw_pool.len() <= 64 * 1024 {
+            inst.raw_fpm_pool_conf = raw_pool;
+        }
+    }
+}
+
+async fn probe_php_loaded_modules(
+    executor: &dyn CommandExecutor,
+    version: &str,
+) -> Option<HashSet<String>> {
+    let candidates = [
+        AllowedBinary::php_fpm_for_version(version),
+        AllowedBinary::php_cli_for_version(version),
+    ];
+    for maybe_bin in candidates {
+        let Some(bin) = maybe_bin else {
+            continue;
+        };
+        if !executor.is_binary_available(bin) {
+            continue;
+        }
+        if let Ok(out) = executor.run(bin, &["-m"], Duration::from_secs(4)).await {
+            if out.success && !out.stdout.trim().is_empty() {
+                let mut set = HashSet::new();
+                for line in out.stdout.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('[') {
+                        continue;
+                    }
+                    let lower = trimmed.to_ascii_lowercase();
+                    if lower == "zend opcache" {
+                        set.insert("opcache".to_string());
+                    }
+                    set.insert(lower);
+                }
+                return Some(set);
+            }
+        }
+    }
+
+    // Fallback: inspect /etc/php/{version}/fpm/conf.d/*.ini symlinks
+    let conf_d = PathBuf::from(format!("/etc/php/{version}/fpm/conf.d"));
+    let entries = std::fs::read_dir(&conf_d).ok()?;
+    let mut set = HashSet::new();
+    for entry in entries.flatten() {
+        if let Some(name) = entry.file_name().to_str() {
+            if let Some(stem) = name.strip_suffix(".ini") {
+                let mod_part = stem
+                    .split_once('-')
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(stem)
+                    .to_ascii_lowercase();
+                set.insert(mod_part);
+            }
+        }
+    }
+    Some(set)
+}
+
+fn count_live_php_fpm_workers(version: &str) -> u32 {
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    let mut count = 0u32;
+    let needle_fpm = format!("php-fpm{version}");
+    for entry in proc_dir.flatten() {
+        let Some(pid_str) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if !pid_str.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let cmdline_path = entry.path().join("cmdline");
+        if let Ok(raw) = std::fs::read(&cmdline_path) {
+            let text = String::from_utf8_lossy(&raw);
+            if text.contains("php-fpm: pool") {
+                // Verify parent/binary belongs to this PHP version via /proc/<pid>/exe
+                if let Ok(exe) = std::fs::read_link(entry.path().join("exe")) {
+                    if exe.to_string_lossy().contains(&needle_fpm) {
+                        count = count.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
     let specs = [
         ("8.4", "8.4.x", !prod),
@@ -144,7 +325,11 @@ fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
         };
         let mut inst = PhpVersionInstance {
             version: ver.to_string(),
-            full_version: format!("PHP {full} (cli/fpm-fcgi)"),
+            full_version: if installed {
+                format!("PHP {full} (cli/fpm-fcgi)")
+            } else {
+                format!("PHP {ver} (not installed)")
+            },
             status: status.to_string(),
             installed,
             fpm_socket: format!("/run/php/php{ver}-fpm.sock"),
@@ -169,7 +354,7 @@ fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
                 "proc_open".to_string(),
                 "popen".to_string(),
             ],
-            extensions: default_php_extensions(),
+            extensions: default_php_extensions(prod),
             raw_php_ini: String::new(),
             raw_fpm_pool_conf: String::new(),
         };
@@ -213,30 +398,88 @@ pub async fn list_php_versions(
     if prod {
         let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
         for inst in &mut list {
-            let fpm_bin = format!("/usr/sbin/php-fpm{}", inst.version);
+            let fpm_bin_path = format!("/usr/sbin/php-fpm{}", inst.version);
             let sock_exists = Path::new(&inst.fpm_socket).exists();
-            let installed = Path::new(&fpm_bin).is_file() || sock_exists;
+            let fpm_bin_enum = AllowedBinary::php_fpm_for_version(&inst.version);
+            let cli_bin_enum = AllowedBinary::php_cli_for_version(&inst.version);
+            let installed = Path::new(&fpm_bin_path).is_file()
+                || sock_exists
+                || fpm_bin_enum.map(|b| executor.is_binary_available(b)).unwrap_or(false);
             inst.installed = installed;
-            if installed && has_systemctl {
-                let unit = format!("php{}-fpm.service", inst.version);
-                let active = executor
-                    .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
-                    .await
-                    .map(|o| o.success && o.stdout.trim() == "active")
-                    .unwrap_or(false);
-                inst.status = if active {
-                    "running".to_string()
+
+            if installed {
+                // 1. Live full PHP version from php-fpm{ver} -v or php{ver} -v
+                let live_ver = if let Some(bin) = fpm_bin_enum {
+                    probe_binary_version_line(executor, bin, &["-v"]).await
                 } else {
-                    "stopped".to_string()
-                };
-                if !active {
-                    inst.active_workers = 0;
+                    None
+                }
+                .or(if let Some(bin) = cli_bin_enum {
+                    probe_binary_version_line(executor, bin, &["-v"]).await
+                } else {
+                    None
+                });
+                if let Some(ver_line) = live_ver {
+                    inst.full_version = ver_line;
+                }
+
+                // 2. Live loaded extensions from php-fpm{ver} -m / php{ver} -m
+                if let Some(loaded) = probe_php_loaded_modules(executor, &inst.version).await {
+                    for ext in &mut inst.extensions {
+                        let key = ext.name.to_ascii_lowercase();
+                        ext.enabled = loaded.contains(&key);
+                    }
+                }
+
+                // 3. Live php.ini & www.conf values from disk
+                sync_php_ini_from_disk(inst);
+
+                // 4. Live systemd active status, cgroup RAM MB, and worker process count
+                if has_systemctl {
+                    let unit = format!("php{}-fpm.service", inst.version);
+                    let active = executor
+                        .run(AllowedBinary::Systemctl, &["is-active", &unit], CMD_TIMEOUT)
+                        .await
+                        .map(|o| o.success && o.stdout.trim() == "active")
+                        .unwrap_or(false);
+                    inst.status = if active {
+                        "running".to_string()
+                    } else {
+                        "stopped".to_string()
+                    };
+                    if active {
+                        inst.memory_usage_mb = query_systemd_memory_mb(executor, &unit).await;
+                        let proc_workers = count_live_php_fpm_workers(&inst.version);
+                        inst.active_workers = if proc_workers > 0 {
+                            proc_workers
+                        } else {
+                            query_systemd_property(executor, &unit, "TasksCurrent")
+                                .await
+                                .and_then(|s| s.parse::<u32>().ok())
+                                .map(|t| t.saturating_sub(1))
+                                .unwrap_or(0)
+                        };
+                    } else {
+                        inst.active_workers = 0;
+                        inst.memory_usage_mb = 0.0;
+                    }
+                } else {
+                    inst.status = if sock_exists { "running" } else { "stopped" }.to_string();
+                    inst.active_workers = if sock_exists {
+                        count_live_php_fpm_workers(&inst.version)
+                    } else {
+                        0
+                    };
                     inst.memory_usage_mb = 0.0;
                 }
             } else {
+                inst.full_version = format!("PHP {} (not installed)", inst.version);
                 inst.status = "stopped".to_string();
                 inst.active_workers = 0;
                 inst.memory_usage_mb = 0.0;
+                for ext in &mut inst.extensions {
+                    ext.enabled = false;
+                }
             }
         }
         store.put_json(KV_PHP_VERSIONS, &list)?;
@@ -462,6 +705,9 @@ pub async fn php_action(
     }
 
     store.put_json(KV_PHP_VERSIONS, &list)?;
+    if prod {
+        return list_php_versions(store, config, executor).await;
+    }
     Ok(list)
 }
 
@@ -495,6 +741,8 @@ pub async fn update_php_settings(
             "PHP version '{version}' not found"
         )));
     };
+
+    let pool_changed = patch.max_children.is_some() || patch.raw_fpm_pool_conf.is_some();
 
     if let Some(v) = patch.max_children {
         inst.max_children = v.clamp(2, 512);
@@ -564,11 +812,25 @@ pub async fn update_php_settings(
         let previous_ini = std::fs::read(&ini_target).ok();
         atomic_write_file(&ini_target, inst.raw_php_ini.as_bytes(), 0o644)?;
 
-        let rollback_ini = |prev: &Option<Vec<u8>>| {
-            if let Some(bytes) = prev {
+        let pool_target = PathBuf::from(format!("/etc/php/{version}/fpm/pool.d/www.conf"));
+        let previous_pool = if pool_changed && pool_target.parent().map(Path::is_dir).unwrap_or(false) {
+            let prev = std::fs::read(&pool_target).ok();
+            atomic_write_file(&pool_target, inst.raw_fpm_pool_conf.as_bytes(), 0o644)?;
+            Some(prev)
+        } else {
+            None
+        };
+
+        let rollback_files = |prev_i: &Option<Vec<u8>>, prev_p: &Option<Option<Vec<u8>>>| {
+            if let Some(bytes) = prev_i {
                 let _ = atomic_write_file(&ini_target, bytes, 0o644);
             } else {
                 let _ = std::fs::remove_file(&ini_target);
+            }
+            if let Some(pool_opt) = prev_p {
+                if let Some(bytes) = pool_opt {
+                    let _ = atomic_write_file(&pool_target, bytes, 0o644);
+                }
             }
         };
 
@@ -578,7 +840,7 @@ pub async fn update_php_settings(
                 match check {
                     Ok(out) if out.success => {}
                     Ok(out) => {
-                        rollback_ini(&previous_ini);
+                        rollback_files(&previous_ini, &previous_pool);
                         let detail = if out.stderr.trim().is_empty() {
                             out.stdout
                         } else {
@@ -589,7 +851,7 @@ pub async fn update_php_settings(
                         )));
                     }
                     Err(err) => {
-                        rollback_ini(&previous_ini);
+                        rollback_files(&previous_ini, &previous_pool);
                         return Err(err);
                     }
                 }
@@ -597,7 +859,7 @@ pub async fn update_php_settings(
         }
 
         if !executor.is_binary_available(AllowedBinary::Systemctl) {
-            rollback_ini(&previous_ini);
+            rollback_files(&previous_ini, &previous_pool);
             return Err(PanelError::Conflict(format!(
                 "thiếu systemctl để reload php{version}-fpm.service (đã rollback cấu hình)"
             )));
@@ -609,7 +871,7 @@ pub async fn update_php_settings(
         match reload {
             Ok(out) if out.success => {}
             Ok(out) => {
-                rollback_ini(&previous_ini);
+                rollback_files(&previous_ini, &previous_pool);
                 let _ = executor
                     .run(AllowedBinary::Systemctl, &["reload-or-restart", &unit], CMD_TIMEOUT)
                     .await;
@@ -624,7 +886,7 @@ pub async fn update_php_settings(
                 });
             }
             Err(err) => {
-                rollback_ini(&previous_ini);
+                rollback_files(&previous_ini, &previous_pool);
                 return Err(err);
             }
         }
@@ -686,9 +948,38 @@ pub async fn toggle_php_extension(
                 bin.label()
             )));
         }
-        let mod_out = executor
+        let mut mod_out = executor
             .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
             .await?;
+
+        // Auto-install missing apt extension package when enabling (e.g. php8.3-redis, php8.3-imagick, php8.3-pgsql)
+        if !mod_out.success && target_enabled && executor.is_binary_available(AllowedBinary::AptGet) {
+            if let Some(apt_pkg) = apt_package_for_php_ext(version, &mod_name) {
+                let _ = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["update", "-qq"],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        None,
+                        APT_TIMEOUT,
+                    )
+                    .await;
+                let inst_res = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["install", "-y", "-qq", &apt_pkg],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        None,
+                        APT_TIMEOUT,
+                    )
+                    .await?;
+                if inst_res.success {
+                    mod_out = executor
+                        .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)
+                        .await?;
+                }
+            }
+        }
         require_command_ok(bin.label(), mod_out)?;
 
         if let Some(fpm_bin) = AllowedBinary::php_fpm_for_version(version) {

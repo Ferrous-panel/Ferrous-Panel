@@ -44,7 +44,12 @@ pub async fn get_optimizer(state: web::Data<AppState>) -> Result<HttpResponse, P
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let data = ext::load_optimizer(&state.modules, &state.config)?;
+    let data = ext::load_optimizer(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
     Ok(HttpResponse::Ok().json(data))
 }
 
@@ -60,7 +65,7 @@ pub async fn post_optimizer_apply_profile(
     let profile_id = payload
         .map(|p| p.into_inner().profile_id)
         .filter(|id| !id.trim().is_empty())
-        .unwrap_or_else(|| "rust-actix-max-throughput".to_string());
+        .unwrap_or_else(|| "profile-high-concurrency".to_string());
     let data = ext::apply_optimizer_profile(
         &state.modules,
         &state.config,
@@ -107,7 +112,7 @@ pub async fn put_optimizer_sysctl(
     Ok(HttpResponse::Ok().json(data))
 }
 
-/// `POST /api/optimizer/reclaim-memory` — compacts SQLite caches and records memory reclamation event.
+/// `POST /api/optimizer/reclaim-memory` — flushes Linux kernel page caches and records memory reclamation event.
 pub async fn post_optimizer_reclaim_memory(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -115,7 +120,12 @@ pub async fn post_optimizer_reclaim_memory(
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let (freed_mb, message, optimizer) = ext::reclaim_memory(&state.modules, &state.config)?;
+    let (freed_mb, message, optimizer) = ext::reclaim_memory(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -169,6 +179,7 @@ pub async fn put_optimizer_anti_crash(
     let data = ext::update_anti_crash(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         ext::AntiCrashPatch {
             load_shedding_enabled: body.load_shedding_enabled,
             cpu_shed_threshold_percent: body.cpu_shed_threshold_percent,
@@ -179,7 +190,8 @@ pub async fn put_optimizer_anti_crash(
             slow_query_auto_kill_sec: body.slow_query_auto_kill_sec,
             cgroups_v2_enforced: body.cgroups_v2_enforced,
         },
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

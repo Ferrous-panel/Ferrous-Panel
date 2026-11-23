@@ -661,6 +661,54 @@ async fn query_db_size_and_tables(
     }
 }
 
+async fn query_db_connections(
+    executor: &dyn CommandExecutor,
+    engine: DbEngineKind,
+    db_name: &SqlIdentifier,
+    status: &str,
+) -> (u32, u32) {
+    if status != "online" {
+        return (0, 0);
+    }
+    match engine {
+        DbEngineKind::Sqlite => (1, 1),
+        DbEngineKind::MariaDb => {
+            let sql = "SELECT (SELECT VARIABLE_VALUE FROM information_schema.GLOBAL_STATUS WHERE VARIABLE_NAME = 'Threads_connected'), @@max_connections;";
+            if let Ok(out) = run_mysql(executor, None, sql).await {
+                let data_line = out.stdout.lines().nth(1).or_else(|| out.stdout.lines().next());
+                if let Some(line) = data_line {
+                    let cols: Vec<&str> = line.split('\t').collect();
+                    if cols.len() >= 2 {
+                        let active = cols[0].trim().parse::<u32>().unwrap_or(0);
+                        let max_conn = cols[1].trim().parse::<u32>().unwrap_or(151);
+                        return (active, max_conn);
+                    }
+                }
+            }
+            (0, 151)
+        }
+        DbEngineKind::Postgres => {
+            let Ok(db_lit) = escape_postgres_literal(db_name.as_str()) else {
+                return (0, 100);
+            };
+            let sql = format!(
+                "SELECT (SELECT count(*) FROM pg_stat_activity WHERE datname = {db_lit}), current_setting('max_connections');"
+            );
+            if let Ok(out) = run_psql(executor, None, &sql).await {
+                if let Some(line) = out.stdout.lines().next() {
+                    let cols: Vec<&str> = line.split('\t').collect();
+                    if cols.len() >= 2 {
+                        let active = cols[0].trim().parse::<u32>().unwrap_or(0);
+                        let max_conn = cols[1].trim().parse::<u32>().unwrap_or(100);
+                        return (active, max_conn);
+                    }
+                }
+            }
+            (0, 100)
+        }
+    }
+}
+
 pub async fn list_databases(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,
@@ -679,6 +727,8 @@ pub async fn list_databases(
         } else {
             (0.0, Vec::new(), "engine_not_installed".to_string())
         };
+        let (active_connections, max_connections) =
+            query_db_connections(executor, engine_kind, &db_ident, &status).await;
         out.push(SqlDatabase {
             id: meta.id,
             name: meta.name,
@@ -692,12 +742,8 @@ pub async fn list_databases(
             linked_app_id: meta.linked_app_id,
             linked_app_name: meta.linked_app_name,
             size_mb,
-            active_connections: if status == "online" { 1 } else { 0 },
-            max_connections: if engine_kind == DbEngineKind::Sqlite {
-                64
-            } else {
-                150
-            },
+            active_connections,
+            max_connections,
             status,
             created_at: meta.created_at,
             tables,

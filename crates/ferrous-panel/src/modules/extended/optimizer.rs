@@ -1,7 +1,7 @@
 use super::common::*;
 
 // ============================================================================
-// 6. System Optimizer & Anti-Crash Guard
+// 6. System Optimizer & Anti-Crash Guard (Real /proc, /sys, sysctl, zramctl)
 // ============================================================================
 
 const ALLOWED_SYSCTL_KEYS: &[&str] = &[
@@ -49,9 +49,117 @@ fn render_sysctl_preview(params: &[KernelSysctlParam]) -> String {
     out
 }
 
+fn read_zram_live_state() -> (bool, String, u64) {
+    let swaps = std::fs::read_to_string("/proc/swaps").unwrap_or_default();
+    let active_in_swaps = swaps.lines().any(|l| l.starts_with("/dev/zram"));
+
+    let size_mb = std::fs::read_to_string("/sys/block/zram0/disksize")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|b| b / (1024 * 1024))
+        .unwrap_or(0);
+
+    let algo = std::fs::read_to_string("/sys/block/zram0/comp_algorithm")
+        .ok()
+        .and_then(|raw| {
+            raw.split_whitespace()
+                .find(|tok| tok.starts_with('[') && tok.ends_with(']'))
+                .map(|tok| tok.trim_matches(|c| c == '[' || c == ']').to_string())
+        })
+        .unwrap_or_else(|| "zstd".to_string());
+
+    (active_in_swaps && size_mb > 0, algo, size_mb)
+}
+
+fn read_pid_oom_score_adj(pid: u32) -> i32 {
+    let path = if pid == std::process::id() {
+        "/proc/self/oom_score_adj".to_string()
+    } else {
+        format!("/proc/{pid}/oom_score_adj")
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .unwrap_or(0)
+}
+
+async fn collect_live_oom_immunity_map(
+    executor: &dyn CommandExecutor,
+) -> Vec<OomImmunityProcessItem> {
+    let mut items = Vec::new();
+    let self_pid = std::process::id();
+    let self_oom = read_pid_oom_score_adj(self_pid);
+
+    let units: &[(&str, &str)] = &[
+        ("ferrous-panel.service", "Control Plane"),
+        ("ferrousx.service", "Web Edge Engine"),
+        ("nginx.service", "Web Server"),
+        ("mariadb.service", "Relational DB"),
+        ("postgresql.service", "Relational DB"),
+        ("php8.4-fpm.service", "PHP-FPM Pool"),
+        ("php8.3-fpm.service", "PHP-FPM Pool"),
+        ("php8.2-fpm.service", "PHP-FPM Pool"),
+        ("postfix.service", "Mail MTA"),
+        ("dovecot.service", "Mail IMAP"),
+        ("rspamd.service", "Mail Anti-Spam"),
+    ];
+
+    if executor.is_binary_available(AllowedBinary::Systemctl) {
+        for (unit, policy) in units {
+            let pid = query_systemd_property(executor, unit, "MainPID")
+                .await
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+            if pid == 0 {
+                continue;
+            }
+            let oom = read_pid_oom_score_adj(pid);
+            let mem_high = query_systemd_property(executor, unit, "MemoryHigh")
+                .await
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&b| b < u64::MAX / 2)
+                .map(|b| b / (1024 * 1024))
+                .unwrap_or(0);
+            let mem_max = query_systemd_property(executor, unit, "MemoryMax")
+                .await
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|&b| b < u64::MAX / 2)
+                .map(|b| b / (1024 * 1024))
+                .unwrap_or(0);
+
+            items.push(OomImmunityProcessItem {
+                service: (*unit).to_string(),
+                pid,
+                oom_score_adj: oom,
+                memory_high_mb: mem_high,
+                memory_max_mb: mem_max,
+                policy: (*policy).to_string(),
+            });
+        }
+    }
+
+    if items.is_empty() {
+        items.push(OomImmunityProcessItem {
+            service: "ferrous-panel.service".to_string(),
+            pid: self_pid,
+            oom_score_adj: self_oom,
+            memory_high_mb: 0,
+            memory_max_mb: 0,
+            policy: "Control Plane".to_string(),
+        });
+    }
+    items
+}
+
 fn default_optimizer_data() -> SystemOptimizerData {
-    let rss = read_process_rss_mb();
+    let self_status = read_proc_self_status();
     let pid = std::process::id();
+    let self_oom = read_pid_oom_score_adj(pid);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+    let (zram_enabled, zram_algo, zram_size_mb) = read_zram_live_state();
+
     let sysctl_params = vec![
         KernelSysctlParam {
             id: "sys-bbr".to_string(),
@@ -159,15 +267,15 @@ fn default_optimizer_data() -> SystemOptimizerData {
         sysctl_config_preview: preview,
         watchdog: BackendWatchdogState {
             daemon_pid: pid,
-            oom_score_adj: -900,
-            allocator_engine: "System Allocator".to_string(),
-            allocated_ram_mb: (rss * 0.85 * 100.0).round() / 100.0,
-            resident_ram_mb: rss,
-            worker_threads_active: 4,
-            worker_threads_total: 4,
+            oom_score_adj: self_oom,
+            allocator_engine: "glibc System Allocator".to_string(),
+            allocated_ram_mb: self_status.vm_data_mb,
+            resident_ram_mb: self_status.rss_mb,
+            worker_threads_active: self_status.threads,
+            worker_threads_total: cores,
             db_pool_active: 1,
-            db_pool_idle: 3,
-            db_pool_max: 16,
+            db_pool_idle: 0,
+            db_pool_max: 1,
             circuit_breaker_status: "Closed (Healthy)".to_string(),
             auto_heal_enabled: true,
             last_self_heal_at: Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
@@ -178,20 +286,17 @@ fn default_optimizer_data() -> SystemOptimizerData {
             load_shedding_enabled: true,
             cpu_shed_threshold_percent: 92.0,
             ram_shed_threshold_percent: 90.0,
-            zram_enabled: Path::new("/dev/zram0").exists(),
-            zram_compression_algo: "zstd".to_string(),
-            zram_size_mb: 2048,
+            zram_enabled,
+            zram_compression_algo: zram_algo,
+            zram_size_mb,
             slow_query_auto_kill_sec: 30,
             cgroups_v2_enforced: Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
             oom_immunity_map: vec![OomImmunityProcessItem {
                 service: "ferrous-panel.service".to_string(),
                 pid,
-                oom_score_adj: std::fs::read_to_string("/proc/self/oom_score_adj")
-                    .ok()
-                    .and_then(|s| s.trim().parse::<i32>().ok())
-                    .unwrap_or(0),
-                memory_high_mb: 256,
-                memory_max_mb: 512,
+                oom_score_adj: self_oom,
+                memory_high_mb: 0,
+                memory_max_mb: 0,
                 policy: "Control Plane".to_string(),
             }],
             mitigation_count: 0,
@@ -200,9 +305,10 @@ fn default_optimizer_data() -> SystemOptimizerData {
     }
 }
 
-pub fn load_optimizer(
+pub async fn load_optimizer(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
 ) -> Result<SystemOptimizerData, PanelError> {
     let mut data = if let Some(existing) = store.get_json::<SystemOptimizerData>(KV_OPTIMIZER)? {
         existing
@@ -211,17 +317,40 @@ pub fn load_optimizer(
         store.put_json(KV_OPTIMIZER, &initial)?;
         initial
     };
+
+    let self_status = read_proc_self_status();
+    let pid = std::process::id();
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1);
+
+    data.watchdog.daemon_pid = pid;
+    data.watchdog.oom_score_adj = read_pid_oom_score_adj(pid);
+    data.watchdog.resident_ram_mb = self_status.rss_mb;
+    data.watchdog.allocated_ram_mb = self_status.vm_data_mb;
+    data.watchdog.worker_threads_active = self_status.threads;
+    data.watchdog.worker_threads_total = cores;
+    data.watchdog.db_pool_active = 1;
+    data.watchdog.db_pool_idle = 0;
+    data.watchdog.db_pool_max = 1;
+
     if is_production_vps(config) {
         for param in &mut data.sysctl_params {
             if let Some(live_val) = read_proc_sysctl(&param.key) {
                 param.current_value = live_val;
             }
         }
+        let (zram_enabled, zram_algo, zram_size_mb) = read_zram_live_state();
+        let oom_map = collect_live_oom_immunity_map(executor).await;
+        if let Some(ref mut guard) = data.anti_crash_guard {
+            guard.zram_enabled = zram_enabled;
+            guard.zram_compression_algo = zram_algo;
+            guard.zram_size_mb = zram_size_mb;
+            guard.cgroups_v2_enforced = Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
+            guard.oom_immunity_map = oom_map;
+        }
     }
-    let rss = read_process_rss_mb();
-    data.watchdog.daemon_pid = std::process::id();
-    data.watchdog.resident_ram_mb = rss;
-    data.watchdog.allocated_ram_mb = ((rss * 0.85) * 100.0).round() / 100.0;
+
     Ok(data)
 }
 
@@ -295,21 +424,40 @@ async fn apply_sysctl_to_host(
     }
 }
 
+fn apply_profile_values_to_sysctl(profile_id: &str, params: &mut [KernelSysctlParam]) {
+    let (somaxconn, swappiness, file_max) = match profile_id {
+        "profile-low-ram" => ("4096", "20", "262144"),
+        "profile-extreme-edge" => ("65535", "1", "4194304"),
+        _ => ("32768", "10", "2097152"),
+    };
+    for p in params.iter_mut() {
+        match p.key.as_str() {
+            "net.core.somaxconn" => p.recommended_value = somaxconn.to_string(),
+            "vm.swappiness" => p.recommended_value = swappiness.to_string(),
+            "fs.file-max" => p.recommended_value = file_max.to_string(),
+            _ => {}
+        }
+    }
+}
+
 pub async fn apply_optimizer_profile(
     store: &ModuleStore,
     config: &Config,
     executor: &dyn CommandExecutor,
     profile_id: &str,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store, config)?;
-    if !data.profiles.iter().any(|p| p.id == profile_id) && !profile_id.trim().is_empty() {
+    let mut data = load_optimizer(store, config, executor).await?;
+    let trimmed = profile_id.trim();
+    if !trimmed.is_empty() && !data.profiles.iter().any(|p| p.id == trimmed) {
         return Err(PanelError::NotFound(format!(
             "optimization profile '{profile_id}' not found"
         )));
     }
-    if !profile_id.trim().is_empty() {
-        data.active_profile_id = profile_id.trim().to_string();
+    if !trimmed.is_empty() {
+        data.active_profile_id = trimmed.to_string();
     }
+
+    apply_profile_values_to_sysctl(&data.active_profile_id, &mut data.sysctl_params);
     data.sysctl_config_preview = render_sysctl_preview(&data.sysctl_params);
 
     let sysctl_dir = config.data_dir.join("sysctl");
@@ -321,10 +469,36 @@ pub async fn apply_optimizer_profile(
     )?;
 
     apply_sysctl_to_host(config, executor, &data.sysctl_params, &data.sysctl_config_preview).await?;
+
+    // Also write real MariaDB buffer pool drop-in if MariaDB config dir exists on VPS
+    let mut db_tuned_note = String::new();
     if is_production_vps(config) {
         for param in &mut data.sysctl_params {
             if let Some(live_val) = read_proc_sysctl(&param.key) {
                 param.current_value = live_val;
+            }
+        }
+        if let Some(profile) = data.profiles.iter().find(|p| p.id == data.active_profile_id) {
+            let mariadb_dir = Path::new("/etc/mysql/mariadb.conf.d");
+            if mariadb_dir.is_dir() {
+                let cnf = format!(
+                    "# Managed by FerrousPanel Optimizer ({})\n\
+                     [mysqld]\n\
+                     innodb_buffer_pool_size = {}M\n\
+                     max_connections = {}\n",
+                    profile.id,
+                    profile.mariadb_buffer_pool_mb,
+                    (profile.actix_workers * 50).clamp(100, 1000)
+                );
+                let _ = atomic_write_file(
+                    &mariadb_dir.join("99-ferrous-tuning.cnf"),
+                    cnf.as_bytes(),
+                    0o644,
+                );
+                db_tuned_note = format!(
+                    " + MariaDB innodb_buffer_pool_size={}M",
+                    profile.mariadb_buffer_pool_mb
+                );
             }
         }
     }
@@ -336,8 +510,8 @@ pub async fn apply_optimizer_profile(
             timestamp: Utc::now().format("%H:%M:%S UTC").to_string(),
             subsystem: "System Optimizer".to_string(),
             action: format!(
-                "Applied profile '{}' & verified kernel sysctl via /proc/sys",
-                data.active_profile_id
+                "Applied profile '{}' -> sysctl -p /etc/sysctl.d/99-ferrous-optimizer.conf{}",
+                data.active_profile_id, db_tuned_note
             ),
             result: "OK".to_string(),
         },
@@ -353,7 +527,7 @@ pub async fn toggle_optimizer_sysctl(
     executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store, config)?;
+    let mut data = load_optimizer(store, config, executor).await?;
     let Some(param) = data
         .sysctl_params
         .iter_mut()
@@ -397,11 +571,12 @@ pub async fn toggle_optimizer_sysctl(
     Ok(data)
 }
 
-pub fn reclaim_memory(
+pub async fn reclaim_memory(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
 ) -> Result<(u64, String, SystemOptimizerData), PanelError> {
-    let mut data = load_optimizer(store, config)?;
+    let mut data = load_optimizer(store, config, executor).await?;
     let freed_mb = if is_production_vps(config) {
         let before_kb = read_proc_mem_available_kb().unwrap_or(0);
         std::fs::write("/proc/sys/vm/drop_caches", b"3\n").map_err(|err| {
@@ -438,7 +613,7 @@ pub async fn watchdog_heal(
     config: &Config,
     executor: &dyn CommandExecutor,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store, config)?;
+    let mut data = load_optimizer(store, config, executor).await?;
     let mut healed_units: Vec<String> = Vec::new();
     let mut healthy_units: Vec<String> = Vec::new();
     let mut failed_units: Vec<String> = Vec::new();
@@ -455,7 +630,13 @@ pub async fn watchdog_heal(
             "nginx.service",
             "mariadb.service",
             "postgresql.service",
+            "php8.4-fpm.service",
             "php8.3-fpm.service",
+            "php8.2-fpm.service",
+            "postfix.service",
+            "dovecot.service",
+            "rspamd.service",
+            "fail2ban.service",
         ];
         for unit in candidates {
             let is_enabled = executor
@@ -550,32 +731,123 @@ pub struct AntiCrashPatch {
     pub cgroups_v2_enforced: Option<bool>,
 }
 
-pub fn update_anti_crash(
+async fn apply_zram_to_host(
+    executor: &dyn CommandExecutor,
+    enable: bool,
+    algo: &str,
+    size_mb: u64,
+) -> Result<(), PanelError> {
+    if !executor.is_binary_available(AllowedBinary::Zramctl)
+        || !executor.is_binary_available(AllowedBinary::Swapon)
+        || !executor.is_binary_available(AllowedBinary::Swapoff)
+        || !executor.is_binary_available(AllowedBinary::Mkswap)
+    {
+        return Err(PanelError::Conflict(
+            "thiếu util-linux (zramctl/mkswap/swapon/swapoff) để cấu hình ZRAM trên Linux".to_string(),
+        ));
+    }
+
+    let safe_algo = match algo.trim().to_ascii_lowercase().as_str() {
+        "zstd" => "zstd",
+        "lz4" => "lz4",
+        "lzo" | "lzo-rle" => "lzo-rle",
+        other => {
+            return Err(PanelError::Validation(format!(
+                "unsupported ZRAM compression algorithm '{other}' (allowed: zstd, lz4, lzo-rle)"
+            )));
+        }
+    };
+
+    // Disable existing /dev/zram0 first if present
+    let _ = executor
+        .run(AllowedBinary::Swapoff, &["/dev/zram0"], CMD_TIMEOUT)
+        .await;
+    let _ = executor
+        .run(AllowedBinary::Zramctl, &["--reset", "/dev/zram0"], CMD_TIMEOUT)
+        .await;
+
+    if !enable {
+        return Ok(());
+    }
+
+    let clamped_mb = size_mb.clamp(128, 32768);
+    let size_arg = format!("{clamped_mb}M");
+    let create = executor
+        .run(
+            AllowedBinary::Zramctl,
+            &["--find", "--size", &size_arg, "--algorithm", safe_algo],
+            CMD_TIMEOUT,
+        )
+        .await?;
+    if !create.success {
+        return Err(PanelError::CommandFailed {
+            binary: "zramctl",
+            exit_code: create.exit_code,
+            stderr: if create.stderr.trim().is_empty() {
+                create.stdout
+            } else {
+                create.stderr
+            },
+        });
+    }
+    let dev = create.stdout.trim();
+    let target_dev = if dev.starts_with("/dev/zram") {
+        dev
+    } else {
+        "/dev/zram0"
+    };
+
+    let mk = executor
+        .run(AllowedBinary::Mkswap, &[target_dev], CMD_TIMEOUT)
+        .await?;
+    if !mk.success {
+        return Err(PanelError::CommandFailed {
+            binary: "mkswap",
+            exit_code: mk.exit_code,
+            stderr: if mk.stderr.trim().is_empty() { mk.stdout } else { mk.stderr },
+        });
+    }
+    let on = executor
+        .run(AllowedBinary::Swapon, &["-p", "100", target_dev], CMD_TIMEOUT)
+        .await?;
+    if !on.success {
+        return Err(PanelError::CommandFailed {
+            binary: "swapon",
+            exit_code: on.exit_code,
+            stderr: if on.stderr.trim().is_empty() { on.stdout } else { on.stderr },
+        });
+    }
+    Ok(())
+}
+
+pub async fn update_anti_crash(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     patch: AntiCrashPatch,
 ) -> Result<SystemOptimizerData, PanelError> {
-    let mut data = load_optimizer(store, config)?;
-    let mut guard = data
-        .anti_crash_guard
-        .take()
-        .unwrap_or_else(|| {
-            default_optimizer_data()
-                .anti_crash_guard
-                .unwrap_or(AntiCrashGuardState {
-                    load_shedding_enabled: true,
-                    cpu_shed_threshold_percent: 92.0,
-                    ram_shed_threshold_percent: 90.0,
-                    zram_enabled: false,
-                    zram_compression_algo: "zstd".to_string(),
-                    zram_size_mb: 2048,
-                    slow_query_auto_kill_sec: 30,
-                    cgroups_v2_enforced: false,
-                    oom_immunity_map: Vec::new(),
-                    mitigation_count: 0,
-                    last_mitigation_action: String::new(),
-                })
-        });
+    let mut data = load_optimizer(store, config, executor).await?;
+    let mut guard = data.anti_crash_guard.take().unwrap_or_else(|| {
+        default_optimizer_data()
+            .anti_crash_guard
+            .unwrap_or(AntiCrashGuardState {
+                load_shedding_enabled: true,
+                cpu_shed_threshold_percent: 92.0,
+                ram_shed_threshold_percent: 90.0,
+                zram_enabled: false,
+                zram_compression_algo: "zstd".to_string(),
+                zram_size_mb: 0,
+                slow_query_auto_kill_sec: 30,
+                cgroups_v2_enforced: false,
+                oom_immunity_map: Vec::new(),
+                mitigation_count: 0,
+                last_mitigation_action: String::new(),
+            })
+    });
+
+    let zram_requested = patch.zram_enabled.is_some()
+        || patch.zram_compression_algo.is_some()
+        || patch.zram_size_mb.is_some();
 
     if let Some(v) = patch.load_shedding_enabled {
         guard.load_shedding_enabled = v;
@@ -602,6 +874,25 @@ pub fn update_anti_crash(
         guard.cgroups_v2_enforced = v;
     }
 
+    if is_production_vps(config) && zram_requested {
+        let target_mb = if guard.zram_size_mb == 0 {
+            1024
+        } else {
+            guard.zram_size_mb
+        };
+        apply_zram_to_host(
+            executor,
+            guard.zram_enabled,
+            &guard.zram_compression_algo,
+            target_mb,
+        )
+        .await?;
+        let (live_on, live_algo, live_mb) = read_zram_live_state();
+        guard.zram_enabled = live_on;
+        guard.zram_compression_algo = live_algo;
+        guard.zram_size_mb = live_mb;
+    }
+
     data.anti_crash_guard = Some(guard);
     store.put_json(KV_OPTIMIZER, &data)?;
     Ok(data)
@@ -613,7 +904,7 @@ pub async fn emergency_mitigate(
     executor: &dyn CommandExecutor,
     action: &str,
 ) -> Result<(String, SystemOptimizerData), PanelError> {
-    let mut data = load_optimizer(store, config)?;
+    let mut data = load_optimizer(store, config, executor).await?;
     let prod = is_production_vps(config);
 
     let msg = match action.trim() {
@@ -654,33 +945,32 @@ pub async fn emergency_mitigate(
                     ))
                 })?;
                 if executor.is_binary_available(AllowedBinary::Systemctl) {
-                    let php_active = executor
-                        .run(
-                            AllowedBinary::Systemctl,
-                            &["is-active", "php8.3-fpm.service"],
-                            CMD_TIMEOUT,
-                        )
-                        .await
-                        .map(|o| o.success && o.stdout.trim() == "active")
-                        .unwrap_or(false);
-                    if php_active {
-                        let out = executor
-                            .run(
-                                AllowedBinary::Systemctl,
-                                &["reload", "php8.3-fpm.service"],
-                                CMD_TIMEOUT,
-                            )
-                            .await?;
-                        if !out.success {
-                            return Err(PanelError::CommandFailed {
-                                binary: "systemctl",
-                                exit_code: out.exit_code,
-                                stderr: if out.stderr.trim().is_empty() {
-                                    out.stdout
-                                } else {
-                                    out.stderr
-                                },
-                            });
+                    for php_unit in [
+                        "php8.4-fpm.service",
+                        "php8.3-fpm.service",
+                        "php8.2-fpm.service",
+                        "php8.1-fpm.service",
+                    ] {
+                        let php_active = executor
+                            .run(AllowedBinary::Systemctl, &["is-active", php_unit], CMD_TIMEOUT)
+                            .await
+                            .map(|o| o.success && o.stdout.trim() == "active")
+                            .unwrap_or(false);
+                        if php_active {
+                            let out = executor
+                                .run(AllowedBinary::Systemctl, &["reload", php_unit], CMD_TIMEOUT)
+                                .await?;
+                            if !out.success {
+                                return Err(PanelError::CommandFailed {
+                                    binary: "systemctl",
+                                    exit_code: out.exit_code,
+                                    stderr: if out.stderr.trim().is_empty() {
+                                        out.stdout
+                                    } else {
+                                        out.stderr
+                                    },
+                                });
+                            }
                         }
                     }
                 }

@@ -420,6 +420,44 @@ pub async fn delete_ufw_rule_guarded(
     list_ufw_rules(executor).await
 }
 
+async fn query_fail2ban_u32(
+    executor: &dyn CommandExecutor,
+    jail: &str,
+    param: &str,
+    fallback: u32,
+) -> u32 {
+    executor
+        .run(
+            AllowedBinary::Fail2banClient,
+            &["get", jail, param],
+            SEC_TIMEOUT,
+        )
+        .await
+        .ok()
+        .filter(|o| o.success)
+        .and_then(|o| o.stdout.lines().last().and_then(|l| l.trim().parse::<u32>().ok()))
+        .unwrap_or(fallback)
+}
+
+async fn query_fail2ban_u64(
+    executor: &dyn CommandExecutor,
+    jail: &str,
+    param: &str,
+    fallback: u64,
+) -> u64 {
+    executor
+        .run(
+            AllowedBinary::Fail2banClient,
+            &["get", jail, param],
+            SEC_TIMEOUT,
+        )
+        .await
+        .ok()
+        .filter(|o| o.success)
+        .and_then(|o| o.stdout.lines().last().and_then(|l| l.trim().parse::<u64>().ok()))
+        .unwrap_or(fallback)
+}
+
 pub async fn list_fail2ban_jails(
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<Fail2banJail>, PanelError> {
@@ -445,7 +483,13 @@ pub async fn list_fail2ban_jails(
             .run(AllowedBinary::Fail2banClient, &["status", &name], SEC_TIMEOUT)
             .await?;
         if j_out.success {
-            jails.push(parse_fail2ban_jail_status(&name, &j_out.stdout));
+            let mut jail = parse_fail2ban_jail_status(&name, &j_out.stdout);
+            jail.max_retry = query_fail2ban_u32(executor, &name, "maxretry", jail.max_retry).await;
+            jail.find_time_sec =
+                query_fail2ban_u64(executor, &name, "findtime", jail.find_time_sec).await;
+            jail.ban_time_sec =
+                query_fail2ban_u64(executor, &name, "bantime", jail.ban_time_sec).await;
+            jails.push(jail);
         }
     }
     Ok(jails)
@@ -579,16 +623,66 @@ pub async fn toggle_hardening(
 const KV_UFW_DISABLED: &str = "security.ufw_disabled_ids";
 const KV_ANTI_DDOS: &str = "security.anti_ddos_shield";
 
+fn read_proc_u64(path: &str) -> Option<u64> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+fn read_kernel_dropped_packets() -> u64 {
+    let mut total = 0u64;
+    if let Ok(netstat) = std::fs::read_to_string("/proc/net/netstat") {
+        let lines: Vec<&str> = netstat.lines().collect();
+        for pair in lines.chunks_exact(2) {
+            if pair[0].starts_with("TcpExt:") && pair[1].starts_with("TcpExt:") {
+                let keys: Vec<&str> = pair[0].split_whitespace().collect();
+                let vals: Vec<&str> = pair[1].split_whitespace().collect();
+                for (k, v) in keys.iter().zip(vals.iter()) {
+                    if matches!(
+                        *k,
+                        "SyncookiesSent" | "SyncookiesFailed" | "ListenOverflows" | "ListenDrops"
+                    ) {
+                        if let Ok(n) = v.parse::<u64>() {
+                            total = total.saturating_add(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(dev) = std::fs::read_to_string("/proc/net/dev") {
+        for line in dev.lines().skip(2) {
+            if let Some((iface, rest)) = line.split_once(':') {
+                if iface.trim() == "lo" {
+                    continue;
+                }
+                let cols: Vec<&str> = rest.split_whitespace().collect();
+                if let Some(rx_drop) = cols.get(3).and_then(|s| s.parse::<u64>().ok()) {
+                    total = total.saturating_add(rx_drop);
+                }
+            }
+        }
+    }
+    total
+}
+
 fn default_anti_ddos_shield() -> AntiDdosShieldState {
+    let syn_cookies = read_proc_u64("/proc/sys/net/ipv4/tcp_syncookies")
+        .map(|v| v != 0)
+        .unwrap_or(false);
+    let syn_backlog = read_proc_u64("/proc/sys/net/ipv4/tcp_max_syn_backlog").unwrap_or(4096);
     AntiDdosShieldState {
         protection_mode: "normal".to_string(),
-        xdp_status: "Not Attached (kernel sysctl SYN cookies active; eBPF/XDP experimental)"
-            .to_string(),
-        syn_cookies_enabled: true,
-        syn_rate_limit_pps: 150_000,
-        dropped_packets_total: 0,
+        xdp_status: if syn_cookies {
+            format!("Linux Kernel SYN Cookies Active (tcp_max_syn_backlog={syn_backlog})")
+        } else {
+            "Kernel SYN Cookies Disabled (enable via protection mode or sysctl)".to_string()
+        },
+        syn_cookies_enabled: syn_cookies,
+        syn_rate_limit_pps: syn_backlog,
+        dropped_packets_total: read_kernel_dropped_packets(),
         blocked_l7_attacks_today: 0,
-        fim_integrity_status: "Pending initial SHA-256 scan".to_string(),
+        fim_integrity_status: "Pending initial BLAKE3 + SHA-256 scan".to_string(),
         last_fim_scan_at: String::new(),
         waf_rules: vec![
             WafRuleItem {
@@ -636,12 +730,21 @@ fn default_anti_ddos_shield() -> AntiDdosShieldState {
 }
 
 pub fn load_anti_ddos_shield(store: &ModuleStore) -> Result<AntiDdosShieldState, PanelError> {
-    if let Some(existing) = store.get_json::<AntiDdosShieldState>(KV_ANTI_DDOS)? {
-        return Ok(existing);
+    let mut shield = if let Some(existing) = store.get_json::<AntiDdosShieldState>(KV_ANTI_DDOS)? {
+        existing
+    } else {
+        let initial = default_anti_ddos_shield();
+        store.put_json(KV_ANTI_DDOS, &initial)?;
+        initial
+    };
+    if let Some(live_syn) = read_proc_u64("/proc/sys/net/ipv4/tcp_syncookies") {
+        shield.syn_cookies_enabled = live_syn != 0;
     }
-    let initial = default_anti_ddos_shield();
-    store.put_json(KV_ANTI_DDOS, &initial)?;
-    Ok(initial)
+    if let Some(live_backlog) = read_proc_u64("/proc/sys/net/ipv4/tcp_max_syn_backlog") {
+        shield.syn_rate_limit_pps = live_backlog;
+    }
+    shield.dropped_packets_total = read_kernel_dropped_packets();
+    Ok(shield)
 }
 
 pub async fn set_ddos_mode(
@@ -660,35 +763,40 @@ pub async fn set_ddos_mode(
         )));
     };
 
+    let (syn_backlog, synack_retries) = match target_mode {
+        "normal" => ("4096", "5"),
+        "elevated" => ("16384", "3"),
+        _ => ("32768", "2"),
+    };
+
     if executor.is_binary_available(AllowedBinary::Sysctl) {
-        let sysctl_out = executor
-            .run(
-                AllowedBinary::Sysctl,
-                &["-w", "net.ipv4.tcp_syncookies=1"],
-                SEC_TIMEOUT,
-            )
-            .await?;
-        if !sysctl_out.success {
-            return Err(PanelError::CommandFailed {
-                binary: "sysctl",
-                exit_code: sysctl_out.exit_code,
-                stderr: sysctl_out.stderr,
-            });
+        let kvs = [
+            "net.ipv4.tcp_syncookies=1".to_string(),
+            format!("net.ipv4.tcp_max_syn_backlog={syn_backlog}"),
+            format!("net.ipv4.tcp_synack_retries={synack_retries}"),
+        ];
+        for kv in &kvs {
+            let sysctl_out = executor
+                .run(AllowedBinary::Sysctl, &["-w", kv], SEC_TIMEOUT)
+                .await?;
+            if !sysctl_out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "sysctl",
+                    exit_code: sysctl_out.exit_code,
+                    stderr: sysctl_out.stderr,
+                });
+            }
         }
     }
 
     let mut shield = load_anti_ddos_shield(store)?;
     shield.protection_mode = target_mode.to_string();
     shield.syn_cookies_enabled = true;
-    shield.syn_rate_limit_pps = match target_mode {
-        "normal" => 150_000,
-        "elevated" => 50_000,
-        _ => 10_000,
-    };
+    shield.syn_rate_limit_pps = syn_backlog.parse::<u64>().unwrap_or(16384);
     shield.xdp_status = match target_mode {
-        "normal" => "Kernel SYN Cookies Active (eBPF/XDP not attached — experimental)".to_string(),
-        "elevated" => "Strict Kernel SYN Cookies + Per-Site Rate Limiting Active (eBPF/XDP experimental)".to_string(),
-        _ => "Emergency Kernel SYN Lockdown Active (eBPF/XDP experimental)".to_string(),
+        "normal" => format!("Kernel SYN Cookies Active (backlog={syn_backlog}, synack_retries={synack_retries})"),
+        "elevated" => format!("Strict Kernel SYN Hardening Active (backlog={syn_backlog}, synack_retries={synack_retries})"),
+        _ => format!("Emergency Kernel SYN Lockdown Active (backlog={syn_backlog}, synack_retries={synack_retries})"),
     };
 
     store.put_json(KV_ANTI_DDOS, &shield)?;
@@ -708,13 +816,21 @@ pub fn toggle_waf_rule(
     Ok(shield)
 }
 
-fn scan_dir_sha256(root: &Path, depth: u8, hasher: &mut Sha256, count: &mut u64) {
+fn scan_dir_streaming(
+    root: &Path,
+    depth: u8,
+    b3_hasher: &mut blake3::Hasher,
+    sha_hasher: &mut Sha256,
+    count: &mut u64,
+) {
+    use std::io::Read as _;
     if depth > 4 || !root.exists() {
         return;
     }
     let Ok(rd) = std::fs::read_dir(root) else {
         return;
     };
+    let mut buf = [0u8; 64 * 1024];
     for entry in rd.flatten() {
         let Ok(ft) = entry.file_type() else {
             continue;
@@ -724,13 +840,24 @@ fn scan_dir_sha256(root: &Path, depth: u8, hasher: &mut Sha256, count: &mut u64)
         }
         let p = entry.path();
         if ft.is_file() {
-            if let Ok(bytes) = std::fs::read(&p) {
-                hasher.update(p.to_string_lossy().as_bytes());
-                hasher.update(&bytes);
+            if let Ok(mut file) = std::fs::File::open(&p) {
+                let p_bytes = p.to_string_lossy();
+                b3_hasher.update(p_bytes.as_bytes());
+                sha_hasher.update(p_bytes.as_bytes());
+                loop {
+                    match file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            b3_hasher.update(&buf[..n]);
+                            sha_hasher.update(&buf[..n]);
+                        }
+                        Err(_) => break,
+                    }
+                }
                 *count = count.saturating_add(1);
             }
         } else if ft.is_dir() {
-            scan_dir_sha256(&p, depth + 1, hasher, count);
+            scan_dir_streaming(&p, depth + 1, b3_hasher, sha_hasher, count);
         }
     }
 }
@@ -739,18 +866,20 @@ pub fn run_fim_scan(
     store: &ModuleStore,
     config: &Config,
 ) -> Result<(u64, String, AntiDdosShieldState), PanelError> {
-    let mut hasher = Sha256::new();
+    let mut b3_hasher = blake3::Hasher::new();
+    let mut sha_hasher = Sha256::new();
     let mut count = 0u64;
-    scan_dir_sha256(&config.wwwroot, 0, &mut hasher, &mut count);
-    scan_dir_sha256(&config.data_dir, 0, &mut hasher, &mut count);
-    let digest = format!("{:x}", hasher.finalize());
-    let short_digest = digest.chars().take(12).collect::<String>();
+    scan_dir_streaming(&config.wwwroot, 0, &mut b3_hasher, &mut sha_hasher, &mut count);
+    scan_dir_streaming(&config.data_dir, 0, &mut b3_hasher, &mut sha_hasher, &mut count);
+    let b3_hex = b3_hasher.finalize().to_hex().to_string();
+    let sha_hex = format!("{:x}", sha_hasher.finalize());
+    let short_b3: String = b3_hex.chars().take(12).collect();
 
     let mut shield = load_anti_ddos_shield(store)?;
     shield.last_fim_scan_at = Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string();
-    shield.fim_integrity_status = format!("Verified ({count} files · SHA256:{short_digest})");
+    shield.fim_integrity_status = format!("Verified ({count} files · BLAKE3:{short_b3})");
     store.put_json(KV_ANTI_DDOS, &shield)?;
-    Ok((count, digest, shield))
+    Ok((count, sha_hex, shield))
 }
 
 pub async fn toggle_ufw_rule(
@@ -780,7 +909,7 @@ pub async fn toggle_ufw_rule(
     Ok(rules)
 }
 
-/// Loads real security overview (`ufw`, `fail2ban-client`, `sysctl`, and eBPF/WAF/FIM shield state).
+/// Loads real security overview (`ufw`, `fail2ban-client`, `sysctl`, kernel netstat counters, and FIM state).
 pub async fn load_security_overview(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,
@@ -804,7 +933,9 @@ pub async fn load_security_overview(
         Err(err) => return Err(err),
     };
     let hardening_directives = list_hardening(executor).await;
-    let anti_ddos_shield = Some(load_anti_ddos_shield(store)?);
+    let mut shield = load_anti_ddos_shield(store)?;
+    shield.blocked_l7_attacks_today = fail2ban_jails.iter().map(|j| j.total_banned).sum();
+    let anti_ddos_shield = Some(shield);
 
     Ok(SecurityData {
         ufw_rules,

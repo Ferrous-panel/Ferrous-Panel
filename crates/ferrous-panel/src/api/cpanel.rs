@@ -293,13 +293,15 @@ pub async fn add_dns(
     let records = cpanel_mod::add_dns_record(
         &state.modules,
         &state.config,
+        state.webserver.executor().as_ref(),
         &body.domain,
         &body.record_type,
         &body.host,
         &body.value,
         body.ttl,
         body.priority,
-    )?;
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
@@ -321,7 +323,13 @@ pub async fn delete_dns(
     let _conn_guard = state.telemetry.connection_guard();
 
     let id = path.into_inner();
-    let records = cpanel_mod::delete_dns_record(&state.modules, &state.config, &id)?;
+    let records = cpanel_mod::delete_dns_record(
+        &state.modules,
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &id,
+    )
+    .await?;
 
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(

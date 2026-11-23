@@ -26,14 +26,44 @@ pub async fn run_system_diagnostics(
     let t1 = Instant::now();
     let ws_cfg = webserver.store.load_config()?;
     let engine_label = ws_cfg.frontend_engine.as_str();
+    let engine_unit = match ws_cfg.frontend_engine {
+        WebServerEngine::FerrousX => "ferrousx.service",
+        WebServerEngine::Nginx => "nginx.service",
+    };
+    let executor = webserver.executor();
+    let (ws_status, ws_detail) = if is_production_vps(config)
+        && executor.is_binary_available(AllowedBinary::Systemctl)
+    {
+        let active = executor
+            .run(AllowedBinary::Systemctl, &["is-active", engine_unit], CMD_TIMEOUT)
+            .await
+            .map(|o| o.success && o.stdout.trim() == "active")
+            .unwrap_or(false);
+        if active {
+            (
+                "healthy".to_string(),
+                format!("{engine_unit} is active · engine={engine_label} · ACME webroot /www/acme"),
+            )
+        } else {
+            (
+                "degraded".to_string(),
+                format!("{engine_unit} is NOT active (engine={engine_label}) — start it in Software Manager"),
+            )
+        }
+    } else {
+        (
+            "healthy".to_string(),
+            format!("Configured frontend engine: {engine_label} (test mode)"),
+        )
+    };
     let ws_latency = u64::try_from(t1.elapsed().as_millis()).unwrap_or(1).max(1);
     items.push(DiagnosticCheckItem {
         id: "diag-web-engine".to_string(),
         subsystem: "Web Server Engine".to_string(),
         target: format!("{engine_label} (:80 / :443)"),
-        status: "healthy".to_string(),
+        status: ws_status,
         latency_ms: ws_latency,
-        detail: format!("Active frontend engine: {engine_label} · ACME webroot /www/acme ready"),
+        detail: ws_detail,
     });
 
     let rss = read_process_rss_mb();
@@ -46,18 +76,41 @@ pub async fn run_system_diagnostics(
         detail: format!("PID {} · RSS {:.2} MB · Argon2id + 32B OsRng session guard", std::process::id(), rss),
     });
 
-    let ufw_avail = webserver.executor().is_binary_available(AllowedBinary::Ufw);
+    let t_fw = Instant::now();
+    let ufw_avail = executor.is_binary_available(AllowedBinary::Ufw);
+    let (fw_status, fw_detail) = if is_production_vps(config) && ufw_avail {
+        match executor.run(AllowedBinary::Ufw, &["status"], CMD_TIMEOUT).await {
+            Ok(out) if out.success && out.stdout.to_ascii_lowercase().contains("status: active") => (
+                "healthy".to_string(),
+                "UFW firewall is active (live `ufw status` verified)".to_string(),
+            ),
+            Ok(out) => (
+                "degraded".to_string(),
+                format!(
+                    "UFW installed but not active: {}",
+                    out.stdout.lines().next().unwrap_or("inactive").trim()
+                ),
+            ),
+            Err(err) => ("degraded".to_string(), format!("UFW status probe failed: {err}")),
+        }
+    } else if ufw_avail {
+        (
+            "healthy".to_string(),
+            "UFW binary available on host".to_string(),
+        )
+    } else {
+        (
+            "degraded".to_string(),
+            "UFW binary (/usr/sbin/ufw) not installed on host".to_string(),
+        )
+    };
     items.push(DiagnosticCheckItem {
         id: "diag-firewall".to_string(),
-        subsystem: "UFW & eBPF Shield".to_string(),
-        target: "/usr/sbin/ufw + XDP L7 WAF".to_string(),
-        status: "healthy".to_string(),
-        latency_ms: 2,
-        detail: if ufw_avail {
-            "UFW binary verified · eBPF/XDP + Layer-7 WAF rules loaded".to_string()
-        } else {
-            "eBPF/XDP + Layer-7 WAF rules active in SQLite store".to_string()
-        },
+        subsystem: "UFW Firewall & Kernel Shield".to_string(),
+        target: "/usr/sbin/ufw + /proc/sys/net/ipv4".to_string(),
+        status: fw_status,
+        latency_ms: u64::try_from(t_fw.elapsed().as_millis()).unwrap_or(1).max(1),
+        detail: fw_detail,
     });
 
     let wwwroot_exists = config.wwwroot.exists();
@@ -65,12 +118,12 @@ pub async fn run_system_diagnostics(
         id: "diag-safepath".to_string(),
         subsystem: "SafePath Jail & Storage".to_string(),
         target: config.wwwroot.display().to_string(),
-        status: "healthy".to_string(),
+        status: if wwwroot_exists { "healthy" } else { "degraded" }.to_string(),
         latency_ms: 1,
         detail: if wwwroot_exists {
             "Canonical root jail verified · symlink escape guard enforced".to_string()
         } else {
-            "SafePath root configured · zero traversal policy active".to_string()
+            "SafePath root directory does not exist yet on disk".to_string()
         },
     });
 
@@ -125,13 +178,14 @@ pub async fn get_ferrousx_sync_status(
 ) -> Result<FerrousXSyncState, PanelError> {
     let now = Utc::now().to_rfc3339();
     let rss = read_process_rss_mb();
+    let executor = webserver.executor();
     let fx_installed = webserver.ferrousx.is_installed();
     let has_fx_env = std::path::Path::new("/etc/ferrousx/ferrousx.env").is_file();
     let ipc_client = webserver.ferrousx.ipc_client();
     let resolved_socket = ipc_client.resolved_socket_path().display().to_string();
 
-    let mut config_epoch: u64 = 1;
-    let mut rcu_reload_latency_us: u64 = 42;
+    let mut config_epoch: u64 = 0;
+    let mut rcu_reload_latency_us: u64 = 0;
     let mut live_ipc_summary: Option<String> = None;
 
     if ipc_client.socket_available() {
@@ -176,13 +230,40 @@ pub async fn get_ferrousx_sync_status(
         }
     }
 
+    // Probe real FerrousX git commit SHA & rustc version from host if installed
+    let mut commit_sha = read_short_file_line(&config.data_dir.join(".ferrousx-commit"))
+        .unwrap_or_else(|| "unknown".to_string());
+    if commit_sha == "unknown"
+        && Path::new("/usr/local/src/ferrousx/.git").is_dir()
+        && executor.is_binary_available(AllowedBinary::Git)
+    {
+        if let Ok(out) = executor
+            .run(
+                AllowedBinary::Git,
+                &["-C", "/usr/local/src/ferrousx", "rev-parse", "--short=8", "HEAD"],
+                Duration::from_secs(3),
+            )
+            .await
+        {
+            if out.success && !out.stdout.trim().is_empty() {
+                commit_sha = out.stdout.trim().to_string();
+            }
+        }
+    }
+    let rust_version = probe_binary_version_line(executor.as_ref(), AllowedBinary::Rustc, &["--version"])
+        .await
+        .unwrap_or_else(|| "compiled binary (rustc optional at runtime)".to_string());
+    let fx_ver_line = probe_binary_version_line(executor.as_ref(), AllowedBinary::Ferrousx, &["--version"])
+        .await
+        .unwrap_or_else(|| if fx_installed { "ferrousx-bin installed".to_string() } else { "not installed".to_string() });
+
     Ok(FerrousXSyncState {
         upstream_repo: "https://github.com/Ferrous-panel/FerrousX".to_string(),
-        commit_sha: "48659720".to_string(),
-        commit_date: "2026-11-19T12:40:12Z".to_string(),
-        commit_title: "refactor: standardize environment configuration management (ferrousx.env + /run/ferrousx/panel-admin.sock IPC + FX-001..FX-013)".to_string(),
-        rust_edition: "2024".to_string(),
-        rust_version: "1.85.0".to_string(),
+        commit_sha: commit_sha.clone(),
+        commit_date: now.clone(),
+        commit_title: fx_ver_line,
+        rust_edition: "2021".to_string(),
+        rust_version,
         daemon_binary: "/usr/local/bin/ferrousx-bin".to_string(),
         cli_binary: "/usr/local/bin/ferrousx-ctl".to_string(),
         master_config_toml: webserver.ferrousx.paths().master_config.display().to_string(),
@@ -195,70 +276,26 @@ pub async fn get_ferrousx_sync_status(
         message: Some(if let Some(live_msg) = live_ipc_summary {
             live_msg
         } else if trigger_resync {
-            format!(
-                "Đã đồng bộ FerrousX (github.com/Ferrous-panel/FerrousX @ 48659720 · ferrousx.env + FX-001..FX-013) lúc {now}"
-            )
+            format!("Đã kiểm tra đồng bộ FerrousX (@ {commit_sha}) lúc {now}")
         } else if fx_installed && has_fx_env {
-            "ferrousx-bin & /etc/ferrousx/ferrousx.env đã sẵn sàng trên hệ thống (commit 48659720)".to_string()
+            format!("ferrousx-bin & /etc/ferrousx/ferrousx.env đã sẵn sàng trên hệ thống (commit {commit_sha})")
         } else if fx_installed {
-            "ferrousx-bin đã sẵn sàng trên hệ thống (commit 48659720)".to_string()
+            format!("ferrousx-bin đã sẵn sàng trên hệ thống (commit {commit_sha})")
         } else {
-            "Đã đồng bộ cấu hình FerrousX @ 48659720 (chạy update.sh --ferrousx để biên dịch bản mới nhất từ GitHub)".to_string()
+            "FerrousX chưa được cài đặt — chạy `sudo fp update --ferrousx` để biên dịch từ GitHub".to_string()
         }),
         workspace_crates: vec![
             FerrousXSyncCrate {
-                name: "ferrousx-core".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
-                modules: vec![
-                    "worker".to_string(),
-                    "numa".to_string(),
-                    "ebpf".to_string(),
-                    "metrics".to_string(),
-                ],
-                features: "Thread-per-core, NUMA affinity, eBPF/XDP metrics".to_string(),
-                status: "active".to_string(),
-            },
-            FerrousXSyncCrate {
-                name: "ferrousx-http".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
+                name: "ferrousx".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
                 modules: vec![
                     "server".to_string(),
-                    "acme".to_string(),
-                ],
-                features: "HTTP/1.1 + HTTP/2 + HTTP/3 QUIC, FX-001..FX-004, FX-012..FX-013".to_string(),
-                status: "active".to_string(),
-            },
-            FerrousXSyncCrate {
-                name: "ferrousx-config".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
-                modules: vec!["config".to_string()],
-                features: "ferrousx.env dynamic loader, ArcSwap RCU, sites/*.toml & panel.env sync".to_string(),
-                status: "active".to_string(),
-            },
-            FerrousXSyncCrate {
-                name: "ferrousx-proxy".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
-                modules: vec![
-                    "pipeline".to_string(),
-                    "waf".to_string(),
+                    "config".to_string(),
                     "fastcgi".to_string(),
+                    "tls".to_string(),
                 ],
-                features: "ZeroAllocWafEngine, Sharded GCRA IPv4/IPv6, Anti-SSRF & FastCGI (FX-007..FX-010)".to_string(),
-                status: "active".to_string(),
-            },
-            FerrousXSyncCrate {
-                name: "ferrousx-panel".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
-                modules: vec!["api".to_string(), "webui".to_string()],
-                features: "SO_PEERCRED + 256-bit admin.token IPC socket & CSRF/CSP WebUI (FX-005)".to_string(),
-                status: "active".to_string(),
-            },
-            FerrousXSyncCrate {
-                name: "ferrousx-bin".to_string(),
-                version: "0.1.0-security-hardened".to_string(),
-                modules: vec!["main".to_string(), "cli".to_string()],
-                features: "ferrousx-bin daemon + ferrousx-ctl interactive VPS admin console".to_string(),
-                status: "active".to_string(),
+                features: "Tokio + Hyper 1 + Rustls 0.23 + PHP FastCGI + Static/SPA".to_string(),
+                status: if fx_installed { "active" } else { "not_installed" }.to_string(),
             },
             FerrousXSyncCrate {
                 name: "ferrous-panel".to_string(),
@@ -269,8 +306,9 @@ pub async fn get_ferrousx_sync_status(
                     "modules".to_string(),
                     "cli".to_string(),
                     "api".to_string(),
+                    "ui".to_string(),
                 ],
-                features: "actix-web 4.9, rusqlite WAL, argon2, rust-embed".to_string(),
+                features: "actix-web 4.9, rusqlite WAL, argon2, blake3, sysinfo, rust-embed".to_string(),
                 status: "active".to_string(),
             },
         ],
@@ -308,69 +346,27 @@ pub async fn get_ferrousx_sync_status(
                     role: Some("Zero-dependency embedded SQLite 3 with WAL & parameterized queries".to_string()),
                 },
                 FerrousXLibDep {
-                    name: "argon2 / sha2 / subtle / rand".to_string(),
-                    panel_version: "0.5 / 0.10 / 2.6 / 0.8".to_string(),
-                    ferrousx_version: "0.5 / 0.10 / 2.6 / 0.8".to_string(),
+                    name: "argon2 / blake3 / sha2 / subtle".to_string(),
+                    panel_version: "0.5 / 1.5 / 0.10 / 2.6".to_string(),
+                    ferrousx_version: "0.5 / 1.5 / 0.10 / 2.6".to_string(),
                     compatible: true,
-                    role: Some("Argon2id password hashing, SHA-256 FIM/Tokens & constant-time compare".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "fastcgi-client".to_string(),
-                    panel_version: "0.9 (PHP-FPM pool orchestrator)".to_string(),
-                    ferrousx_version: "0.9 (Unix socket FastCGI gateway)".to_string(),
-                    compatible: true,
-                    role: Some("Native PHP-FPM 8.4/8.3/8.2/8.1/7.4 Unix domain socket protocol".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "serde / serde_json / toml".to_string(),
-                    panel_version: "1.0 / 1.0 / 0.8".to_string(),
-                    ferrousx_version: "1.0 / 1.0 / 0.8".to_string(),
-                    compatible: true,
-                    role: Some("Strict camelCase JSON DTO contract & FerrousX TOML vhost parser".to_string()),
+                    role: Some("Argon2id auth, BLAKE3 1.5 snapshots/FIM & constant-time verify".to_string()),
                 },
                 FerrousXLibDep {
                     name: "clap / sysinfo / rust-embed".to_string(),
                     panel_version: "4.5 / 0.33 / 8.5".to_string(),
                     ferrousx_version: "4.5 / 0.33 / 8.5".to_string(),
                     compatible: true,
-                    role: Some("Unified fp & ferrousx-bin CLI, Linux /proc telemetry & embedded dist/".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "tracing / tracing-subscriber / thiserror / anyhow".to_string(),
-                    panel_version: "0.1 / 0.3 / 2.0 / 1.0".to_string(),
-                    ferrousx_version: "0.1 / 0.3 / 2.0 / 1.0".to_string(),
-                    compatible: true,
-                    role: Some("Structured telemetry logging & zero-unwrap typed error handling".to_string()),
+                    role: Some("Unified fp CLI, real Linux /proc telemetry & embedded Pure-Rust UI".to_string()),
                 },
             ],
             frontend_dependencies: vec![
                 FerrousXLibDep {
-                    name: "react / react-dom".to_string(),
-                    panel_version: "19.0.1".to_string(),
-                    ferrousx_version: "19.0.1 (embedded dist/)".to_string(),
+                    name: "Pure-Rust Embedded UI (rust-embed)".to_string(),
+                    panel_version: env!("CARGO_PKG_VERSION").to_string(),
+                    ferrousx_version: "Zero-Node.js embedded assets".to_string(),
                     compatible: true,
-                    role: Some("Concurrent UI rendering embedded into ferrous-panel via rust-embed".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "tailwindcss / @tailwindcss/vite".to_string(),
-                    panel_version: "4.3.3".to_string(),
-                    ferrousx_version: "4.3.3".to_string(),
-                    compatible: true,
-                    role: Some("Zero-runtime CSS design system compiled into static bundle".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "recharts / lucide-react / motion".to_string(),
-                    panel_version: "3.10.1 / 0.546.0 / 12.23.24".to_string(),
-                    ferrousx_version: "3.10.1 / 0.546.0 / 12.23.24".to_string(),
-                    compatible: true,
-                    role: Some("Real-time 24h telemetry charts, iconography & layout transitions".to_string()),
-                },
-                FerrousXLibDep {
-                    name: "vite / typescript".to_string(),
-                    panel_version: "8.3.0 / 7.0.2".to_string(),
-                    ferrousx_version: "8.3.0 / 7.0.2".to_string(),
-                    compatible: true,
-                    role: Some("Static SPA bundler (build-time only; zero Node.js on VPS)".to_string()),
+                    role: Some("Embedded HTML/CSS/Vanilla ES6 modules served directly by Actix-Web without Node.js".to_string()),
                 },
             ],
         },

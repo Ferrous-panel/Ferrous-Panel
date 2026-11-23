@@ -49,6 +49,25 @@ pub(super) fn sha256_hex(input: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+pub(super) fn blake3_hex(input: &[u8]) -> String {
+    blake3::hash(input).to_hex().to_string()
+}
+
+pub(super) fn blake3_file_hex(path: &Path) -> Result<String, PanelError> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 pub(super) fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<(), PanelError> {
     crate::cli::upsert_env_var(env_path, key, value)
         .map_err(|err| PanelError::Io(std::io::Error::other(format!("{err:#}"))))
@@ -179,17 +198,152 @@ pub(super) fn is_safe_token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b',' | b'@' | b'=' | b'+'))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct ProcSelfStatus {
+    pub rss_mb: f64,
+    pub vm_data_mb: f64,
+    pub threads: u32,
+}
+
+pub(super) fn read_proc_self_status() -> ProcSelfStatus {
+    let mut st = ProcSelfStatus::default();
+    if let Ok(raw) = std::fs::read_to_string("/proc/self/status") {
+        for line in raw.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                    st.rss_mb = ((kb as f64 / 1024.0) * 100.0).round() / 100.0;
+                }
+            } else if let Some(rest) = line.strip_prefix("VmData:") {
+                if let Some(kb) = rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok()) {
+                    st.vm_data_mb = ((kb as f64 / 1024.0) * 100.0).round() / 100.0;
+                }
+            } else if let Some(rest) = line.strip_prefix("Threads:") {
+                if let Some(n) = rest.split_whitespace().next().and_then(|v| v.parse::<u32>().ok()) {
+                    st.threads = n;
+                }
+            }
+        }
+    }
+    if st.rss_mb <= 0.0 {
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            if let Some(pages) = statm.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                let mb = (pages.saturating_mul(4096) as f64) / (1024.0 * 1024.0);
+                st.rss_mb = (mb * 100.0).round() / 100.0;
+            }
+        }
+    }
+    st
+}
+
 pub(super) fn read_process_rss_mb() -> f64 {
-    let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
-        return 14.8;
+    read_proc_self_status().rss_mb
+}
+
+pub(super) async fn query_systemd_property(
+    executor: &dyn CommandExecutor,
+    unit: &str,
+    prop: &str,
+) -> Option<String> {
+    if unit.is_empty() || !executor.is_binary_available(AllowedBinary::Systemctl) {
+        return None;
+    }
+    let out = executor
+        .run(
+            AllowedBinary::Systemctl,
+            &["show", "-p", prop, "--value", unit],
+            CMD_TIMEOUT,
+        )
+        .await
+        .ok()?;
+    if !out.success {
+        return None;
+    }
+    let trimmed = out.stdout.trim();
+    if trimmed.is_empty() || trimmed == "[not set]" || trimmed == "infinity" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub(super) async fn query_systemd_memory_mb(
+    executor: &dyn CommandExecutor,
+    unit: &str,
+) -> f64 {
+    if let Some(val) = query_systemd_property(executor, unit, "MemoryCurrent").await {
+        if let Ok(bytes) = val.parse::<u64>() {
+            if bytes < u64::MAX / 2 {
+                return ((bytes as f64 / 1_048_576.0) * 100.0).round() / 100.0;
+            }
+        }
+    }
+    if let Some(pid_str) = query_systemd_property(executor, unit, "MainPID").await {
+        if let Ok(pid) = pid_str.parse::<u32>() {
+            if pid > 0 {
+                if let Ok(raw) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+                    for line in raw.lines() {
+                        if let Some(rest) = line.strip_prefix("VmRSS:") {
+                            if let Some(kb) =
+                                rest.split_whitespace().next().and_then(|v| v.parse::<u64>().ok())
+                            {
+                                return ((kb as f64 / 1024.0) * 100.0).round() / 100.0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0.0
+}
+
+pub(super) async fn query_systemd_logs(
+    executor: &dyn CommandExecutor,
+    unit: &str,
+    lines: &str,
+) -> Vec<String> {
+    if unit.is_empty() || !executor.is_binary_available(AllowedBinary::Journalctl) {
+        return Vec::new();
+    }
+    let Ok(out) = executor
+        .run(
+            AllowedBinary::Journalctl,
+            &["-u", unit, "-n", lines, "--no-pager", "-o", "short-iso"],
+            CMD_TIMEOUT,
+        )
+        .await
+    else {
+        return Vec::new();
     };
-    let pages = statm
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(3800);
-    let mb = (pages.saturating_mul(4096) as f64) / (1024.0 * 1024.0);
-    ((mb * 100.0).round() / 100.0).max(1.0)
+    if !out.success {
+        return Vec::new();
+    }
+    out.stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("-- "))
+        .map(|l| l.chars().take(220).collect())
+        .collect()
+}
+
+pub(super) async fn probe_binary_version_line(
+    executor: &dyn CommandExecutor,
+    bin: AllowedBinary,
+    args: &[&str],
+) -> Option<String> {
+    if !executor.is_binary_available(bin) {
+        return None;
+    }
+    let out = executor.run(bin, args, Duration::from_secs(4)).await.ok()?;
+    let raw = if !out.stdout.trim().is_empty() {
+        out.stdout
+    } else {
+        out.stderr
+    };
+    raw.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(|l| l.chars().take(96).collect())
 }
 
 pub(super) fn resolve_local_domain(config: Option<&Config>) -> String {

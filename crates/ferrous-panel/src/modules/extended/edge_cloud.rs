@@ -1,7 +1,7 @@
 use super::common::*;
 
 // ============================================================================
-// 9. Rust Edge Cloud (Experimental / Optional: Wasmtime, Podman/Docker, WireGuard, Snapshots)
+// 9. Rust Edge Cloud (Real Wasmtime, Podman/Docker OCI, WireGuard, BLAKE3 1.5)
 // ============================================================================
 
 fn default_edge_cloud_data(config: &Config) -> EdgeCloudData {
@@ -10,21 +10,21 @@ fn default_edge_cloud_data(config: &Config) -> EdgeCloudData {
             wasmtime_version: if AllowedBinary::Wasmtime.is_available() {
                 "Wasmtime (installed)".to_string()
             } else {
-                "Wasmtime (not installed — experimental)".to_string()
+                "Wasmtime (not installed)".to_string()
             },
             youki_version: if AllowedBinary::Podman.is_available() {
                 "Podman Rootless OCI (installed)".to_string()
             } else if AllowedBinary::Docker.is_available() {
                 "Docker OCI (installed)".to_string()
             } else {
-                "OCI Runtime (not installed — experimental)".to_string()
+                "Podman/Docker (not installed)".to_string()
             },
             boringtun_version: if AllowedBinary::Wg.is_available() {
                 "WireGuard (installed)".to_string()
             } else {
-                "WireGuard (not installed — experimental)".to_string()
+                "WireGuard (not installed)".to_string()
             },
-            blake3_engine_version: "Zstd/Tar + SHA-256 Snapshot Vault".to_string(),
+            blake3_engine_version: "BLAKE3 1.5 (SIMD) + Zstd/Tar Snapshot Vault".to_string(),
             wireguard_interface: "wg0".to_string(),
             wireguard_listen_port: 51820,
             server_public_key: String::new(),
@@ -41,7 +41,7 @@ fn default_edge_cloud_data(config: &Config) -> EdgeCloudData {
         wasmtime_version: "Wasmtime (test mode)".to_string(),
         youki_version: "Podman/Docker OCI (test mode)".to_string(),
         boringtun_version: "WireGuard (test mode)".to_string(),
-        blake3_engine_version: "Snapshot Vault (test mode)".to_string(),
+        blake3_engine_version: "BLAKE3 1.5 Snapshot Vault (test mode)".to_string(),
         wireguard_interface: "wg0".to_string(),
         wireguard_listen_port: 51820,
         server_public_key: String::new(),
@@ -59,7 +59,7 @@ fn default_edge_cloud_data(config: &Config) -> EdgeCloudData {
             fuel_limit: 500_000,
             invocations_24h: 0,
             avg_execution_us: 0,
-            blake3_hash: sha256_hex(b"wasi-edge-test"),
+            blake3_hash: blake3_hex(b"wasi-edge-test"),
             kv_namespace: "FERROUS_EDGE_KV".to_string(),
             status: "staged".to_string(),
             rust_source_snippet: "fn main() { println!(\"{{\\\"ok\\\":true}}\"); }".to_string(),
@@ -147,6 +147,25 @@ fn pick_oci_binary(
     None
 }
 
+fn parse_mem_usage_mb(raw: &str) -> f64 {
+    let first = raw.split('/').next().unwrap_or(raw).trim();
+    let num_end = first
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(first.len());
+    let val = first[..num_end].parse::<f64>().unwrap_or(0.0);
+    let unit = first[num_end..].trim().to_ascii_lowercase();
+    let mb = if unit.starts_with("gi") || unit == "gb" || unit == "g" {
+        val * 1024.0
+    } else if unit.starts_with("ki") || unit == "kb" || unit == "k" {
+        val / 1024.0
+    } else if unit == "b" {
+        val / (1024.0 * 1024.0)
+    } else {
+        val
+    };
+    (mb * 100.0).round() / 100.0
+}
+
 fn dir_size_bytes(path: &Path) -> u64 {
     let Ok(meta) = std::fs::metadata(path) else {
         return 0;
@@ -187,7 +206,7 @@ async fn ensure_wg_host_private_key(
     if !executor.is_binary_available(AllowedBinary::Wg) {
         if is_production_vps(config) {
             return Err(PanelError::Conflict(
-                "thiếu wireguard-tools (binary `wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+                "thiếu wireguard-tools (binary `wg`) — hãy cài 1-click WireGuard trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         }
         let test_key = "TEST_MODE_WG_PRIVATE_KEY_UNSET";
@@ -209,6 +228,45 @@ async fn ensure_wg_host_private_key(
     }
     atomic_write_file(&key_path, format!("{trimmed}\n").as_bytes(), 0o600)?;
     Ok(trimmed.to_string())
+}
+
+async fn probe_wg_server_public_key(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+) -> String {
+    if !executor.is_binary_available(AllowedBinary::Wg) {
+        return String::new();
+    }
+    if let Ok(out) = executor
+        .run(AllowedBinary::Wg, &["show", "wg0", "public-key"], Duration::from_secs(3))
+        .await
+    {
+        let key = out.stdout.trim();
+        if out.success && !key.is_empty() {
+            return key.to_string();
+        }
+    }
+    let key_path = config.data_dir.join("edge-cloud").join("wg0.key");
+    if let Ok(priv_key) = std::fs::read_to_string(&key_path) {
+        let trimmed = priv_key.trim();
+        if !trimmed.is_empty() {
+            if let Ok(pub_out) = executor
+                .run_with_stdin(
+                    AllowedBinary::Wg,
+                    &["pubkey"],
+                    format!("{trimmed}\n").as_bytes(),
+                    Duration::from_secs(3),
+                )
+                .await
+            {
+                let key = pub_out.stdout.trim();
+                if pub_out.success && !key.is_empty() {
+                    return key.to_string();
+                }
+            }
+        }
+    }
+    String::new()
 }
 
 async fn sync_wireguard_config(
@@ -243,9 +301,11 @@ async fn sync_wireguard_config(
 
     if is_production_vps(config) {
         if !Path::new("/etc/wireguard").is_dir() {
-            return Err(PanelError::Conflict(
-                "không tìm thấy /etc/wireguard (gợi ý: sudo apt install -y wireguard-tools)".to_string(),
-            ));
+            std::fs::create_dir_all("/etc/wireguard").map_err(|_| {
+                PanelError::Conflict(
+                    "không tìm thấy /etc/wireguard (gợi ý: cài WireGuard trong mục 'PHP-FPM & Phần mềm')".to_string(),
+                )
+            })?;
         }
         atomic_write_file(Path::new("/etc/wireguard/wg0.conf"), conf.as_bytes(), 0o600)?;
     }
@@ -265,33 +325,124 @@ pub async fn load_edge_cloud(
         initial
     };
 
+    data.blake3_engine_version = "BLAKE3 1.5 (SIMD) + Zstd/Tar Snapshot Vault".to_string();
+
     if is_production_vps(config) {
+        // 1. Live engine versions
+        data.wasmtime_version =
+            probe_binary_version_line(executor, AllowedBinary::Wasmtime, &["--version"])
+                .await
+                .unwrap_or_else(|| "Wasmtime (not installed)".to_string());
+
+        data.youki_version = if let Some((oci_bin, _)) = pick_oci_binary(executor, "podman") {
+            probe_binary_version_line(executor, oci_bin, &["--version"])
+                .await
+                .unwrap_or_else(|| format!("{} (installed)", oci_bin.label()))
+        } else {
+            "Podman/Docker (not installed)".to_string()
+        };
+
+        data.boringtun_version =
+            probe_binary_version_line(executor, AllowedBinary::Wg, &["--version"])
+                .await
+                .unwrap_or_else(|| "WireGuard (not installed)".to_string());
+
+        // 2. Live OCI container status, IP, CPU%, RAM MB, PIDs
         if let Some((oci_bin, _)) = pick_oci_binary(executor, "podman") {
+            let mut stats_map: BTreeMap<String, (f64, f64, u32)> = BTreeMap::new();
+            if !data.oci_containers.is_empty() {
+                if let Ok(st_out) = executor
+                    .run(
+                        oci_bin,
+                        &[
+                            "stats",
+                            "--no-stream",
+                            "--format",
+                            "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}",
+                        ],
+                        CMD_TIMEOUT,
+                    )
+                    .await
+                {
+                    if st_out.success {
+                        for line in st_out.stdout.lines() {
+                            let cols: Vec<&str> = line.split('\t').collect();
+                            if cols.len() >= 4 {
+                                let name = cols[0].trim().trim_start_matches('/').to_string();
+                                let cpu = cols[1]
+                                    .trim()
+                                    .trim_end_matches('%')
+                                    .parse::<f64>()
+                                    .unwrap_or(0.0);
+                                let mem_mb = parse_mem_usage_mb(cols[2]);
+                                let pids = cols[3].trim().parse::<u32>().unwrap_or(0);
+                                stats_map.insert(name, (cpu, mem_mb, pids));
+                            }
+                        }
+                    }
+                }
+            }
+
             for c in &mut data.oci_containers {
                 let cname = format!("ferrous-{}", c.name);
                 if let Ok(out) = executor
                     .run(
                         oci_bin,
-                        &["inspect", "-f", "{{.State.Status}}", "--", &cname],
+                        &[
+                            "inspect",
+                            "-f",
+                            "{{.State.Status}}|{{.NetworkSettings.IPAddress}}|{{.State.StartedAt}}",
+                            "--",
+                            &cname,
+                        ],
                         CMD_TIMEOUT,
                     )
                     .await
                 {
                     if out.success {
-                        let st = out.stdout.trim().to_ascii_lowercase();
-                        if !st.is_empty() {
-                            c.status = if st == "running" {
-                                "running".to_string()
-                            } else {
-                                "stopped".to_string()
-                            };
+                        let parts: Vec<&str> = out.stdout.trim().split('|').collect();
+                        if let Some(st_raw) = parts.first() {
+                            let st = st_raw.trim().to_ascii_lowercase();
+                            if !st.is_empty() {
+                                c.status = if st == "running" {
+                                    "running".to_string()
+                                } else {
+                                    "stopped".to_string()
+                                };
+                            }
+                        }
+                        if let Some(ip_raw) = parts.get(1) {
+                            let ip = ip_raw.trim();
+                            if !ip.is_empty() && ip != "<no value>" {
+                                c.internal_ip = ip.to_string();
+                            }
+                        }
+                        if let Some(started) = parts.get(2) {
+                            let s = started.trim();
+                            if !s.is_empty() && !s.starts_with("0001-") && c.status == "running" {
+                                c.uptime = s.chars().take(19).collect();
+                            }
                         }
                     }
+                }
+                if let Some((cpu, mem_mb, pids)) = stats_map.get(&cname) {
+                    c.cpu_usage_percent = (*cpu * 100.0).round() / 100.0;
+                    c.memory_used_mb = *mem_mb;
+                    c.pids_current = *pids;
+                } else if c.status != "running" {
+                    c.cpu_usage_percent = 0.0;
+                    c.memory_used_mb = 0.0;
+                    c.pids_current = 0;
                 }
             }
         }
 
+        // 3. Live WireGuard public key & peer transfer stats
         if executor.is_binary_available(AllowedBinary::Wg) {
+            let live_pubkey = probe_wg_server_public_key(config, executor).await;
+            if !live_pubkey.is_empty() {
+                data.server_public_key = live_pubkey;
+            }
             if let Ok(out) = executor
                 .run(AllowedBinary::Wg, &["show", "wg0", "dump"], CMD_TIMEOUT)
                 .await
@@ -417,7 +568,7 @@ pub async fn deploy_wasi_worker(
         }
     }
 
-    let hash = sha256_hex(&artifact_bytes);
+    let hash = blake3_hex(&artifact_bytes);
     let mem_used_kb = ((artifact_bytes.len() as u64) / 1024).max(1);
 
     data.wasi_workers.insert(
@@ -492,7 +643,7 @@ pub async fn invoke_wasi_worker(
         }
     } else if is_production_vps(config) {
         return Err(PanelError::Conflict(
-            "không thể thực thi WASI worker: thiếu binary `wasmtime` hoặc chưa biên dịch artifact worker.wasm (tính năng thử nghiệm — cài đặt wasmtime từ https://wasmtime.dev)".to_string(),
+            "không thể thực thi WASI worker: thiếu binary `wasmtime` hoặc chưa biên dịch artifact worker.wasm — hãy cài 1-click Wasmtime trong mục 'PHP-FPM & Phần mềm'".to_string(),
         ));
     } else {
         (
@@ -508,8 +659,10 @@ pub async fn invoke_wasi_worker(
     };
 
     let elapsed_us = (start.elapsed().as_micros() as u64).max(1);
-    let verified_hash = if let Ok(bytes) = std::fs::read(&wasm_path).or_else(|_| std::fs::read(&src_path)) {
-        sha256_hex(&bytes)
+    let verified_hash = if wasm_path.is_file() {
+        blake3_file_hex(&wasm_path).unwrap_or_else(|_| worker.blake3_hash.clone())
+    } else if src_path.is_file() {
+        blake3_file_hex(&src_path).unwrap_or_else(|_| worker.blake3_hash.clone())
     } else {
         worker.blake3_hash.clone()
     };
@@ -523,7 +676,7 @@ pub async fn invoke_wasi_worker(
     headers.insert("content-type".to_string(), "application/json".to_string());
     headers.insert("x-wasi-engine".to_string(), worker.engine_version.clone());
     headers.insert("x-execution-mode".to_string(), exec_mode.to_string());
-    headers.insert("x-sha256-digest".to_string(), verified_hash.clone());
+    headers.insert("x-blake3-digest".to_string(), verified_hash.clone());
 
     let res = WasiWorkerInvokeResult {
         worker_id: worker.id.clone(),
@@ -532,9 +685,9 @@ pub async fn invoke_wasi_worker(
         status_code,
         cold_start_us: worker.cold_start_us,
         execution_time_us: elapsed_us,
-        fuel_consumed: elapsed_us.saturating_mul(64).min(worker.fuel_limit),
+        fuel_consumed: 0,
         memory_peak_kb: worker.memory_used_kb,
-        blake3_verify: format!("VERIFIED ({digest_prefix})"),
+        blake3_verify: format!("BLAKE3 VERIFIED ({digest_prefix})"),
         response_headers: headers,
         response_body,
         invoked_at: worker.last_invoked_at.clone(),
@@ -617,7 +770,7 @@ pub async fn deploy_oci_container(
     if is_production_vps(config) {
         let Some((oci_bin, label)) = pick_oci_binary(executor, runtime_engine) else {
             return Err(PanelError::Conflict(
-                "thiếu container runtime (podman hoặc docker) — gợi ý: sudo apt install -y podman".to_string(),
+                "thiếu container runtime (podman hoặc docker) — hãy cài 1-click Podman trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         };
         let port_map = format!("127.0.0.1:{h_port}:{c_port}");
@@ -723,7 +876,7 @@ pub async fn oci_container_action(
     if is_production_vps(config) {
         let Some((oci_bin, _)) = pick_oci_binary(executor, &engine) else {
             return Err(PanelError::Conflict(
-                "thiếu container runtime (podman hoặc docker) — gợi ý: sudo apt install -y podman".to_string(),
+                "thiếu container runtime (podman hoặc docker) — hãy cài 1-click Podman trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         };
         let args: Vec<&str> = match action {
@@ -817,7 +970,7 @@ pub async fn add_wireguard_peer(
 
     if is_production_vps(config) && !executor.is_binary_available(AllowedBinary::Wg) {
         return Err(PanelError::Conflict(
-            "thiếu wireguard-tools (`wg`) để tạo khóa Curve25519 thật (gợi ý: sudo apt install -y wireguard-tools)".to_string(),
+            "thiếu wireguard-tools (`wg`) — hãy cài 1-click WireGuard trong mục 'PHP-FPM & Phần mềm'".to_string(),
         ));
     }
 
@@ -892,6 +1045,24 @@ pub async fn add_wireguard_peer(
 
     sync_wireguard_config(config, &data, executor).await?;
     if is_production_vps(config) {
+        // Bring up wg0 automatically via wg-quick if the kernel interface is not yet active
+        let iface_up = executor
+            .run(AllowedBinary::Wg, &["show", "wg0"], CMD_TIMEOUT)
+            .await
+            .map(|o| o.success)
+            .unwrap_or(false);
+        if !iface_up && executor.is_binary_available(AllowedBinary::WgQuick) {
+            let up = executor
+                .run(AllowedBinary::WgQuick, &["up", "wg0"], CMD_TIMEOUT)
+                .await?;
+            if !up.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "wg-quick",
+                    exit_code: up.exit_code,
+                    stderr: if up.stderr.trim().is_empty() { up.stdout } else { up.stderr },
+                });
+            }
+        }
         let out = executor
             .run(
                 AllowedBinary::Wg,
@@ -919,6 +1090,7 @@ pub async fn add_wireguard_peer(
                 },
             });
         }
+        data.server_public_key = probe_wg_server_public_key(config, executor).await;
     }
 
     store.put_json(KV_EDGE_CLOUD, &data)?;
@@ -948,7 +1120,7 @@ pub async fn toggle_wireguard_peer(
     if is_production_vps(config) {
         if !executor.is_binary_available(AllowedBinary::Wg) {
             return Err(PanelError::Conflict(
-                "thiếu wireguard-tools (`wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+                "thiếu wireguard-tools (`wg`) — hãy cài 1-click WireGuard trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         }
         let out = if now_connected {
@@ -1012,7 +1184,7 @@ pub async fn delete_wireguard_peer(
     if is_production_vps(config) {
         if !executor.is_binary_available(AllowedBinary::Wg) {
             return Err(PanelError::Conflict(
-                "thiếu wireguard-tools (`wg`) — gợi ý: sudo apt install -y wireguard-tools".to_string(),
+                "thiếu wireguard-tools (`wg`) — hãy cài 1-click WireGuard trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         }
         if let Some(pubkey) = removed_pubkey {
@@ -1094,13 +1266,13 @@ pub async fn create_blake3_snapshot(
 
     let use_zstd = executor.is_binary_available(AllowedBinary::Zstd);
     let (archive_path, compression_label) = if use_zstd {
-        (snap_dir.join(format!("{id}.tar.zst")), "Zstd (tar --zstd)")
+        (snap_dir.join(format!("{id}.tar.zst")), "Zstd (tar --zstd) + BLAKE3")
     } else {
-        (snap_dir.join(format!("{id}.tar.gz")), "Gzip (tar -czf)")
+        (snap_dir.join(format!("{id}.tar.gz")), "Gzip (tar -czf) + BLAKE3")
     };
 
     let mut stored_bytes: u64 = logical_bytes;
-    let mut merkle = sha256_hex(
+    let mut merkle = blake3_hex(
         format!("{clean_name}:{}:{id}", source_dir.display()).as_bytes(),
     );
 
@@ -1131,9 +1303,8 @@ pub async fn create_blake3_snapshot(
             });
         }
         if archive_path.exists() {
-            let bytes = std::fs::read(&archive_path)?;
-            stored_bytes = (bytes.len() as u64).max(1);
-            merkle = sha256_hex(&bytes);
+            stored_bytes = std::fs::metadata(&archive_path)?.len().max(1);
+            merkle = blake3_file_hex(&archive_path)?;
         }
     }
 

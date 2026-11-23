@@ -1,15 +1,16 @@
 use super::common::*;
 
 // ============================================================================
-// 4. Software Package Installer
+// 4. Software Package Installer (Real systemd / apt / standalone binaries)
 // ============================================================================
 
 struct PackageSystemMeta {
     binary: AllowedBinary,
     systemd_unit: &'static str,
-    apt_package: Option<&'static str>,
+    apt_packages: &'static [&'static str],
     real_config_path: &'static str,
     is_cli_tool: bool,
+    version_args: &'static [&'static str],
 }
 
 fn detect_postgresql_config_path() -> &'static str {
@@ -48,68 +49,141 @@ fn package_system_meta(id: &str) -> Option<PackageSystemMeta> {
         "pkg-ferrousx" => Some(PackageSystemMeta {
             binary: AllowedBinary::Ferrousx,
             systemd_unit: "ferrousx.service",
-            apt_package: None,
+            apt_packages: &[],
             real_config_path: "/etc/ferrousx/ferrousx.toml",
             is_cli_tool: false,
+            version_args: &["--version"],
         }),
         "pkg-bun" => Some(PackageSystemMeta {
             binary: AllowedBinary::Bun,
             systemd_unit: "",
-            apt_package: None,
+            apt_packages: &[],
             real_config_path: "/etc/ferrous-panel/bunfig.toml",
             is_cli_tool: true,
+            version_args: &["--version"],
         }),
         "pkg-tailwindcss" => Some(PackageSystemMeta {
             binary: AllowedBinary::TailwindCli,
             systemd_unit: "",
-            apt_package: None,
+            apt_packages: &[],
             real_config_path: "/etc/ferrous-panel/tailwind.conf",
             is_cli_tool: true,
+            version_args: &["--help"],
         }),
         "pkg-deno" => Some(PackageSystemMeta {
             binary: AllowedBinary::Deno,
             systemd_unit: "",
-            apt_package: None,
+            apt_packages: &[],
             real_config_path: "/etc/ferrous-panel/deno.json",
             is_cli_tool: true,
+            version_args: &["--version"],
+        }),
+        "pkg-wasmtime" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Wasmtime,
+            systemd_unit: "",
+            apt_packages: &[],
+            real_config_path: "/etc/ferrous-panel/wasmtime.toml",
+            is_cli_tool: true,
+            version_args: &["--version"],
         }),
         "pkg-nginx" => Some(PackageSystemMeta {
             binary: AllowedBinary::Nginx,
             systemd_unit: "nginx.service",
-            apt_package: Some("nginx"),
+            apt_packages: &["nginx"],
             real_config_path: "/etc/nginx/nginx.conf",
             is_cli_tool: false,
+            version_args: &["-v"],
         }),
         "pkg-postgresql" => Some(PackageSystemMeta {
             binary: AllowedBinary::Psql,
             systemd_unit: "postgresql.service",
-            apt_package: Some("postgresql"),
+            apt_packages: &["postgresql", "postgresql-client"],
             real_config_path: detect_postgresql_config_path(),
             is_cli_tool: false,
+            version_args: &["--version"],
         }),
         "pkg-mariadb" => Some(PackageSystemMeta {
             binary: AllowedBinary::Mysql,
             systemd_unit: detect_mariadb_unit(),
-            apt_package: Some("mariadb-server"),
+            apt_packages: &["mariadb-server", "mariadb-client"],
             real_config_path: "/etc/mysql/mariadb.conf.d/50-server.cnf",
             is_cli_tool: false,
+            version_args: &["--version"],
         }),
         "pkg-certbot" => Some(PackageSystemMeta {
             binary: AllowedBinary::Certbot,
             systemd_unit: "certbot.timer",
-            apt_package: Some("certbot"),
+            apt_packages: &["certbot"],
             real_config_path: "/etc/letsencrypt/cli.ini",
             is_cli_tool: false,
+            version_args: &["--version"],
         }),
         "pkg-fail2ban" => Some(PackageSystemMeta {
             binary: AllowedBinary::Fail2banClient,
             systemd_unit: "fail2ban.service",
-            apt_package: Some("fail2ban"),
+            apt_packages: &["fail2ban"],
             real_config_path: "/etc/fail2ban/jail.local",
             is_cli_tool: false,
+            version_args: &["--version"],
+        }),
+        "pkg-postfix" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Postconf,
+            systemd_unit: "postfix.service",
+            apt_packages: &["postfix"],
+            real_config_path: "/etc/postfix/main.cf",
+            is_cli_tool: false,
+            version_args: &["-h", "mail_version"],
+        }),
+        "pkg-dovecot" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Dovecot,
+            systemd_unit: "dovecot.service",
+            apt_packages: &["dovecot-imapd", "dovecot-pop3d", "dovecot-lmtpd"],
+            real_config_path: "/etc/dovecot/dovecot.conf",
+            is_cli_tool: false,
+            version_args: &["--version"],
+        }),
+        "pkg-rspamd" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Rspamd,
+            systemd_unit: "rspamd.service",
+            apt_packages: &["rspamd"],
+            real_config_path: "/etc/rspamd/rspamd.conf",
+            is_cli_tool: false,
+            version_args: &["--version"],
+        }),
+        "pkg-podman" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Podman,
+            systemd_unit: "",
+            apt_packages: &["podman"],
+            real_config_path: "/etc/containers/containers.conf",
+            is_cli_tool: true,
+            version_args: &["--version"],
+        }),
+        "pkg-wireguard" => Some(PackageSystemMeta {
+            binary: AllowedBinary::Wg,
+            systemd_unit: "wg-quick@wg0.service",
+            apt_packages: &["wireguard-tools"],
+            real_config_path: "/etc/wireguard/wg0.conf",
+            is_cli_tool: false,
+            version_args: &["--version"],
         }),
         _ => None,
     }
+}
+
+fn find_file_recursive(dir: &Path, filename: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.is_file() && p.file_name().and_then(|n| n.to_str()) == Some(filename) {
+            return Some(p);
+        }
+        if p.is_dir() {
+            if let Some(found) = find_file_recursive(&p, filename) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 pub(super) async fn install_zero_node_cli_package(
@@ -276,6 +350,106 @@ pub(super) async fn install_zero_node_cli_package(
             }
             Ok("Installed Deno 2 standalone Rust runtime -> /usr/local/bin/deno (Zero-Node.js)".to_string())
         }
+        "pkg-wasmtime" => {
+            if !executor.is_binary_available(AllowedBinary::Tar) {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(PanelError::BinaryUnavailable("tar"));
+            }
+            let wt_arch = if arch == "aarch64" { "aarch64" } else { "x86_64" };
+            let meta_out = executor
+                .run(
+                    AllowedBinary::Curl,
+                    &[
+                        "-fsSL",
+                        "-H",
+                        "User-Agent: FerrousPanel/2.5",
+                        "https://api.github.com/repos/bytecodealliance/wasmtime/releases/latest",
+                    ],
+                    CMD_TIMEOUT,
+                )
+                .await?;
+            if !meta_out.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "curl",
+                    exit_code: meta_out.exit_code,
+                    stderr: meta_out.stderr,
+                });
+            }
+            let release: serde_json::Value = serde_json::from_str(&meta_out.stdout)
+                .map_err(|e| PanelError::Conflict(format!("không đọc được metadata Wasmtime release: {e}")))?;
+            let suffix = format!("-{wt_arch}-linux.tar.xz");
+            let download_url = release
+                .get("assets")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| {
+                    arr.iter().find_map(|item| {
+                        let name = item.get("name")?.as_str()?;
+                        if name.starts_with("wasmtime-") && name.ends_with(&suffix) {
+                            item.get("browser_download_url")?.as_str().map(str::to_string)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .ok_or_else(|| {
+                    PanelError::Conflict(format!(
+                        "không tìm thấy asset Wasmtime phù hợp cho kiến trúc {wt_arch}-linux"
+                    ))
+                })?;
+
+            let tar_path = tmp_dir.join("wasmtime.tar.xz");
+            let tar_str = tar_path.display().to_string();
+            let dl = executor
+                .run(
+                    AllowedBinary::Curl,
+                    &["-fsSL", "--retry", "3", "-o", &tar_str, &download_url],
+                    APT_TIMEOUT,
+                )
+                .await?;
+            if !dl.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "curl",
+                    exit_code: dl.exit_code,
+                    stderr: dl.stderr,
+                });
+            }
+            let tmp_str = tmp_dir.display().to_string();
+            let ex = executor
+                .run(
+                    AllowedBinary::Tar,
+                    &["-xJf", &tar_str, "-C", &tmp_str],
+                    APT_TIMEOUT,
+                )
+                .await?;
+            if !ex.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "tar",
+                    exit_code: ex.exit_code,
+                    stderr: ex.stderr,
+                });
+            }
+            let src_bin = find_file_recursive(&tmp_dir, "wasmtime").ok_or_else(|| {
+                PanelError::Conflict(
+                    "đã giải nén Wasmtime nhưng không tìm thấy file binary 'wasmtime'".to_string(),
+                )
+            })?;
+            let src_str = src_bin.display().to_string();
+            let inst = executor
+                .run(
+                    AllowedBinary::Install,
+                    &["-m", "0755", &src_str, "/usr/local/bin/wasmtime"],
+                    CMD_TIMEOUT,
+                )
+                .await?;
+            if !inst.success {
+                return Err(PanelError::CommandFailed {
+                    binary: "install",
+                    exit_code: inst.exit_code,
+                    stderr: inst.stderr,
+                });
+            }
+            Ok("Installed Bytecode Alliance Wasmtime runtime -> /usr/local/bin/wasmtime".to_string())
+        }
         _ => Err(PanelError::Validation(format!(
             "unsupported CLI package '{id}'"
         ))),
@@ -290,35 +464,41 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
     let bun_avail = executor.is_binary_available(AllowedBinary::Bun);
     let tw_avail = executor.is_binary_available(AllowedBinary::TailwindCli);
     let deno_avail = executor.is_binary_available(AllowedBinary::Deno);
+    let wasmtime_avail = executor.is_binary_available(AllowedBinary::Wasmtime);
     let nginx_avail = executor.is_binary_available(AllowedBinary::Nginx);
     let psql_avail = executor.is_binary_available(AllowedBinary::Psql);
     let mysql_avail = executor.is_binary_available(AllowedBinary::Mysql);
     let certbot_avail = executor.is_binary_available(AllowedBinary::Certbot);
     let f2b_avail = executor.is_binary_available(AllowedBinary::Fail2banClient);
+    let postfix_avail = executor.is_binary_available(AllowedBinary::Postconf);
+    let dovecot_avail = executor.is_binary_available(AllowedBinary::Dovecot);
+    let rspamd_avail = executor.is_binary_available(AllowedBinary::Rspamd);
+    let podman_avail = executor.is_binary_available(AllowedBinary::Podman);
+    let wg_avail = executor.is_binary_available(AllowedBinary::Wg);
 
     vec![
         ServerPackageItem {
             id: "pkg-ferrousx".to_string(),
             name: "FerrousX HTTP/TLS & JS/CSS Asset Engine".to_string(),
             category: "Web Server".to_string(),
-            version: "2.5.0 (Tokio + Hyper + Rustls)".to_string(),
+            version: if ferrousx_avail { "installed" } else { "not installed" }.to_string(),
             description: "Memory-safe HTTP/1.1, HTTP/2, TLS SNI, WebSocket, PHP FastCGI, and native Zero-Node.js Static/SPA server (.br/.gz precompressed + clean URLs + immutable JS/CSS cache).".to_string(),
             installed: ferrousx_avail,
             status: if ferrousx_avail { "stopped" } else { "not_installed" }.to_string(),
-            memory_mb: 11.4,
+            memory_mb: 0.0,
             config_path: "/etc/ferrousx/ferrousx.toml".to_string(),
             is_rust_native: true,
             replaced_legacy_package: Some("Nginx / Apache httpd".to_string()),
             rust_crate: Some("crates/ferrousx (hyper 1 + rustls 0.23)".to_string()),
             port: Some(80),
             config_content: "worker_threads = 0\nbind_http = \"0.0.0.0:80\"\nbind_https = \"0.0.0.0:443\"\nsites_dir = \"/etc/ferrousx/sites\"\nacme_webroot = \"/www/acme\"\nserver_tokens = false\n".to_string(),
-            logs: vec!["[ferrousx] listening on 0.0.0.0:80 and 0.0.0.0:443 (JS/CSS SPA + precompressed ready)".to_string()],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-bun".to_string(),
             name: "Bun JS/TS All-in-One Runtime (Zero-Node.js)".to_string(),
             category: "JS/CSS Zero-Node".to_string(),
-            version: "1.x Single Binary (No Node.js/npm)".to_string(),
+            version: if bun_avail { "installed" } else { "not installed" }.to_string(),
             description: "Single native binary runtime, bundler, and package manager for React, Vue, Next.js, Nuxt, SvelteKit, Astro, Remix, and Vite — replaces Node.js & npm completely.".to_string(),
             installed: bun_avail,
             status: if bun_avail { "running" } else { "not_installed" }.to_string(),
@@ -326,20 +506,16 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             config_path: "/etc/ferrous-panel/bunfig.toml".to_string(),
             is_rust_native: false,
             replaced_legacy_package: Some("Node.js + npm + npx + pm2".to_string()),
-            rust_crate: Some("Zig + JavaScriptCore single native binary (/usr/local/bin/bun)".to_string()),
+            rust_crate: Some("oven-sh/bun native binary (/usr/local/bin/bun)".to_string()),
             port: None,
             config_content: "[install]\nauto = \"fallback\"\nexact = false\n\n[run]\nbun = true\n".to_string(),
-            logs: vec![if bun_avail {
-                "[bun] ready at /usr/local/bin/bun (Zero-Node.js JS/TS runtime active)".to_string()
-            } else {
-                "[bun] not installed yet — click Install or run update.sh to enable Zero-Node.js JS frameworks".to_string()
-            }],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-tailwindcss".to_string(),
             name: "Tailwind CSS v4 Standalone CLI (Rust Oxide)".to_string(),
             category: "JS/CSS Zero-Node".to_string(),
-            version: "4.x Standalone Native Binary".to_string(),
+            version: if tw_avail { "installed" } else { "not installed" }.to_string(),
             description: "Compiles Tailwind CSS v4 stylesheets directly into minified CSS via the Rust Oxide engine with zero Node.js and zero node_modules.".to_string(),
             installed: tw_avail,
             status: if tw_avail { "running" } else { "not_installed" }.to_string(),
@@ -349,18 +525,14 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             replaced_legacy_package: Some("Node.js PostCSS / Webpack CSS pipeline".to_string()),
             rust_crate: Some("tailwindcss-oxide + LightningCSS (/usr/local/bin/tailwindcss)".to_string()),
             port: None,
-            config_content: "# FerrousPanel Zero-Node.js Tailwind CSS v4 CLI\n# Auto-compiles input.css -> output.css --minify on Deploy / Rebuild\n".to_string(),
-            logs: vec![if tw_avail {
-                "[tailwindcss] ready at /usr/local/bin/tailwindcss (Rust Oxide standalone)".to_string()
-            } else {
-                "[tailwindcss] not installed yet — click Install or run update.sh".to_string()
-            }],
+            config_content: "# FerrousPanel Zero-Node.js Tailwind CSS v4 CLI\n".to_string(),
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-deno".to_string(),
             name: "Deno 2 TypeScript & Fresh Runtime (Rust)".to_string(),
             category: "JS/CSS Zero-Node".to_string(),
-            version: "2.x Single Rust Binary".to_string(),
+            version: if deno_avail { "installed" } else { "not installed" }.to_string(),
             description: "Secure Rust-powered TypeScript/JavaScript runtime with native Web APIs, Fresh, Hono, and zero Node.js dependency.".to_string(),
             installed: deno_avail,
             status: if deno_avail { "running" } else { "not_installed" }.to_string(),
@@ -368,101 +540,209 @@ fn default_software_packages(executor: &dyn CommandExecutor) -> Vec<ServerPackag
             config_path: "/etc/ferrous-panel/deno.json".to_string(),
             is_rust_native: true,
             replaced_legacy_package: Some("Node.js + ts-node".to_string()),
-            rust_crate: Some("deno_core + rusty_v8 (/usr/local/bin/deno)".to_string()),
+            rust_crate: Some("denoland/deno (/usr/local/bin/deno)".to_string()),
             port: None,
             config_content: "{\n  \"nodeModulesDir\": \"none\"\n}\n".to_string(),
-            logs: vec![if deno_avail {
-                "[deno] ready at /usr/local/bin/deno (Zero-Node.js Rust runtime)".to_string()
-            } else {
-                "[deno] optional — click Install to enable Deno 2 / Fresh apps".to_string()
-            }],
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-wasmtime".to_string(),
+            name: "Wasmtime WASI Edge Runtime (Bytecode Alliance)".to_string(),
+            category: "Edge & Cloud".to_string(),
+            version: if wasmtime_avail { "installed" } else { "not installed" }.to_string(),
+            description: "Real Rust WebAssembly / WASI sandbox runtime executing .wasm Edge Workers directly on Linux.".to_string(),
+            installed: wasmtime_avail,
+            status: if wasmtime_avail { "running" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/ferrous-panel/wasmtime.toml".to_string(),
+            is_rust_native: true,
+            replaced_legacy_package: None,
+            rust_crate: Some("bytecodealliance/wasmtime (/usr/local/bin/wasmtime)".to_string()),
+            port: None,
+            config_content: "# Wasmtime CLI runtime used by FerrousPanel WASI Edge Workers\n".to_string(),
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-nginx".to_string(),
-            name: "Nginx 1.26 Web Server".to_string(),
+            name: "Nginx Web Server".to_string(),
             category: "Web Server".to_string(),
-            version: "1.26.2".to_string(),
+            version: if nginx_avail { "installed" } else { "not installed" }.to_string(),
             description: "Classic event-driven HTTP and reverse proxy server.".to_string(),
             installed: nginx_avail,
-            status: if nginx_avail { "running" } else { "stopped" }.to_string(),
-            memory_mb: 24.8,
+            status: if nginx_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
             config_path: "/etc/nginx/nginx.conf".to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: None,
             port: Some(80),
             config_content: "user www-data;\nworker_processes auto;\nevents { worker_connections 4096; }\n".to_string(),
-            logs: vec!["[nginx] master process /usr/sbin/nginx -g daemon on;".to_string()],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-postgresql".to_string(),
-            name: "PostgreSQL 16/17 Relational Engine".to_string(),
+            name: "PostgreSQL Relational Engine".to_string(),
             category: "Database".to_string(),
-            version: "16/17 LTS".to_string(),
+            version: if psql_avail { "installed" } else { "not installed" }.to_string(),
             description: "ACID relational database server with JSONB and MVCC concurrency.".to_string(),
             installed: psql_avail,
-            status: if psql_avail { "running" } else { "stopped" }.to_string(),
-            memory_mb: 128.0,
-            config_path: "/etc/postgresql/16/main/postgresql.conf".to_string(),
+            status: if psql_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: detect_postgresql_config_path().to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: None,
             port: Some(5432),
             config_content: "listen_addresses = '127.0.0.1'\nport = 5432\nmax_connections = 200\nshared_buffers = 256MB\n".to_string(),
-            logs: vec!["[postgresql] database system is ready to accept connections on 127.0.0.1:5432".to_string()],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-mariadb".to_string(),
-            name: "MariaDB 11.4 LTS".to_string(),
+            name: "MariaDB Server".to_string(),
             category: "Database".to_string(),
-            version: "11.4.4".to_string(),
+            version: if mysql_avail { "installed" } else { "not installed" }.to_string(),
             description: "MySQL-compatible relational database with InnoDB buffer pool tuning.".to_string(),
             installed: mysql_avail,
-            status: if mysql_avail { "running" } else { "stopped" }.to_string(),
-            memory_mb: 164.0,
+            status: if mysql_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
             config_path: "/etc/mysql/mariadb.conf.d/50-server.cnf".to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: None,
             port: Some(3306),
             config_content: "[mysqld]\nbind-address = 127.0.0.1\nport = 3306\ninnodb_buffer_pool_size = 512M\n".to_string(),
-            logs: vec!["[mariadbd] ready for connections on /run/mysqld/mysqld.sock".to_string()],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-certbot".to_string(),
             name: "Certbot ACME SSL Client".to_string(),
             category: "Security".to_string(),
-            version: "2.11.0".to_string(),
+            version: if certbot_avail { "installed" } else { "not installed" }.to_string(),
             description: "Automated Let's Encrypt X.509 certificate provisioning via /www/acme.".to_string(),
             installed: certbot_avail,
-            status: if certbot_avail { "running" } else { "stopped" }.to_string(),
-            memory_mb: 4.2,
+            status: if certbot_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
             config_path: "/etc/letsencrypt/cli.ini".to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: Some("x509-parser 0.16 (Certificate Inspector)".to_string()),
             port: None,
             config_content: "rsa-key-size = 4096\nauthenticator = webroot\nwebroot-path = /www/acme\n".to_string(),
-            logs: vec!["[certbot] systemd renewal timer active".to_string()],
+            logs: Vec::new(),
         },
         ServerPackageItem {
             id: "pkg-fail2ban".to_string(),
-            name: "Fail2ban & UFW Intrusion Shield".to_string(),
+            name: "Fail2ban Intrusion Shield".to_string(),
             category: "Security".to_string(),
-            version: "1.1.0".to_string(),
+            version: if f2b_avail { "installed" } else { "not installed" }.to_string(),
             description: "Automated brute-force log scanner and netfilter IP ban manager.".to_string(),
             installed: f2b_avail,
-            status: if f2b_avail { "running" } else { "stopped" }.to_string(),
-            memory_mb: 18.5,
+            status: if f2b_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
             config_path: "/etc/fail2ban/jail.local".to_string(),
             is_rust_native: false,
             replaced_legacy_package: None,
             rust_crate: None,
             port: None,
             config_content: "[DEFAULT]\nbantime = 3600\nfindtime = 600\nmaxretry = 5\n".to_string(),
-            logs: vec!["[fail2ban] jail sshd and nginx-limit-req active".to_string()],
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-postfix".to_string(),
+            name: "Postfix SMTP Mail Server".to_string(),
+            category: "Mail Server".to_string(),
+            version: if postfix_avail { "installed" } else { "not installed" }.to_string(),
+            description: "Production SMTP MTA powering virtual mail domains, aliases, and outbound relay.".to_string(),
+            installed: postfix_avail,
+            status: if postfix_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/postfix/main.cf".to_string(),
+            is_rust_native: false,
+            replaced_legacy_package: None,
+            rust_crate: None,
+            port: Some(25),
+            config_content: "# Managed via /etc/postfix/main.cf\n".to_string(),
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-dovecot".to_string(),
+            name: "Dovecot IMAP/POP3 Server".to_string(),
+            category: "Mail Server".to_string(),
+            version: if dovecot_avail { "installed" } else { "not installed" }.to_string(),
+            description: "Production Maildir IMAP/POP3 server for FerrousPanel mailboxes and Webmail.".to_string(),
+            installed: dovecot_avail,
+            status: if dovecot_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/dovecot/dovecot.conf".to_string(),
+            is_rust_native: false,
+            replaced_legacy_package: None,
+            rust_crate: None,
+            port: Some(993),
+            config_content: "# Managed via /etc/dovecot/dovecot.conf\n".to_string(),
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-rspamd".to_string(),
+            name: "Rspamd Anti-Spam & DKIM Filter".to_string(),
+            category: "Mail Server".to_string(),
+            version: if rspamd_avail { "installed" } else { "not installed" }.to_string(),
+            description: "High-speed Bayesian anti-spam, SPF/DKIM/DMARC verifier, and milter filter.".to_string(),
+            installed: rspamd_avail,
+            status: if rspamd_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/rspamd/rspamd.conf".to_string(),
+            is_rust_native: false,
+            replaced_legacy_package: None,
+            rust_crate: None,
+            port: Some(11334),
+            config_content: "# Managed via /etc/rspamd/rspamd.conf\n".to_string(),
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-podman".to_string(),
+            name: "Podman Rootless OCI Container Engine".to_string(),
+            category: "Edge & Cloud".to_string(),
+            version: if podman_avail { "installed" } else { "not installed" }.to_string(),
+            description: "Daemonless OCI container runtime backing FerrousPanel container sandboxes.".to_string(),
+            installed: podman_avail,
+            status: if podman_avail { "running" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/containers/containers.conf".to_string(),
+            is_rust_native: false,
+            replaced_legacy_package: Some("Docker Daemon".to_string()),
+            rust_crate: None,
+            port: None,
+            config_content: "# Podman OCI container configuration\n".to_string(),
+            logs: Vec::new(),
+        },
+        ServerPackageItem {
+            id: "pkg-wireguard".to_string(),
+            name: "WireGuard Kernel VPN Mesh (wireguard-tools)".to_string(),
+            category: "Edge & Cloud".to_string(),
+            version: if wg_avail { "installed" } else { "not installed" }.to_string(),
+            description: "In-kernel Noise-protocol L3 VPN mesh (wg / wg-quick) for multi-VPS clustering.".to_string(),
+            installed: wg_avail,
+            status: if wg_avail { "stopped" } else { "not_installed" }.to_string(),
+            memory_mb: 0.0,
+            config_path: "/etc/wireguard/wg0.conf".to_string(),
+            is_rust_native: false,
+            replaced_legacy_package: Some("OpenVPN / IPsec".to_string()),
+            rust_crate: None,
+            port: Some(51820),
+            config_content: "# WireGuard interface configuration (/etc/wireguard/wg0.conf)\n".to_string(),
+            logs: Vec::new(),
         },
     ]
+}
+
+fn clean_version_output(id: &str, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if id == "pkg-tailwindcss" {
+        if let Some(first_word) = trimmed.lines().next() {
+            return first_word.trim().chars().take(64).collect();
+        }
+    }
+    trimmed.chars().take(64).collect()
 }
 
 pub async fn list_software_packages(
@@ -493,12 +773,23 @@ pub async fn list_software_packages(
         for pkg in &mut pkgs {
             if let Some(meta) = package_system_meta(&pkg.id) {
                 pkg.installed = executor.is_binary_available(meta.binary);
+                if pkg.installed {
+                    if let Some(ver) =
+                        probe_binary_version_line(executor, meta.binary, meta.version_args).await
+                    {
+                        pkg.version = clean_version_output(&pkg.id, &ver);
+                    }
+                } else {
+                    pkg.version = "not installed".to_string();
+                }
+
                 if meta.is_cli_tool {
                     pkg.status = if pkg.installed {
                         "running".to_string()
                     } else {
                         "not_installed".to_string()
                     };
+                    pkg.memory_mb = 0.0;
                 } else if pkg.installed && has_systemctl && !meta.systemd_unit.is_empty() {
                     let active = executor
                         .run(
@@ -514,9 +805,25 @@ pub async fn list_software_packages(
                     } else {
                         "stopped".to_string()
                     };
+                    pkg.memory_mb = if active {
+                        query_systemd_memory_mb(executor, meta.systemd_unit).await
+                    } else {
+                        0.0
+                    };
+                    let live_logs = query_systemd_logs(executor, meta.systemd_unit, "15").await;
+                    if !live_logs.is_empty() {
+                        pkg.logs = live_logs;
+                    } else if !active {
+                        pkg.logs.clear();
+                    }
                 } else if !pkg.installed {
                     pkg.status = "not_installed".to_string();
+                    pkg.memory_mb = 0.0;
+                    pkg.logs.clear();
+                } else {
+                    pkg.memory_mb = 0.0;
                 }
+
                 pkg.config_path = meta.real_config_path.to_string();
                 if let Ok(live_conf) = std::fs::read_to_string(meta.real_config_path) {
                     if !live_conf.trim().is_empty() && live_conf.len() <= 64 * 1024 {
@@ -674,7 +981,7 @@ async fn validate_and_activate_service(
         Err(err) => Some(err.to_string()),
     };
 
-    // 5. Verify Type=simple daemon actually stays active (not immediately crashing after fork).
+    // 5. Verify Type=simple daemon actually stays active.
     if failure_reason.is_none() {
         let mut is_active = false;
         for attempt in 0..6 {
@@ -725,7 +1032,6 @@ async fn validate_and_activate_service(
             None
         };
 
-        // Rollback: ensure failed unit is stopped and restore previously active competing web server.
         let _ = executor
             .run(AllowedBinary::Systemctl, &["stop", meta.systemd_unit], CMD_TIMEOUT)
             .await;
@@ -770,14 +1076,16 @@ pub async fn software_package_action(
         "install" => {
             if prod {
                 if let Some(ref m) = meta {
-                    if m.is_cli_tool {
+                    if m.is_cli_tool && m.apt_packages.is_empty() {
                         let msg = install_zero_node_cli_package(id, executor).await?;
                         pkg.logs.push(format!("[{now}] {msg}"));
                     } else {
-                        if let Some(apt_pkg) = m.apt_package {
+                        if !m.apt_packages.is_empty() {
                             if !executor.is_binary_available(AllowedBinary::AptGet) {
                                 return Err(PanelError::Conflict(format!(
-                                    "thiếu apt-get để cài '{apt_pkg}' (gợi ý: sudo apt install -y {apt_pkg})"
+                                    "thiếu apt-get để cài '{}' (gợi ý: sudo apt install -y {})",
+                                    m.apt_packages.join(" "),
+                                    m.apt_packages.join(" ")
                                 )));
                             }
                             let _ = executor
@@ -789,10 +1097,12 @@ pub async fn software_package_action(
                                     APT_TIMEOUT,
                                 )
                                 .await;
+                            let mut args = vec!["install", "-y", "-qq"];
+                            args.extend_from_slice(m.apt_packages);
                             let res = executor
                                 .run_with_env(
                                     AllowedBinary::AptGet,
-                                    &["install", "-y", "-qq", apt_pkg],
+                                    &args,
                                     &[("DEBIAN_FRONTEND", "noninteractive")],
                                     None,
                                     APT_TIMEOUT,
@@ -806,8 +1116,7 @@ pub async fn software_package_action(
                                 });
                             }
                         }
-                        if !m.systemd_unit.is_empty() {
-                            // Re-resolve metadata after apt install (e.g. mariadb.service vs mysql.service).
+                        if !m.systemd_unit.is_empty() && id != "pkg-wireguard" {
                             let refreshed = package_system_meta(id);
                             let active_meta = refreshed.as_ref().unwrap_or(m);
                             validate_and_activate_service(id, active_meta, "enable-now", executor).await?;
@@ -816,17 +1125,22 @@ pub async fn software_package_action(
                 }
             }
             pkg.installed = true;
-            pkg.status = "running".to_string();
-            pkg.logs.push(format!("[{now}] Installed and enabled {}", pkg.name));
+            pkg.status = if id == "pkg-wireguard" && prod && !Path::new("/etc/wireguard/wg0.conf").is_file() {
+                "stopped".to_string()
+            } else {
+                "running".to_string()
+            };
+            pkg.logs.push(format!("[{now}] Installed {}", pkg.name));
         }
         "uninstall" => {
             if prod {
                 if let Some(ref m) = meta {
-                    if m.is_cli_tool {
+                    if m.is_cli_tool && m.apt_packages.is_empty() {
                         let bin_path = match id {
                             "pkg-bun" => Some("/usr/local/bin/bun"),
                             "pkg-tailwindcss" => Some("/usr/local/bin/tailwindcss"),
                             "pkg-deno" => Some("/usr/local/bin/deno"),
+                            "pkg-wasmtime" => Some("/usr/local/bin/wasmtime"),
                             _ => None,
                         };
                         if let Some(p) = bin_path {
@@ -856,16 +1170,19 @@ pub async fn software_package_action(
                                 }
                             }
                         }
-                        if let Some(apt_pkg) = m.apt_package {
+                        if !m.apt_packages.is_empty() {
                             if !executor.is_binary_available(AllowedBinary::AptGet) {
                                 return Err(PanelError::Conflict(format!(
-                                    "thiếu apt-get để gỡ gói '{apt_pkg}'"
+                                    "thiếu apt-get để gỡ gói '{}'",
+                                    m.apt_packages.join(" ")
                                 )));
                             }
+                            let mut args = vec!["remove", "-y", "-qq"];
+                            args.extend_from_slice(m.apt_packages);
                             let res = executor
                                 .run_with_env(
                                     AllowedBinary::AptGet,
-                                    &["remove", "-y", "-qq", apt_pkg],
+                                    &args,
                                     &[("DEBIAN_FRONTEND", "noninteractive")],
                                     None,
                                     APT_TIMEOUT,
@@ -884,6 +1201,8 @@ pub async fn software_package_action(
             }
             pkg.installed = false;
             pkg.status = "not_installed".to_string();
+            pkg.memory_mb = 0.0;
+            pkg.version = "not installed".to_string();
             pkg.logs.push(format!("[{now}] Uninstalled {}", pkg.name));
         }
         "start" | "restart" => {
@@ -922,6 +1241,7 @@ pub async fn software_package_action(
                 }
             }
             pkg.status = "stopped".to_string();
+            pkg.memory_mb = 0.0;
             pkg.logs.push(format!("[{now}] Stopped service {}", pkg.name));
         }
         other => {
@@ -979,7 +1299,7 @@ pub async fn save_software_package_config(
                 }
             };
 
-            // Validate web engine config before reload; rollback on syntax error
+            // Validate engine config before reload; rollback on syntax error
             let validation_err: Option<String> = if id == "pkg-nginx"
                 && executor.is_binary_available(AllowedBinary::Nginx)
             {
@@ -1058,4 +1378,3 @@ pub async fn save_software_package_config(
     store.put_json(KV_SOFTWARE_PKGS, &pkgs)?;
     Ok(pkgs)
 }
-

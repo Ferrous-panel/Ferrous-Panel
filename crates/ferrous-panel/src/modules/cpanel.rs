@@ -789,7 +789,11 @@ pub fn delete_backup(
 const KV_DNS_RECORDS: &str = "cpanel.dns_records";
 const KV_SFTP_ACCOUNTS: &str = "cpanel.sftp_accounts";
 
-fn write_dns_zone_files(config: &Config, records: &[DnsRecordItem]) -> Result<(), PanelError> {
+async fn write_dns_zone_files(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    records: &[DnsRecordItem],
+) -> Result<(), PanelError> {
     let zones_dir = config.data_dir.join("dns/zones");
     std::fs::create_dir_all(&zones_dir)?;
     let mut by_domain: std::collections::BTreeMap<String, Vec<&DnsRecordItem>> =
@@ -797,19 +801,68 @@ fn write_dns_zone_files(config: &Config, records: &[DnsRecordItem]) -> Result<()
     for rec in records {
         by_domain.entry(rec.domain.clone()).or_default().push(rec);
     }
+    let serial = Utc::now().format("%Y%m%d%H").to_string();
+    let bind_zones_dir = Path::new("/etc/bind/zones");
+    let sync_bind = config.is_production() && Path::new("/etc/bind").is_dir();
+
     for (domain, list) in by_domain {
         let mut buf = format!(
-            "; Hickory DNS Zone File for {domain}\n$ORIGIN {domain}.\n$TTL 300\n@ IN SOA ns1.{domain}. hostmaster.{domain}. ( 2026111801 3600 900 1209600 300 )\n"
+            "; RFC-1035 DNS Zone File for {domain} (Managed by FerrousPanel)\n\
+             $ORIGIN {domain}.\n\
+             $TTL 300\n\
+             @ IN SOA ns1.{domain}. hostmaster.{domain}. ( {serial} 3600 900 1209600 300 )\n\
+             @ IN NS ns1.{domain}.\n"
         );
         for r in list {
             let prio = r.priority.map(|p| format!("{p} ")).unwrap_or_default();
+            let rendered_val = if r.record_type == "TXT"
+                && !(r.value.starts_with('"') && r.value.ends_with('"'))
+            {
+                format!("\"{}\"", r.value.replace('"', "\\\""))
+            } else {
+                r.value.clone()
+            };
             buf.push_str(&format!(
                 "{} {} IN {} {}{}\n",
-                r.host, r.ttl, r.record_type, prio, r.value
+                r.host, r.ttl, r.record_type, prio, rendered_val
             ));
         }
         let zone_path = zones_dir.join(format!("{domain}.zone"));
         crate::webserver::atomic_write_file(&zone_path, buf.as_bytes(), 0o644)?;
+
+        if sync_bind {
+            let _ = std::fs::create_dir_all(bind_zones_dir);
+            let bind_zone_path = bind_zones_dir.join(format!("db.{domain}"));
+            let prev = std::fs::read(&bind_zone_path).ok();
+            crate::webserver::atomic_write_file(&bind_zone_path, buf.as_bytes(), 0o644)?;
+            let zone_str = bind_zone_path.display().to_string();
+
+            if executor.is_binary_available(AllowedBinary::NamedCheckzone) {
+                let chk = executor
+                    .run(
+                        AllowedBinary::NamedCheckzone,
+                        &[&domain, &zone_str],
+                        CRON_TIMEOUT,
+                    )
+                    .await?;
+                if !chk.success {
+                    if let Some(ref bytes) = prev {
+                        let _ = crate::webserver::atomic_write_file(&bind_zone_path, bytes, 0o644);
+                    } else {
+                        let _ = std::fs::remove_file(&bind_zone_path);
+                    }
+                    return Err(PanelError::Validation(format!(
+                        "BIND9 named-checkzone rejected zone '{domain}' (rolled back): {}",
+                        if chk.stderr.trim().is_empty() { chk.stdout } else { chk.stderr }
+                    )));
+                }
+            }
+            if executor.is_binary_available(AllowedBinary::Rndc) {
+                let _ = executor
+                    .run(AllowedBinary::Rndc, &["reload", &domain], CRON_TIMEOUT)
+                    .await;
+            }
+        }
     }
     Ok(())
 }
@@ -818,9 +871,11 @@ pub fn list_dns_records(store: &ModuleStore) -> Result<Vec<DnsRecordItem>, Panel
     Ok(store.get_json::<Vec<DnsRecordItem>>(KV_DNS_RECORDS)?.unwrap_or_default())
 }
 
-pub fn add_dns_record(
+#[allow(clippy::too_many_arguments)]
+pub async fn add_dns_record(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     domain: &str,
     record_type: &str,
     host: &str,
@@ -866,14 +921,15 @@ pub fn add_dns_record(
             },
         },
     );
+    write_dns_zone_files(config, executor, &records).await?;
     store.put_json(KV_DNS_RECORDS, &records)?;
-    write_dns_zone_files(config, &records)?;
     Ok(records)
 }
 
-pub fn delete_dns_record(
+pub async fn delete_dns_record(
     store: &ModuleStore,
     config: &Config,
+    executor: &dyn CommandExecutor,
     id: &str,
 ) -> Result<Vec<DnsRecordItem>, PanelError> {
     let mut records = list_dns_records(store)?;
@@ -882,8 +938,8 @@ pub fn delete_dns_record(
     if records.len() == before {
         return Err(PanelError::NotFound(format!("DNS record '{id}' not found")));
     }
+    write_dns_zone_files(config, executor, &records).await?;
     store.put_json(KV_DNS_RECORDS, &records)?;
-    write_dns_zone_files(config, &records)?;
     Ok(records)
 }
 

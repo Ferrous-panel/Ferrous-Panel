@@ -2,7 +2,7 @@ use super::common::*;
 use std::os::unix::fs::PermissionsExt as _;
 
 // ============================================================================
-// 5. Mail Server (Postfix / Dovecot / Rspamd)
+// 5. Mail Server (Real Postfix / Dovecot / Rspamd Integration)
 // ============================================================================
 
 const DKIM_SELECTOR_NAME: &str = "ferrous";
@@ -158,12 +158,12 @@ async fn build_mail_domain_item(
 fn default_mail_server_data(config: &Config) -> MailServerData {
     if is_production_vps(config) {
         return MailServerData {
-            postfix_version: "Postfix".to_string(),
-            dovecot_version: "Dovecot".to_string(),
-            rspamd_version: "Rspamd".to_string(),
-            postfix_status: "unknown".to_string(),
-            dovecot_status: "unknown".to_string(),
-            rspamd_status: "unknown".to_string(),
+            postfix_version: "not installed".to_string(),
+            dovecot_version: "not installed".to_string(),
+            rspamd_version: "not installed".to_string(),
+            postfix_status: "not-installed".to_string(),
+            dovecot_status: "not-installed".to_string(),
+            rspamd_status: "not-installed".to_string(),
             queue_count: 0,
             sent_today: 0,
             spam_blocked_today: 0,
@@ -218,6 +218,124 @@ fn default_mail_server_data(config: &Config) -> MailServerData {
         forwarders: Vec::new(),
         messages: Vec::new(),
     }
+}
+
+fn dir_usage_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        if let Ok(meta) = entry.metadata() {
+            if meta.is_file() {
+                total = total.saturating_add(meta.len());
+            } else if meta.is_dir() {
+                total = total.saturating_add(dir_usage_bytes(&entry.path()));
+            }
+        }
+    }
+    total
+}
+
+fn parse_rfc5322_file(path: &Path, id: String, folder: &str) -> Option<MailMessageItem> {
+    let raw = std::fs::read(path).ok()?;
+    let slice = if raw.len() > 64 * 1024 {
+        &raw[..64 * 1024]
+    } else {
+        &raw[..]
+    };
+    let text = String::from_utf8_lossy(slice);
+    let (headers_part, body_part) = text
+        .split_once("\r\n\r\n")
+        .or_else(|| text.split_once("\n\n"))
+        .unwrap_or((&text, ""));
+
+    let mut from = String::new();
+    let mut to = String::new();
+    let mut subject = "(No Subject)".to_string();
+    let mut date = String::new();
+    let mut dkim_signed = false;
+
+    for line in headers_part.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            let key = k.trim().to_ascii_lowercase();
+            let val = v.trim();
+            match key.as_str() {
+                "from" if from.is_empty() => from = val.to_string(),
+                "to" if to.is_empty() => to = val.to_string(),
+                "subject" => subject = val.to_string(),
+                "date" if date.is_empty() => date = val.to_string(),
+                "dkim-signature" => dkim_signed = true,
+                _ => {}
+            }
+        }
+    }
+    if from.is_empty() && to.is_empty() {
+        return None;
+    }
+    let body_trimmed = body_part.trim().chars().take(4096).collect::<String>();
+    let snippet = body_trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect::<String>();
+
+    Some(MailMessageItem {
+        id,
+        folder: folder.to_string(),
+        from,
+        to,
+        subject,
+        snippet,
+        body: body_trimmed,
+        timestamp: if date.is_empty() {
+            Utc::now().format("%Y-%m-%d %H:%M UTC").to_string()
+        } else {
+            date
+        },
+        dkim_signed,
+    })
+}
+
+fn scan_maildir_inbox_messages(config: &Config, mail: &MailServerData) -> Vec<MailMessageItem> {
+    let mut found = Vec::new();
+    let base_roots = [
+        PathBuf::from("/var/mail/vhosts"),
+        config.data_dir.join("mail").join("vhosts"),
+    ];
+    for mb in &mail.mailboxes {
+        for base in &base_roots {
+            let mdir = base.join(&mb.domain).join(&mb.email);
+            if !mdir.is_dir() {
+                continue;
+            }
+            for sub in ["new", "cur"] {
+                let sub_dir = mdir.join(sub);
+                let Ok(entries) = std::fs::read_dir(&sub_dir) else {
+                    continue;
+                };
+                for entry in entries.flatten().take(20) {
+                    let p = entry.path();
+                    if !p.is_file() {
+                        continue;
+                    }
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    let msg_id = format!("mdir-{}", blake3_hex(format!("{}:{fname}", mb.email).as_bytes()).chars().take(12).collect::<String>());
+                    if let Some(item) = parse_rfc5322_file(&p, msg_id, "inbox") {
+                        found.push(item);
+                    }
+                    if found.len() >= 40 {
+                        return found;
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 fn sync_mail_virtual_files(config: &Config, mail: &MailServerData) -> Result<(), PanelError> {
@@ -300,10 +418,18 @@ async fn sync_mail_virtual_files_live(
     if !Path::new("/etc/postfix").is_dir() || !executor.is_binary_available(AllowedBinary::Postmap) {
         if require_mta_in_prod {
             return Err(PanelError::Conflict(
-                "Postfix chưa được cài đặt hoặc thiếu /etc/postfix / postmap (gợi ý: sudo apt install -y postfix dovecot-core rspamd)".to_string(),
+                "Postfix chưa được cài đặt hoặc thiếu /etc/postfix / postmap — hãy vào 'PHP-FPM & Phần mềm' để cài 1-click Postfix + Dovecot + Rspamd".to_string(),
             ));
         }
         return Ok(());
+    }
+
+    // Ensure system Maildir directories exist under /var/mail/vhosts
+    for mb in &mail.mailboxes {
+        let sys_mdir = Path::new("/var/mail/vhosts").join(&mb.domain).join(&mb.email);
+        for sub in ["cur", "new", "tmp"] {
+            let _ = std::fs::create_dir_all(sys_mdir.join(sub));
+        }
     }
 
     let domains_txt = mail
@@ -385,6 +511,23 @@ async fn sync_mail_virtual_files_live(
         }
     }
 
+    // Wire Postfix main.cf virtual maps via postconf -e so Postfix actually loads these tables
+    if executor.is_binary_available(AllowedBinary::Postconf) {
+        let _ = executor
+            .run(
+                AllowedBinary::Postconf,
+                &[
+                    "-e",
+                    "virtual_mailbox_domains=hash:/etc/postfix/ferrous_virtual_domains",
+                    "virtual_mailbox_maps=hash:/etc/postfix/ferrous_virtual_mailboxes",
+                    "virtual_alias_maps=hash:/etc/postfix/ferrous_virtual_aliases",
+                    "virtual_mailbox_base=/var/mail/vhosts",
+                ],
+                CMD_TIMEOUT,
+            )
+            .await;
+    }
+
     if !executor.is_binary_available(AllowedBinary::Systemctl) {
         rollback();
         return Err(PanelError::Conflict(
@@ -395,7 +538,7 @@ async fn sync_mail_virtual_files_live(
     let reload = executor
         .run(
             AllowedBinary::Systemctl,
-            &["reload", "postfix.service"],
+            &["reload-or-restart", "postfix.service"],
             CMD_TIMEOUT,
         )
         .await;
@@ -439,6 +582,54 @@ async fn probe_mail_unit_status(executor: &dyn CommandExecutor, unit: &str) -> S
     }
 }
 
+async fn probe_postfix_queue_count(executor: &dyn CommandExecutor) -> u32 {
+    if !executor.is_binary_available(AllowedBinary::Postqueue) {
+        return 0;
+    }
+    match executor
+        .run(AllowedBinary::Postqueue, &["-j"], Duration::from_secs(4))
+        .await
+    {
+        Ok(out) if out.success => out
+            .stdout
+            .lines()
+            .filter(|l| l.trim().starts_with('{'))
+            .count() as u32,
+        _ => 0,
+    }
+}
+
+async fn probe_rspamd_spam_blocked(executor: &dyn CommandExecutor) -> u64 {
+    if !executor.is_binary_available(AllowedBinary::Rspamc) {
+        return 0;
+    }
+    let Ok(out) = executor
+        .run(AllowedBinary::Rspamc, &["stat"], Duration::from_secs(4))
+        .await
+    else {
+        return 0;
+    };
+    if !out.success {
+        return 0;
+    }
+    let mut blocked = 0u64;
+    for line in out.stdout.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("action reject:") || lower.contains("action soft reject:") || lower.contains("action add header:") {
+            if let Some((_, rhs)) = line.split_once(':') {
+                if let Some(num) = rhs
+                    .split_whitespace()
+                    .next()
+                    .and_then(|s| s.parse::<u64>().ok())
+                {
+                    blocked = blocked.saturating_add(num);
+                }
+            }
+        }
+    }
+    blocked
+}
+
 pub async fn load_mail_server(
     store: &ModuleStore,
     config: &Config,
@@ -453,24 +644,72 @@ pub async fn load_mail_server(
         initial
     };
 
-    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Systemctl) {
-        mail.postfix_status = probe_mail_unit_status(executor, "postfix.service").await;
-        mail.dovecot_status = probe_mail_unit_status(executor, "dovecot.service").await;
-        mail.rspamd_status = probe_mail_unit_status(executor, "rspamd.service").await;
-    }
+    if is_production_vps(config) {
+        // 1. Live systemd status
+        if executor.is_binary_available(AllowedBinary::Systemctl) {
+            mail.postfix_status = probe_mail_unit_status(executor, "postfix.service").await;
+            mail.dovecot_status = probe_mail_unit_status(executor, "dovecot.service").await;
+            mail.rspamd_status = probe_mail_unit_status(executor, "rspamd.service").await;
+        }
 
-    if is_production_vps(config) && executor.is_binary_available(AllowedBinary::Dig) {
-        for dom in &mut mail.domains {
-            let d = dom.domain.clone();
-            dom.spf_status = check_txt_record_contains(executor, &d, "v=spf1").await;
-            dom.dkim_status = check_txt_record_contains(
-                executor,
-                &format!("{}.{d}", dom.dkim_selector),
-                "v=dkim1",
-            )
-            .await;
-            dom.dmarc_status =
-                check_txt_record_contains(executor, &format!("_dmarc.{d}"), "v=dmarc1").await;
+        // 2. Live versions from real Postfix / Dovecot / Rspamd binaries
+        mail.postfix_version = probe_binary_version_line(
+            executor,
+            AllowedBinary::Postconf,
+            &["-h", "mail_version"],
+        )
+        .await
+        .map(|v| format!("Postfix {v}"))
+        .unwrap_or_else(|| "not installed".to_string());
+
+        mail.dovecot_version =
+            probe_binary_version_line(executor, AllowedBinary::Dovecot, &["--version"])
+                .await
+                .map(|v| format!("Dovecot {v}"))
+                .unwrap_or_else(|| "not installed".to_string());
+
+        mail.rspamd_version =
+            probe_binary_version_line(executor, AllowedBinary::Rspamd, &["--version"])
+                .await
+                .unwrap_or_else(|| "not installed".to_string());
+
+        // 3. Live Postfix queue count & Rspamd spam-blocked statistics
+        mail.queue_count = probe_postfix_queue_count(executor).await;
+        mail.spam_blocked_today = probe_rspamd_spam_blocked(executor).await;
+
+        // 4. Live Maildir disk usage for each mailbox
+        for mb in &mut mail.mailboxes {
+            let sys_bytes = dir_usage_bytes(&Path::new("/var/mail/vhosts").join(&mb.domain).join(&mb.email));
+            let local_bytes = dir_usage_bytes(&config.data_dir.join("mail").join("vhosts").join(&mb.domain).join(&mb.email));
+            let total = sys_bytes.max(local_bytes);
+            mb.used_mb = ((total as f64 / 1_048_576.0) * 100.0).round() / 100.0;
+        }
+
+        // 5. Merge live incoming Maildir inbox messages
+        let inbox_msgs = scan_maildir_inbox_messages(config, &mail);
+        for incoming in inbox_msgs {
+            if !mail.messages.iter().any(|m| m.id == incoming.id) {
+                mail.messages.insert(0, incoming);
+            }
+        }
+        if mail.messages.len() > 100 {
+            mail.messages.truncate(100);
+        }
+
+        // 6. Live DNS SPF/DKIM/DMARC verification via dig
+        if executor.is_binary_available(AllowedBinary::Dig) {
+            for dom in &mut mail.domains {
+                let d = dom.domain.clone();
+                dom.spf_status = check_txt_record_contains(executor, &d, "v=spf1").await;
+                dom.dkim_status = check_txt_record_contains(
+                    executor,
+                    &format!("{}.{d}", dom.dkim_selector),
+                    "v=dkim1",
+                )
+                .await;
+                dom.dmarc_status =
+                    check_txt_record_contains(executor, &format!("_dmarc.{d}"), "v=dmarc1").await;
+            }
         }
     }
 
@@ -675,7 +914,7 @@ pub async fn send_test_mail(
     let (delivery_note, dkim_signed) = if is_production_vps(config) {
         if !executor.is_binary_available(AllowedBinary::Sendmail) {
             return Err(PanelError::Conflict(
-                "thiếu binary sendmail/Postfix để gửi email thật (gợi ý: sudo apt install -y postfix)".to_string(),
+                "thiếu binary sendmail/Postfix để gửi email thật — hãy cài Postfix trong mục 'PHP-FPM & Phần mềm'".to_string(),
             ));
         }
         let out = executor
