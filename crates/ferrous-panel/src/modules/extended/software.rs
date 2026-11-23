@@ -112,7 +112,7 @@ fn package_system_meta(id: &str) -> Option<PackageSystemMeta> {
     }
 }
 
-async fn install_zero_node_cli_package(
+pub(super) async fn install_zero_node_cli_package(
     id: &str,
     executor: &dyn CommandExecutor,
 ) -> Result<String, PanelError> {

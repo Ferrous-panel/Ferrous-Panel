@@ -313,19 +313,161 @@ fn any_path_exists(paths: &[&str]) -> bool {
     paths.iter().any(|p| Path::new(p).exists())
 }
 
+struct AptSession {
+    updated: bool,
+}
+
+impl AptSession {
+    fn new() -> Self {
+        Self { updated: false }
+    }
+
+    async fn install_packages(
+        &mut self,
+        executor: &dyn CommandExecutor,
+        packages: &[&str],
+    ) -> Result<bool, PanelError> {
+        if !executor.is_binary_available(AllowedBinary::AptGet) {
+            return Ok(false);
+        }
+        if !self.updated {
+            let _ = executor
+                .run_with_env(
+                    AllowedBinary::AptGet,
+                    &["update", "-qq"],
+                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                    None,
+                    APT_TIMEOUT,
+                )
+                .await;
+            self.updated = true;
+        }
+        let mut args: Vec<&str> = vec!["install", "-y", "-qq"];
+        args.extend_from_slice(packages);
+        let res = executor
+            .run_with_env(
+                AllowedBinary::AptGet,
+                &args,
+                &[("DEBIAN_FRONTEND", "noninteractive")],
+                None,
+                APT_TIMEOUT,
+            )
+            .await?;
+        Ok(res.success)
+    }
+}
+
+async fn ensure_apt_tool(
+    executor: &dyn CommandExecutor,
+    apt: &mut AptSession,
+    bin: AllowedBinary,
+    apt_pkg: &str,
+    auto_install: bool,
+    logs: &mut Vec<String>,
+) -> Result<(), PanelError> {
+    if executor.is_binary_available(bin) {
+        return Ok(());
+    }
+    if auto_install && apt.install_packages(executor, &[apt_pkg]).await? && executor.is_binary_available(bin) {
+        logs.push(format!(
+            "[{}] [auto-provision] Đã tự động cài gói '{}' từ kho APT bên ngoài.",
+            Utc::now().to_rfc3339(),
+            apt_pkg
+        ));
+        return Ok(());
+    }
+    Err(PanelError::Conflict(format!(
+        "Thiếu công cụ '{}' trên máy chủ (gợi ý: sudo apt-get update && sudo apt-get install -y {apt_pkg}).",
+        bin.label()
+    )))
+}
+
+async fn ensure_php_fpm_ready(
+    executor: &dyn CommandExecutor,
+    apt: &mut AptSession,
+    auto_install: bool,
+    logs: &mut Vec<String>,
+) -> Result<PhpFpmVersion, PanelError> {
+    if let Ok(ver) = PhpFpmVersion::resolve_active_or_start(executor).await {
+        return Ok(ver);
+    }
+    if !auto_install {
+        return PhpFpmVersion::resolve_active_or_start(executor).await;
+    }
+
+    // Try PHP 8.3 first (Ubuntu 24.04 / Ondrej PPA), then fall back to distro default meta-packages (Ubuntu 22.04 PHP 8.1 / Debian 12 PHP 8.2).
+    let installed_83 = apt
+        .install_packages(
+            executor,
+            &[
+                "php8.3-fpm",
+                "php8.3-cli",
+                "php8.3-common",
+                "php8.3-mysql",
+                "php8.3-mbstring",
+                "php8.3-xml",
+                "php8.3-curl",
+                "php8.3-zip",
+            ],
+        )
+        .await?;
+
+    if installed_83 {
+        logs.push(format!(
+            "[{}] [auto-provision] Đã tự động tải và cài đặt PHP 8.3-FPM + extensions từ kho APT bên ngoài.",
+            Utc::now().to_rfc3339()
+        ));
+    } else {
+        let installed_default = apt
+            .install_packages(
+                executor,
+                &[
+                    "php-fpm",
+                    "php-cli",
+                    "php-common",
+                    "php-mysql",
+                    "php-mbstring",
+                    "php-xml",
+                    "php-curl",
+                    "php-zip",
+                ],
+            )
+            .await?;
+        if installed_default {
+            logs.push(format!(
+                "[{}] [auto-provision] Đã tự động tải và cài đặt PHP-FPM mặc định của hệ điều hành + extensions từ kho APT.",
+                Utc::now().to_rfc3339()
+            ));
+        }
+    }
+
+    PhpFpmVersion::resolve_active_or_start(executor).await
+}
+
 async fn ensure_db_service_ready(
     executor: &dyn CommandExecutor,
+    apt: &mut AptSession,
     requires_db: &str,
+    auto_install: bool,
+    logs: &mut Vec<String>,
 ) -> Result<(), PanelError> {
     let lower_db = requires_db.to_ascii_lowercase();
     let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
 
     if lower_db.contains("mariadb") || lower_db.contains("mysql") {
         if !executor.is_binary_available(AllowedBinary::Mysql) {
-            return Err(PanelError::Conflict(
-                "MariaDB/MySQL chưa được cài đặt trên máy chủ. Hãy cài MariaDB trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
-                    .to_string(),
-            ));
+            if auto_install && apt.install_packages(executor, &["mariadb-server"]).await? {
+                logs.push(format!(
+                    "[{}] [auto-provision] Đã tự động tải và cài đặt MariaDB Server từ kho APT bên ngoài.",
+                    Utc::now().to_rfc3339()
+                ));
+            }
+            if !executor.is_binary_available(AllowedBinary::Mysql) {
+                return Err(PanelError::Conflict(
+                    "MariaDB/MySQL chưa được cài đặt trên máy chủ và không thể tự động nạp qua APT. Hãy cài MariaDB trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
+                        .to_string(),
+                ));
+            }
         }
         const MYSQL_SOCKETS: &[&str] = &[
             "/run/mysqld/mysqld.sock",
@@ -353,10 +495,18 @@ async fn ensure_db_service_ready(
         }
     } else if lower_db.contains("postgres") {
         if !executor.is_binary_available(AllowedBinary::Psql) {
-            return Err(PanelError::Conflict(
-                "PostgreSQL chưa được cài đặt trên máy chủ. Hãy cài PostgreSQL trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
-                    .to_string(),
-            ));
+            if auto_install && apt.install_packages(executor, &["postgresql"]).await? {
+                logs.push(format!(
+                    "[{}] [auto-provision] Đã tự động tải và cài đặt PostgreSQL Server từ kho APT bên ngoài.",
+                    Utc::now().to_rfc3339()
+                ));
+            }
+            if !executor.is_binary_available(AllowedBinary::Psql) {
+                return Err(PanelError::Conflict(
+                    "PostgreSQL chưa được cài đặt trên máy chủ và không thể tự động nạp qua APT. Hãy cài PostgreSQL trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
+                        .to_string(),
+                ));
+            }
         }
         const PG_SOCKETS: &[&str] = &[
             "/var/run/postgresql/.s.PGSQL.5432",
@@ -385,6 +535,133 @@ async fn ensure_db_service_ready(
             ));
         }
     }
+    Ok(())
+}
+
+fn validate_external_source_url(raw: &str) -> Result<String, PanelError> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with("https://")
+        || trimmed.len() > 512
+        || trimmed
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\'' | '"' | ';' | '`'))
+    {
+        return Err(PanelError::Validation(
+            "URL nguồn bên ngoài phải bắt đầu bằng https:// và không chứa ký tự đặc biệt."
+                .to_string(),
+        ));
+    }
+    let after_scheme = &trimmed["https://".len()..];
+    let host_port = after_scheme.split('/').next().unwrap_or("");
+    let host = host_port
+        .split('@')
+        .next_back()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if host.is_empty()
+        || host == "localhost"
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host.starts_with("169.254.")
+        || host == "[::1]"
+        || host == "::1"
+    {
+        return Err(PanelError::Forbidden(
+            "Không được phép tải tài nguyên từ địa chỉ nội bộ (SSRF protection).".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+async fn download_and_extract_external_archive(
+    url: &str,
+    site_dir: &Path,
+    data_dir: &Path,
+    executor: &dyn CommandExecutor,
+    apt: &mut AptSession,
+    auto_install: bool,
+    logs: &mut Vec<String>,
+) -> Result<(), PanelError> {
+    ensure_apt_tool(executor, apt, AllowedBinary::Curl, "curl", auto_install, logs).await?;
+    let lower = url.to_ascii_lowercase();
+    let is_zip = lower.ends_with(".zip");
+    if is_zip {
+        ensure_apt_tool(executor, apt, AllowedBinary::Unzip, "unzip", auto_install, logs).await?;
+    } else {
+        ensure_apt_tool(executor, apt, AllowedBinary::Tar, "tar", auto_install, logs).await?;
+    }
+
+    let tmp_dir = data_dir.join("tmp");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let suffix = generate_secure_token(12, b"abcdefghijklmnopqrstuvwxyz0123456789")?;
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    let archive_path = tmp_dir.join(format!("ext-src-{suffix}.{ext}"));
+    let archive_str = archive_path.display().to_string();
+
+    let dl = executor
+        .run(
+            AllowedBinary::Curl,
+            &[
+                "-fsSL",
+                "--connect-timeout",
+                "12",
+                "--max-time",
+                "60",
+                "--proto",
+                "=https",
+                "--max-filesize",
+                "209715200",
+                "-o",
+                &archive_str,
+                url,
+            ],
+            WP_DOWNLOAD_TIMEOUT,
+        )
+        .await?;
+    if !dl.success {
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(PanelError::CommandFailed {
+            binary: "curl",
+            exit_code: dl.exit_code,
+            stderr: format!("Không thể tải gói tài nguyên từ {url}: {}", dl.stderr.trim()),
+        });
+    }
+
+    let dest_str = site_dir.display().to_string();
+    let extract_res = if is_zip {
+        executor
+            .run(
+                AllowedBinary::Unzip,
+                &["-qo", &archive_str, "-d", &dest_str],
+                WP_DOWNLOAD_TIMEOUT,
+            )
+            .await
+    } else {
+        executor
+            .run(
+                AllowedBinary::Tar,
+                &["-xzf", &archive_str, "-C", &dest_str],
+                WP_DOWNLOAD_TIMEOUT,
+            )
+            .await
+    };
+    let _ = std::fs::remove_file(&archive_path);
+    let out = extract_res?;
+    if !out.success {
+        return Err(PanelError::CommandFailed {
+            binary: if is_zip { "unzip" } else { "tar" },
+            exit_code: out.exit_code,
+            stderr: format!("Giải nén gói tài nguyên thất bại: {}", out.stderr.trim()),
+        });
+    }
+    logs.push(format!(
+        "[{}] [external-source] Đã tải và giải nén tài nguyên từ {url}.",
+        Utc::now().to_rfc3339()
+    ));
     Ok(())
 }
 
@@ -508,6 +785,31 @@ pub async fn deploy_oneclick(
 
     let prod = is_production_vps(config);
     let executor = webserver.executor().as_ref();
+    let auto_install = req.auto_install_deps;
+    let mut apt = AptSession::new();
+    let mut provision_logs: Vec<String> = Vec::new();
+
+    // Optional external source URL (.git repo or .tar.gz / .zip archive)
+    let custom_source = match req
+        .source_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => Some(validate_external_source_url(raw)?),
+        None => None,
+    };
+    let custom_is_archive = custom_source.as_deref().map(|u| {
+        let l = u.to_ascii_lowercase();
+        l.ends_with(".tar.gz") || l.ends_with(".tgz") || l.ends_with(".zip")
+    }).unwrap_or(false);
+    let effective_git_url = if custom_is_archive {
+        String::new()
+    } else if let Some(ref url) = custom_source {
+        url.clone()
+    } else {
+        tpl.git_repo_url.clone().unwrap_or_default()
+    };
 
     // Use StaticHtmlSpa only when running in non-production test/sandbox without systemctl
     let effective_framework = if prod || executor.is_binary_available(AllowedBinary::Systemctl) {
@@ -518,6 +820,7 @@ pub async fn deploy_oneclick(
 
     let is_wordpress = tpl.id == "tpl-wordpress-fpm";
     let is_laravel = tpl.id == "tpl-laravel-11";
+    let is_tailwind = tpl.id == "tpl-tailwind-static";
     let is_php = matches!(
         effective_framework,
         WebsiteRuntimeType::Php83Fpm | WebsiteRuntimeType::PhpSymfony7
@@ -531,39 +834,88 @@ pub async fn deploy_oneclick(
         WebsiteRuntimeType::ActixWebRust | WebsiteRuntimeType::AxumRust
     );
 
-    // Pre-flight checks in production BEFORE downloading files so failures are instant & clear (HTTP 409)
+    // Auto-provision missing external runtimes & services in production before deploying
     if prod && is_php {
-        let _ = PhpFpmVersion::resolve_active_or_start(executor).await?;
+        let ver = ensure_php_fpm_ready(executor, &mut apt, auto_install, &mut provision_logs).await?;
+        provision_logs.push(format!(
+            "[{}] [runtime] PHP {}-FPM socket '{}' đã sẵn sàng.",
+            Utc::now().to_rfc3339(),
+            ver.version_str(),
+            ver.socket_path()
+        ));
     }
     if prod && is_bun_ssr && !executor.is_binary_available(AllowedBinary::Bun) {
-        return Err(PanelError::Conflict(format!(
-            "Thiếu runtime Bun (/usr/local/bin/bun) để triển khai {}. Hãy vào mục 'PHP-FPM & Phần mềm' để cài 'Bun JS/TS All-in-One Runtime' trước.",
-            tpl.name
-        )));
+        if auto_install {
+            ensure_apt_tool(executor, &mut apt, AllowedBinary::Curl, "curl", true, &mut provision_logs).await?;
+            ensure_apt_tool(executor, &mut apt, AllowedBinary::Unzip, "unzip", true, &mut provision_logs).await?;
+            let msg = super::software::install_zero_node_cli_package("pkg-bun", executor).await?;
+            provision_logs.push(format!(
+                "[{}] [auto-provision] {msg}",
+                Utc::now().to_rfc3339()
+            ));
+        }
+        if !executor.is_binary_available(AllowedBinary::Bun) {
+            return Err(PanelError::Conflict(format!(
+                "Thiếu runtime Bun (/usr/local/bin/bun) để triển khai {}. Hãy bật tự động nạp tài nguyên hoặc cài Bun trong mục 'PHP-FPM & Phần mềm'.",
+                tpl.name
+            )));
+        }
+    }
+    if prod && is_tailwind && !executor.is_binary_available(AllowedBinary::TailwindCli) && auto_install {
+        if ensure_apt_tool(executor, &mut apt, AllowedBinary::Curl, "curl", true, &mut provision_logs).await.is_ok() {
+            if let Ok(msg) = super::software::install_zero_node_cli_package("pkg-tailwindcss", executor).await {
+                provision_logs.push(format!(
+                    "[{}] [auto-provision] {msg}",
+                    Utc::now().to_rfc3339()
+                ));
+            }
+        }
     }
     if prod && is_rust && !executor.is_binary_available(AllowedBinary::Cargo) {
-        return Err(PanelError::Conflict(format!(
-            "Thiếu công cụ Cargo/Rust trên máy chủ để biên dịch {}. Hãy cài Rust toolchain (rustup) trước khi triển khai mẫu Rust.",
-            tpl.name
-        )));
+        if auto_install && apt.install_packages(executor, &["cargo", "rustc"]).await? {
+            provision_logs.push(format!(
+                "[{}] [auto-provision] Đã tự động cài đặt Cargo + Rustc từ kho APT bên ngoài.",
+                Utc::now().to_rfc3339()
+            ));
+        }
+        if !executor.is_binary_available(AllowedBinary::Cargo) {
+            return Err(PanelError::Conflict(format!(
+                "Thiếu công cụ Cargo/Rust trên máy chủ để biên dịch {}. Hãy cài Rust toolchain (rustup hoặc apt install cargo rustc) trước khi triển khai mẫu Rust.",
+                tpl.name
+            )));
+        }
     }
-    if prod && tpl.git_repo_url.is_some() && !executor.is_binary_available(AllowedBinary::Git) {
-        return Err(PanelError::Conflict(format!(
-            "Thiếu công cụ 'git' trên máy chủ để clone mã nguồn cho {} (gợi ý: sudo apt-get install -y git).",
-            tpl.name
-        )));
+    if prod && !effective_git_url.is_empty() {
+        ensure_apt_tool(executor, &mut apt, AllowedBinary::Git, "git", auto_install, &mut provision_logs).await?;
     }
 
     let wants_db = req.create_db && tpl.requires_db != "None";
     if prod && wants_db {
-        ensure_db_service_ready(executor, &tpl.requires_db).await?;
+        ensure_db_service_ready(executor, &mut apt, &tpl.requires_db, auto_install, &mut provision_logs).await?;
     }
 
     let site_dir = SafePath::under_root(&config.wwwroot, domain.as_str())?;
     std::fs::create_dir_all(site_dir.as_path())?;
 
-    if is_wordpress {
+    if custom_is_archive {
         if prod {
+            if let Some(ref url) = custom_source {
+                download_and_extract_external_archive(
+                    url,
+                    site_dir.as_path(),
+                    &config.data_dir,
+                    executor,
+                    &mut apt,
+                    auto_install,
+                    &mut provision_logs,
+                )
+                .await?;
+            }
+        }
+    } else if is_wordpress {
+        if prod {
+            ensure_apt_tool(executor, &mut apt, AllowedBinary::Curl, "curl", auto_install, &mut provision_logs).await?;
+            ensure_apt_tool(executor, &mut apt, AllowedBinary::Tar, "tar", auto_install, &mut provision_logs).await?;
             download_and_extract_wordpress(site_dir.as_path(), &config.data_dir, executor).await?;
         } else {
             let index_php = site_dir.as_path().join("index.php");
@@ -571,7 +923,7 @@ pub async fn deploy_oneclick(
                 atomic_write_file(&index_php, b"<?php echo 'WordPress 1-Click Ready';\n", 0o644)?;
             }
         }
-    } else if tpl.id == "tpl-tailwind-static" {
+    } else if is_tailwind && effective_git_url.is_empty() {
         let input_css = site_dir.as_path().join("input.css");
         if !input_css.exists() {
             atomic_write_file(&input_css, b"@import \"tailwindcss\";\n", 0o644)?;
@@ -584,7 +936,7 @@ pub async fn deploy_oneclick(
             );
             atomic_write_file(&index_html, html.as_bytes(), 0o644)?;
         }
-    } else if tpl.id == "tpl-nextjs-15" {
+    } else if tpl.id == "tpl-nextjs-15" && effective_git_url.is_empty() {
         scaffold_bun_ssr_starter(
             site_dir.as_path(),
             domain.as_str(),
@@ -592,7 +944,7 @@ pub async fn deploy_oneclick(
             "server.mjs",
             tpl.default_port,
         )?;
-    } else if tpl.id == "tpl-astro-5" {
+    } else if tpl.id == "tpl-astro-5" && effective_git_url.is_empty() {
         scaffold_bun_ssr_starter(
             site_dir.as_path(),
             domain.as_str(),
@@ -600,14 +952,14 @@ pub async fn deploy_oneclick(
             "dist/server/entry.mjs",
             tpl.default_port,
         )?;
-    } else if is_rust {
+    } else if is_rust && effective_git_url.is_empty() {
         scaffold_rust_http_starter(
             site_dir.as_path(),
             domain.as_str(),
             &tpl.name,
             tpl.default_port,
         )?;
-    } else if tpl.git_repo_url.is_none() {
+    } else if effective_git_url.is_empty() {
         let index_html = site_dir.as_path().join("index.html");
         if !index_html.exists() {
             let html = format!(
@@ -669,12 +1021,17 @@ pub async fn deploy_oneclick(
         db_password: db_password.clone(),
         create_ftp: false,
         ftp_user: String::new(),
-        git_repo_url: tpl.git_repo_url.unwrap_or_default(),
+        git_repo_url: effective_git_url,
         git_branch: String::new(),
         web_server_engine: req.web_server_engine,
     };
 
     let mut deployed = crate::modules::apps::deploy_app(deploy_req, store, config, webserver).await?;
+    if !provision_logs.is_empty() {
+        provision_logs.append(&mut deployed.logs);
+        deployed.logs = provision_logs;
+        let _ = store.upsert_app(&deployed);
+    }
 
     // Auto-generate wp-config.php when WordPress was downloaded and database was created
     if is_wordpress && create_database {

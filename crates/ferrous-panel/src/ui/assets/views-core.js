@@ -392,6 +392,10 @@ export async function renderApps(container) {
               <label for="oc-email">Email quản trị (dùng cho SSL / Admin)</label>
               <input class="input" id="oc-email" name="adminEmail" type="email" inputmode="email" autocapitalize="none" placeholder="admin@example.com" />
             </div>
+            <div class="field">
+              <label for="oc-source-url">URL nguồn tài nguyên bên ngoài (tùy chọn: .git / .tar.gz / .zip)</label>
+              <input class="input" id="oc-source-url" name="sourceUrl" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://... (để trống để dùng nguồn chuẩn của mẫu)" />
+            </div>
             ${
               requiresDb
                 ? `<div class="field">
@@ -404,10 +408,17 @@ export async function renderApps(container) {
             }
             <div class="field">
               <label class="checkbox-row">
+                <input type="checkbox" name="autoInstallDeps" checked />
+                <span>Tự động nạp tài nguyên &amp; runtime từ bên ngoài (PHP-FPM, MariaDB/PostgreSQL, Bun, Tailwind, Cargo, Git nếu máy chủ chưa cài)</span>
+              </label>
+            </div>
+            <div class="field">
+              <label class="checkbox-row">
                 <input type="checkbox" name="enableSsl" />
                 <span>Bật HTTPS / SSL ngay (yêu cầu tên miền đã trỏ DNS về máy chủ)</span>
               </label>
             </div>
+            <div id="oc-progress-note" class="muted" style="font-size:12px;margin-top:8px;display:none"></div>
             <div class="row" style="justify-content:flex-end;margin-top:16px">
               <button type="submit" class="btn btn-primary" id="oc-submit-btn">Bắt đầu triển khai</button>
             </div>
@@ -418,6 +429,7 @@ export async function renderApps(container) {
               e.preventDefault();
               const sub = body.querySelector('#oc-submit-btn');
               const errBox = body.querySelector('#oc-form-err');
+              const progNote = body.querySelector('#oc-progress-note');
               if (errBox) {
                 errBox.className = '';
                 errBox.textContent = '';
@@ -425,6 +437,14 @@ export async function renderApps(container) {
               await withBusy(sub, async () => {
                 const fd = new FormData(e.target);
                 const domain = String(fd.get('domain') || '').trim();
+                const autoInstallDeps = fd.get('autoInstallDeps') === 'on';
+                const sourceUrl = String(fd.get('sourceUrl') || '').trim();
+                if (progNote) {
+                  progNote.style.display = 'block';
+                  progNote.textContent = autoInstallDeps
+                    ? 'Đang tự động nạp tài nguyên/runtime từ bên ngoài và triển khai (có thể mất 30–90 giây ở lần đầu cài PHP/DB)...'
+                    : 'Đang triển khai ứng dụng...';
+                }
                 try {
                   await api('POST', '/api/oneclick/deploy', {
                     templateId: btn.dataset.ocDeploy,
@@ -433,11 +453,14 @@ export async function renderApps(container) {
                     adminEmail: String(fd.get('adminEmail') || '').trim(),
                     enableSsl: fd.get('enableSsl') === 'on',
                     createDb: requiresDb ? fd.get('createDb') === 'on' : false,
+                    autoInstallDeps,
+                    sourceUrl: sourceUrl || undefined,
                   });
                   closeModal();
                   toast(`Đã triển khai 1-Click ${btn.dataset.ocName} cho ${domain}.`);
                   await renderApps(container);
                 } catch (err) {
+                  if (progNote) progNote.style.display = 'none';
                   if (errBox) {
                     errBox.className = 'alert-err';
                     errBox.textContent = err.message || 'Triển khai 1-Click thất bại.';

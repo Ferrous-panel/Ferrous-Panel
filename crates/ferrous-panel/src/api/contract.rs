@@ -402,6 +402,10 @@ pub struct OneClickTemplate {
     pub git_repo_url: Option<String>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OneClickDeployRequest {
@@ -417,6 +421,10 @@ pub struct OneClickDeployRequest {
     pub admin_email: Option<String>,
     #[serde(default)]
     pub enable_ssl: bool,
+    #[serde(default = "default_true")]
+    pub auto_install_deps: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

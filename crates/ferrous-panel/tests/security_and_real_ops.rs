@@ -1050,6 +1050,8 @@ fn oneclick_wordpress_preflight_returns_409_and_api_rejects_invalid_json_with_40
             create_db: true,
             enable_ssl: false,
             web_server_engine: None,
+            auto_install_deps: true,
+            source_url: None,
         };
         let wp_res = oneclick::deploy_oneclick(wp_req, &mod_store, &prod_cfg, &ws_mgr).await;
         ensure(
