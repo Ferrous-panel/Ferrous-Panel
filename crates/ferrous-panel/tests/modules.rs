@@ -1242,7 +1242,13 @@ fn cpanel_cron_and_tar_zstd_backups_with_sha256_verification() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("run cron error: {e}"))?;
         ensure_eq(&run_resp.status(), &StatusCode::OK, "POST /cpanel/cron/{id}/run")?;
-        ensure(!exec.calls_for("php8.3").is_empty(), "php8.3 executed directly without shell")?;
+        let php_calls = exec.calls_for("php8.3");
+        ensure(
+            php_calls
+                .iter()
+                .any(|c| c.args.iter().any(|a| a == "schedule:run")),
+            "php8.3 executed directly with expected arguments without shell",
+        )?;
 
         // 3. Create real tar.zst backup, verify SHA-256 on restore, then tamper bytes & expect 403
         let mk_bk = TestRequest::post()
