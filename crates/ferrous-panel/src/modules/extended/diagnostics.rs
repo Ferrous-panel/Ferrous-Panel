@@ -27,8 +27,8 @@ pub async fn run_system_diagnostics(
     let ws_cfg = webserver.store.load_config()?;
     let engine_label = ws_cfg.frontend_engine.as_str();
     let engine_unit = match ws_cfg.frontend_engine {
-        WebServerEngine::FerrousX => "ferrousx.service",
-        WebServerEngine::Nginx => "nginx.service",
+        crate::webserver::EngineKind::Ferrousx => "ferrousx.service",
+        crate::webserver::EngineKind::Nginx => "nginx.service",
     };
     let executor = webserver.executor();
     let (ws_status, ws_detail) = if is_production_vps(config)
