@@ -509,6 +509,9 @@ export interface MailServerData {
   postfixVersion: string;
   dovecotVersion: string;
   rspamdVersion: string;
+  postfixStatus?: string;
+  dovecotStatus?: string;
+  rspamdStatus?: string;
   queueCount: number;
   sentToday: number;
   spamBlockedToday: number;

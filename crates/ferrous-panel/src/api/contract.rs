@@ -889,11 +889,11 @@ pub struct MailServerData {
     pub postfix_version: String,
     pub dovecot_version: String,
     pub rspamd_version: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub postfix_status: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub dovecot_status: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rspamd_status: String,
     pub queue_count: u32,
     pub sent_today: u64,
