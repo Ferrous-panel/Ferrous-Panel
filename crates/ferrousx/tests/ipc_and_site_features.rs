@@ -217,7 +217,7 @@ spa_fallback = false
         )?;
 
         let server = FerrousxServer::start(&master_path).await?;
-        let http_addr = server.http_addr;
+        let http_addr = server.http_addr();
 
         // 1. Redirect rule (/old?x=1 -> 301 https://example.com/new?x=1)
         let (code, head, _) = send_http(http_addr, "site.local", "/old?x=1", &[]).await?;
@@ -328,7 +328,7 @@ fn uds_admin_ipc_end_to_end_status_reload_vhost_add_and_del() -> TestResult {
         )?;
 
         let server = FerrousxServer::start_with_ipc(&master_path, Some(sock_path.clone())).await?;
-        let http_addr = server.http_addr;
+        let http_addr = server.http_addr();
         let token = fs::read_to_string(&token_path)?.trim().to_string();
         ensure(token.len() >= 32, "admin token must be initialized with >= 32 hex chars")?;
 

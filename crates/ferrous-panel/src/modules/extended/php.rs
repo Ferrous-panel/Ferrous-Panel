@@ -181,7 +181,7 @@ fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
     list
 }
 
-fn require_command_ok(binary: &'static str, out: crate::system::cmd::CommandOutput) -> Result<(), PanelError> {
+fn require_command_ok(binary: &'static str, out: crate::system::cmd::CmdOutput) -> Result<(), PanelError> {
     if out.success {
         return Ok(());
     }
@@ -758,32 +758,36 @@ pub async fn switch_site_php_version(
         let root = crate::webserver::WwwRootPath::under_root(&config.wwwroot, &app.working_dir)?;
         let redirects = app
             .redirects
+            .as_deref()
+            .unwrap_or(&[])
             .iter()
-            .filter(|r| r.enabled)
             .map(|r| crate::webserver::SiteRedirectRule {
                 source_path: r.source_path.clone(),
                 target_url: r.target_url.clone(),
-                status_code: r.status_code,
+                status_code: r.redirect_type.trim().parse::<u16>().unwrap_or(301),
+                keep_query: r.keep_query,
+                enabled: r.enabled,
             })
             .collect();
         let hotlink_protection = app.hotlink_protection.as_ref().map(|h| {
             crate::webserver::SiteHotlinkProtection {
                 enabled: h.enabled,
+                protected_extensions: h.protected_extensions.clone(),
                 allowed_domains: h.allowed_domains.clone(),
-                extensions: h.extensions.clone(),
-                allow_empty_referer: h.allow_empty_referer,
+                block_empty_referer: h.block_empty_referer,
             }
         });
         let directory_auth = app
-            .directory_privacy
+            .directory_auth
+            .as_deref()
+            .unwrap_or(&[])
             .iter()
-            .filter(|d| d.enabled)
             .map(|d| crate::webserver::SiteDirectoryAuth {
                 path: d.path.clone(),
-                realm: d.realm.clone(),
+                label: d.label.clone(),
                 username: d.username.clone(),
-                password_hash: d.password_hash.clone(),
                 password: d.password.clone(),
+                enabled: d.enabled,
             })
             .collect();
 

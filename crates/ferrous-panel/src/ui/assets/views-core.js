@@ -428,12 +428,17 @@ export async function renderApps(container) {
 }
 
 function openSiteSettingsModal(app, container) {
-  const hotlink = app.hotlinkProtection || { enabled: false, allowedDomains: [], extensions: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'], allowEmptyReferer: true };
+  const hotlink = app.hotlinkProtection || {
+    enabled: false,
+    protectedExtensions: 'jpg,jpeg,png,gif,webp,mp4',
+    allowedDomains: [],
+    blockEmptyReferer: false,
+  };
   const redirectsText = (app.redirects || [])
     .filter((r) => r.enabled !== false)
-    .map((r) => `${r.sourcePath || r.source_path} -> ${r.targetUrl || r.target_url} ${r.statusCode || r.status_code || 301}`)
+    .map((r) => `${r.sourcePath || r.source_path} -> ${r.targetUrl || r.target_url} ${r.type || r.statusCode || r.status_code || '301'}`)
     .join('\n');
-  const firstAuth = (app.directoryPrivacy || [])[0] || null;
+  const firstAuth = (app.directoryAuth || app.directoryPrivacy || [])[0] || null;
 
   openModal(`Cài đặt nâng cao: ${app.domain}`, `
     <form id="site-settings-form">
@@ -452,10 +457,14 @@ function openSiteSettingsModal(app, container) {
           <label>Chống Hotlink — Tên miền cho phép (phân cách bằng dấu phẩy)</label>
           <input class="input mono" name="hotlinkDomains" value="${esc((hotlink.allowedDomains || []).join(', '))}" placeholder="example.com, cdn.example.com" />
         </div>
+        <div class="field">
+          <label>Phần mở rộng bảo vệ Hotlink</label>
+          <input class="input mono" name="hotlinkExtensions" value="${esc(hotlink.protectedExtensions || 'jpg,jpeg,png,gif,webp,mp4')}" placeholder="jpg,jpeg,png,gif,webp,mp4" />
+        </div>
       </div>
       <div class="row" style="margin-bottom:12px">
         <label class="checkbox-row"><input type="checkbox" name="hotlinkEnabled" ${hotlink.enabled ? 'checked' : ''} /><span>Bật chống Hotlink ảnh/video</span></label>
-        <label class="checkbox-row"><input type="checkbox" name="hotlinkAllowEmpty" ${hotlink.allowEmptyReferer !== false ? 'checked' : ''} /><span>Cho phép truy cập không có Referer</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="hotlinkBlockEmpty" ${hotlink.blockEmptyReferer ? 'checked' : ''} /><span>Chặn truy cập không có Referer</span></label>
       </div>
       <div class="field">
         <label>Chuyển hướng URL (mỗi dòng: <code>/old-path -> https://example.com/new 301</code>)</label>
@@ -469,8 +478,8 @@ function openSiteSettingsModal(app, container) {
           <input class="input mono" name="authPath" value="${esc(firstAuth?.path || '')}" placeholder="/admin" />
         </div>
         <div class="field">
-          <label>Realm</label>
-          <input class="input" name="authRealm" value="${esc(firstAuth?.realm || 'Protected Area')}" />
+          <label>Nhãn / Realm</label>
+          <input class="input" name="authLabel" value="${esc(firstAuth?.label || firstAuth?.realm || 'Protected Area')}" />
         </div>
         <div class="field">
           <label>Tài khoản</label>
@@ -502,8 +511,8 @@ function openSiteSettingsModal(app, container) {
               const src = parts[0] || '/';
               const rhs = (parts[1] || '').split(/\s+/);
               const targetUrl = rhs[0] || '/';
-              const code = Number(rhs[1]) === 302 ? 302 : 301;
-              return { id: `redir-${idx + 1}`, sourcePath: src, targetUrl, statusCode: code, enabled: true };
+              const redirectType = rhs[1] === '302' ? '302' : '301';
+              return { id: `redir-${idx + 1}`, sourcePath: src, targetUrl, type: redirectType, keepQuery: true, enabled: true };
             });
 
           const authPath = String(fd.get('authPath') || '').trim();
@@ -513,11 +522,10 @@ function openSiteSettingsModal(app, container) {
             ? [{
                 id: firstAuth?.id || 'dir-auth-1',
                 path: authPath,
-                realm: String(fd.get('authRealm') || 'Protected Area').trim(),
+                label: String(fd.get('authLabel') || 'Protected Area').trim() || 'Protected Area',
                 username: authUser,
-                passwordHash: firstAuth?.passwordHash || '',
-                password: authPass || undefined,
                 enabled: true,
+                ...(authPass ? { password: authPass } : {}),
               }]
             : [];
 
@@ -536,9 +544,9 @@ function openSiteSettingsModal(app, container) {
               redirects,
               hotlinkProtection: {
                 enabled: fd.get('hotlinkEnabled') === 'on',
+                protectedExtensions: String(fd.get('hotlinkExtensions') || 'jpg,jpeg,png,gif,webp,mp4').trim() || 'jpg,jpeg,png,gif,webp,mp4',
                 allowedDomains: hotlinkDomains,
-                extensions: hotlink.extensions || ['jpg', 'jpeg', 'png', 'gif', 'webp', 'mp4'],
-                allowEmptyReferer: fd.get('hotlinkAllowEmpty') === 'on',
+                blockEmptyReferer: fd.get('hotlinkBlockEmpty') === 'on',
               },
               directoryAuth,
             });

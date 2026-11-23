@@ -143,9 +143,15 @@ pub async fn delete_ufw_rule(
 
     let id = path.into_inner();
     let force = query.into_inner().force;
-    let ssh_port = crate::modules::extended::ssh_admin::get_ssh_overview(&state.modules, &state.config)
-        .map(|o| o.config.port)
-        .unwrap_or(22);
+    let ssh_port = crate::modules::extended::ssh_admin::load_ssh_panel(
+        &state.modules,
+        &state.config,
+        &state.auth_store,
+        state.webserver.executor().as_ref(),
+    )
+    .await
+    .map(|o| o.config.port)
+    .unwrap_or(22);
     let protected_ports = [ssh_port, state.config.port];
     let rules = sec_mod::delete_ufw_rule_guarded(
         state.webserver.executor().as_ref(),

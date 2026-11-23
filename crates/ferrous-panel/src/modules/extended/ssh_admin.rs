@@ -1275,7 +1275,7 @@ pub async fn run_panel_cli_action(
                 let updated =
                     update_admin_username(&config.credentials_path(), &config.admin_username, user)?;
                 admin.admin_username = updated.username.clone();
-                let _ = upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username);
+                upsert_env_var(&env_file, "FERROUS_ADMIN_USER", &updated.username)?;
                 let _ = auth_store.revoke_all_sessions();
                 format!("Updated Admin username to '{}'.", updated.username)
             } else {

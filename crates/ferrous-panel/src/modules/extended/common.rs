@@ -14,7 +14,6 @@ pub(super) use crate::auth::password::{
     load_or_init_credentials, update_admin_password, update_admin_username,
 };
 pub(super) use crate::auth::store::AuthStore;
-pub(super) use crate::cli::upsert_env_var;
 pub(super) use crate::config::Config;
 pub(super) use crate::error::PanelError;
 pub(super) use crate::modules::ModuleStore;
@@ -48,6 +47,11 @@ pub(super) fn sha256_hex(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input);
     format!("{:x}", hasher.finalize())
+}
+
+pub(super) fn upsert_env_var(env_path: &Path, key: &str, value: &str) -> Result<(), PanelError> {
+    crate::cli::upsert_env_var(env_path, key, value)
+        .map_err(|err| PanelError::Io(std::io::Error::other(format!("{err:#}"))))
 }
 
 pub(super) fn is_production_vps(config: &Config) -> bool {
