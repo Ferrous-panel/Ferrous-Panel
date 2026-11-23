@@ -8,15 +8,17 @@ use crate::modules::ModuleStore;
 use crate::system::cmd::{validate_no_flag_injection, AllowedBinary};
 use crate::system::paths::SafePath;
 use crate::system::validate::{Domain, Port, ServiceName};
-use crate::webserver::ssl::SslCertState;
+use crate::webserver::ssl::{
+    SiteSslStatus, SslCertState, SslDnsPreflight, SslRenewalTimerStatus,
+};
 use crate::webserver::{
-    atomic_write_file, CommandExecutor, EngineKind, PhpFpmVersion, SafeFilename,
-    SiteDirectoryAuth, SiteHotlinkProtection, SiteMode, SiteRedirectRule, SiteSpec, UpstreamHost,
-    UpstreamTarget, WebServerEngine, WebServerManager, WwwRootPath,
+    atomic_write_file, AcmeEmail, CommandExecutor, EngineKind, FileSnapshot, PhpFpmVersion,
+    SafeFilename, SiteDirectoryAuth, SiteHotlinkProtection, SiteMode, SiteRedirectRule, SiteSpec,
+    UpstreamHost, UpstreamTarget, WebServerEngine, WebServerManager, WwwRootPath,
 };
 use chrono::Utc;
 use std::collections::BTreeMap;
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -2087,6 +2089,302 @@ pub async fn update_site_settings(
     Ok(enrich_app(app, config, webserver).await)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSslOverview {
+    pub app_id: String,
+    pub domain: String,
+    pub aliases: Vec<String>,
+    pub ssl_enabled: bool,
+    pub force_https: bool,
+    pub http3_quic: bool,
+    pub web_server_engine: WebServerEngineType,
+    pub certbot_installed: bool,
+    pub openssl_installed: bool,
+    pub acme_webroot: String,
+    pub cert: SiteSslStatus,
+    pub dns_preflight: Vec<SslDnsPreflight>,
+    pub renewal_timer: SslRenewalTimerStatus,
+}
+
+fn parse_app_aliases(app: &ManagedApp) -> Result<Vec<Domain>, PanelError> {
+    let mut out = Vec::with_capacity(app.aliases.len());
+    for raw in &app.aliases {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let parsed = Domain::parse(trimmed)?;
+            if parsed.as_str() != app.domain.as_str()
+                && !out.iter().any(|d: &Domain| d.as_str() == parsed.as_str())
+            {
+                out.push(parsed);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn apply_app_ssl_vhost(
+    app: &mut ManagedApp,
+    ssl_enabled: bool,
+    force_https: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<(), PanelError> {
+    let domain = Domain::parse(&app.domain)?;
+    let aliases = parse_app_aliases(app)?;
+    let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+    let effective_doc_root =
+        resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
+    let effective_force = if ssl_enabled { force_https } else { false };
+    let effective_h3 = if ssl_enabled { app.http3_quic } else { false };
+
+    let mut spec = build_site_spec_for_app(
+        domain,
+        aliases,
+        &effective_doc_root,
+        &config.wwwroot,
+        app.framework,
+        php_fpm_from_tag(app.php_version),
+        app.internal_port,
+        ssl_enabled,
+        effective_force,
+    )?;
+    spec.http3_quic = effective_h3;
+    spec.websocket_enabled = app.websocket_enabled;
+    spec.rate_limit_rps = app.rate_limit_rps;
+    map_site_rules_to_spec(
+        &mut spec,
+        app.redirects.as_deref(),
+        app.hotlink_protection.as_ref(),
+        app.directory_auth.as_deref(),
+    );
+
+    let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
+    app.ssl_enabled = ssl_enabled;
+    app.force_https = effective_force;
+    app.http3_quic = effective_h3;
+    app.url_rewrite_rules = rendered.content;
+    app.nginx_vhost = rendered.config_path.display().to_string();
+    store.upsert_app(app)?;
+    Ok(())
+}
+
+pub async fn get_app_ssl_overview(
+    id: &str,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let aliases = parse_app_aliases(&app)?;
+    let cert = webserver.ssl.read_cert_status(&domain).await?;
+    let dns_preflight = webserver.ssl.check_dns_preflight(&domain, &aliases).await;
+    let renewal_timer = webserver.ssl.renewal_timer_status().await;
+    let exec = webserver.executor();
+    let engine = match webserver.store.load_config().map(|c| c.frontend_engine) {
+        Ok(EngineKind::Ferrousx) => WebServerEngineType::FerrousX,
+        _ => WebServerEngineType::Nginx,
+    };
+
+    Ok(AppSslOverview {
+        app_id: app.id,
+        domain: app.domain,
+        aliases: aliases.into_iter().map(|d| d.as_str().to_string()).collect(),
+        ssl_enabled: app.ssl_enabled,
+        force_https: app.force_https,
+        http3_quic: app.http3_quic,
+        web_server_engine: engine,
+        certbot_installed: exec.is_binary_available(AllowedBinary::Certbot),
+        openssl_installed: exec.is_binary_available(AllowedBinary::OpenSsl),
+        acme_webroot: webserver
+            .ssl
+            .paths()
+            .acme_webroot
+            .as_path()
+            .display()
+            .to_string(),
+        cert,
+        dns_preflight,
+        renewal_timer,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn install_app_ssl_letsencrypt(
+    id: &str,
+    email_raw: Option<&str>,
+    extra_aliases: &[String],
+    force_https: bool,
+    auto_install_certbot: bool,
+    force_renewal: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let email = match email_raw.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(AcmeEmail::parse(raw)?),
+        None => None,
+    };
+
+    let mut aliases = parse_app_aliases(&app)?;
+    let mut aliases_changed = false;
+    for raw in extra_aliases {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parsed = Domain::parse(trimmed)?;
+        if parsed.as_str() != domain.as_str()
+            && !aliases.iter().any(|d| d.as_str() == parsed.as_str())
+        {
+            aliases.push(parsed);
+            aliases_changed = true;
+        }
+    }
+
+    if aliases_changed {
+        app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
+        // Apply HTTP vhost first so ACME HTTP-01 challenge works for newly added SAN aliases too.
+        let cur_ssl = app.ssl_enabled;
+        let cur_force = app.force_https;
+        apply_app_ssl_vhost(&mut app, cur_ssl, cur_force, store, config, webserver).await?;
+    }
+
+    let issued = webserver
+        .ssl
+        .issue_or_renew_letsencrypt(
+            &domain,
+            &aliases,
+            email.as_ref(),
+            auto_install_certbot,
+            force_renewal,
+        )
+        .await?;
+
+    if !issued.present {
+        return Err(PanelError::Internal(format!(
+            "Certbot kết thúc nhưng không tìm thấy tệp chứng chỉ tại {}",
+            issued.cert_path
+        )));
+    }
+
+    apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
+    get_app_ssl_overview(id, store, webserver).await
+}
+
+pub async fn install_app_ssl_custom(
+    id: &str,
+    fullchain_pem: &str,
+    private_key_pem: &str,
+    force_https: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+
+    let installed = webserver
+        .ssl
+        .install_custom_pem(&domain, fullchain_pem, private_key_pem)
+        .await?;
+    if !installed.present {
+        return Err(PanelError::Internal(
+            "Không thể xác minh chứng chỉ vừa cài đặt trên đĩa.".to_string(),
+        ));
+    }
+
+    apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
+    get_app_ssl_overview(id, store, webserver).await
+}
+
+pub async fn install_app_ssl_self_signed(
+    id: &str,
+    validity_days: u32,
+    force_https: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let aliases = parse_app_aliases(&app)?;
+
+    let installed = webserver
+        .ssl
+        .issue_self_signed(&domain, &aliases, validity_days)
+        .await?;
+    if !installed.present {
+        return Err(PanelError::Internal(
+            "OpenSSL tạo chứng chỉ Self-Signed thất bại.".to_string(),
+        ));
+    }
+
+    apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
+    get_app_ssl_overview(id, store, webserver).await
+}
+
+pub async fn update_app_ssl_settings(
+    id: &str,
+    force_https: Option<bool>,
+    enable_auto_renew: Option<bool>,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+
+    if let Some(force) = force_https {
+        if force && !app.ssl_enabled {
+            return Err(PanelError::Conflict(
+                "Cần bật HTTPS / cài chứng chỉ SSL trước khi bật ép chuyển hướng HTTPS (301)."
+                    .to_string(),
+            ));
+        }
+        let cur_ssl = app.ssl_enabled;
+        apply_app_ssl_vhost(&mut app, cur_ssl, force, store, config, webserver).await?;
+    }
+
+    if enable_auto_renew == Some(true) {
+        webserver.ssl.install_renewal_timer().await?;
+    }
+
+    get_app_ssl_overview(id, store, webserver).await
+}
+
+pub async fn disable_app_ssl(
+    id: &str,
+    delete_cert_files: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+
+    apply_app_ssl_vhost(&mut app, false, false, store, config, webserver).await?;
+    if delete_cert_files {
+        let _ = webserver.ssl.remove_site_cert_files(&domain)?;
+    }
+
+    get_app_ssl_overview(id, store, webserver).await
+}
+
 pub async fn renew_ssl(
     id: &str,
     store: &ModuleStore,
@@ -2097,19 +2395,13 @@ pub async fn renew_ssl(
         .get_app(id)?
         .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
     let domain = Domain::parse(&app.domain)?;
-    let mut aliases = Vec::with_capacity(app.aliases.len());
-    for a in &app.aliases {
-        let trimmed = a.trim();
-        if !trimmed.is_empty() {
-            aliases.push(Domain::parse(trimmed)?);
-        }
-    }
+    let aliases = parse_app_aliases(&app)?;
 
     let current_cert = webserver.ssl.read_cert_status(&domain).await?;
     if !current_cert.present {
         webserver
             .ssl
-            .issue_certificate(&domain, &aliases, None)
+            .issue_or_renew_letsencrypt(&domain, &aliases, None, true, false)
             .await?;
     } else {
         webserver.ssl.renew_all().await?;
@@ -2117,28 +2409,8 @@ pub async fn renew_ssl(
 
     let updated_cert = webserver.ssl.read_cert_status(&domain).await?;
     if updated_cert.present && !app.ssl_enabled {
-        let working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
-        let effective_doc_root =
-            resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
-        let mut spec = build_site_spec_for_app(
-            domain,
-            aliases,
-            &effective_doc_root,
-            &config.wwwroot,
-            app.framework,
-            php_fpm_from_tag(app.php_version),
-            app.internal_port,
-            true,
-            app.force_https,
-        )?;
-        spec.http3_quic = app.http3_quic;
-        spec.websocket_enabled = app.websocket_enabled;
-        spec.rate_limit_rps = app.rate_limit_rps;
-        let rendered = webserver.upsert_and_apply_site(&spec, None).await?;
-        app.ssl_enabled = true;
-        app.url_rewrite_rules = rendered.content;
-        app.nginx_vhost = rendered.config_path.display().to_string();
-        store.upsert_app(&app)?;
+        let cur_force = app.force_https;
+        apply_app_ssl_vhost(&mut app, true, cur_force, store, config, webserver).await?;
     } else {
         webserver.reload_configured_engine().await?;
     }
@@ -2268,4 +2540,388 @@ pub async fn delete_app(
     let _ = webserver.remove_and_apply_site(&domain).await;
     store.delete_app(id)?;
     list_apps(store, config, webserver).await
+}
+
+// ============================================================================
+// Live Vhost Config Editor (with Atomic Snapshot + Rollback) & Website Log Center
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppVhostInfo {
+    pub app_id: String,
+    pub domain: String,
+    pub engine: String,
+    pub config_path: String,
+    pub exists: bool,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppVhostSaveResult {
+    pub app_id: String,
+    pub domain: String,
+    pub engine: String,
+    pub config_path: String,
+    pub validation_output: String,
+    pub reloaded: bool,
+    pub saved_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLogsResponse {
+    pub app_id: String,
+    pub domain: String,
+    pub kind: String,
+    pub source_path: String,
+    pub is_shared_log: bool,
+    pub size_bytes: u64,
+    pub lines: usize,
+    pub content: String,
+    pub fetched_at: String,
+}
+
+fn resolve_app_vhost_path(
+    domain: &Domain,
+    webserver: &WebServerManager,
+) -> Result<(EngineKind, PathBuf), PanelError> {
+    let engine = webserver.store.load_config()?.frontend_engine;
+    let path = match engine {
+        EngineKind::Nginx => webserver
+            .nginx
+            .paths()
+            .sites_available
+            .join(format!("{}.conf", domain.as_str())),
+        EngineKind::Ferrousx => webserver
+            .ferrousx
+            .paths()
+            .sites_dir
+            .join(format!("{}.toml", domain.as_str())),
+    };
+    Ok((engine, path))
+}
+
+pub async fn get_app_vhost(
+    id: &str,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) -> Result<AppVhostInfo, PanelError> {
+    let app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let (engine, path) = resolve_app_vhost_path(&domain, webserver)?;
+
+    let (exists, content) = if path.is_file() {
+        (true, std::fs::read_to_string(&path)?)
+    } else {
+        (false, app.url_rewrite_rules.clone())
+    };
+
+    Ok(AppVhostInfo {
+        app_id: app.id,
+        domain: app.domain,
+        engine: engine.as_str().to_string(),
+        config_path: path.display().to_string(),
+        exists,
+        content,
+    })
+}
+
+pub async fn save_app_vhost(
+    id: &str,
+    content: &str,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) -> Result<AppVhostSaveResult, PanelError> {
+    if content.trim().is_empty() {
+        return Err(PanelError::Validation(
+            "Nội dung cấu hình Vhost không được để trống.".to_string(),
+        ));
+    }
+    if content.len() > 256 * 1024 {
+        return Err(PanelError::Validation(
+            "Cấu hình Vhost vượt quá giới hạn tối đa 256 KiB.".to_string(),
+        ));
+    }
+    if content.contains('\0') {
+        return Err(PanelError::Forbidden(
+            "Cấu hình Vhost chứa ký tự NUL không hợp lệ.".to_string(),
+        ));
+    }
+
+    let mut app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let (engine, path) = resolve_app_vhost_path(&domain, webserver)?;
+
+    let snap = FileSnapshot::capture(&path)?;
+    atomic_write_file(&path, content.as_bytes(), 0o644)?;
+
+    let validation = match engine {
+        EngineKind::Nginx => webserver.nginx.validate().await,
+        EngineKind::Ferrousx => webserver.ferrousx.validate().await,
+    };
+
+    let report = match validation {
+        Ok(rep) if rep.valid => rep,
+        Ok(rep) => {
+            let _ = snap.restore();
+            return Err(PanelError::Validation(format!(
+                "Kiểm tra cú pháp {} thất bại — đã tự động khôi phục cấu hình cũ:\n{}",
+                engine.as_str(),
+                rep.output
+            )));
+        }
+        Err(err) => {
+            let _ = snap.restore();
+            return Err(err);
+        }
+    };
+
+    let reload_res = match engine {
+        EngineKind::Nginx => webserver.nginx.reload().await,
+        EngineKind::Ferrousx => webserver.ferrousx.reload().await,
+    };
+    if let Err(err) = reload_res {
+        let _ = snap.restore();
+        return Err(err);
+    }
+
+    app.url_rewrite_rules = content.to_string();
+    app.nginx_vhost = path.display().to_string();
+    store.upsert_app(&app)?;
+
+    Ok(AppVhostSaveResult {
+        app_id: app.id,
+        domain: app.domain,
+        engine: engine.as_str().to_string(),
+        config_path: path.display().to_string(),
+        validation_output: report.output,
+        reloaded: true,
+        saved_at: Utc::now().to_rfc3339(),
+    })
+}
+
+fn parse_nginx_log_directive(vhost: &str, directive: &str) -> Option<PathBuf> {
+    for raw_line in vhost.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix(directive) {
+            let token = rest
+                .trim()
+                .split(|c: char| c.is_ascii_whitespace() || c == ';')
+                .next()
+                .unwrap_or("");
+            if token.starts_with("/var/log/nginx/")
+                && !token.contains("..")
+                && !token.contains('\0')
+                && token != "/var/log/nginx/"
+            {
+                return Some(PathBuf::from(token));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_app_nginx_log_path(
+    domain: &Domain,
+    kind: &str,
+    vhost_path: &Path,
+) -> (PathBuf, bool) {
+    let directive = if kind == "access" {
+        "access_log"
+    } else {
+        "error_log"
+    };
+    if let Ok(vhost_raw) = std::fs::read_to_string(vhost_path) {
+        if let Some(custom_path) = parse_nginx_log_directive(&vhost_raw, directive) {
+            let is_shared = custom_path == Path::new("/var/log/nginx/access.log")
+                || custom_path == Path::new("/var/log/nginx/error.log");
+            return (custom_path, is_shared);
+        }
+    }
+    let per_site = PathBuf::from(format!("/var/log/nginx/{}.{kind}.log", domain.as_str()));
+    if per_site.is_file() {
+        return (per_site, false);
+    }
+    (PathBuf::from(format!("/var/log/nginx/{kind}.log")), true)
+}
+
+fn read_log_tail_sync(path: &Path, max_lines: usize) -> Result<(u64, String), PanelError> {
+    if !path.is_file() {
+        return Ok((
+            0,
+            format!("(Chưa có dữ liệu nhật ký tại {})", path.display()),
+        ));
+    }
+    let mut f = std::fs::File::open(path)?;
+    let size_bytes = f.metadata()?.len();
+    const MAX_TAIL_BYTES: u64 = 128 * 1024;
+    if size_bytes > MAX_TAIL_BYTES {
+        f.seek(SeekFrom::Start(size_bytes - MAX_TAIL_BYTES))?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    let text = String::from_utf8_lossy(&buf);
+    let lines_vec: Vec<&str> = text.lines().collect();
+    let start = lines_vec.len().saturating_sub(max_lines);
+    let tail = lines_vec[start..].join("\n");
+    let display = if tail.trim().is_empty() {
+        "(Tệp nhật ký hiện đang trống)".to_string()
+    } else {
+        tail
+    };
+    Ok((size_bytes, display))
+}
+
+pub async fn get_app_logs(
+    id: &str,
+    raw_kind: &str,
+    lines: usize,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) -> Result<AppLogsResponse, PanelError> {
+    let app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let kind = match raw_kind.trim().to_ascii_lowercase().as_str() {
+        "access" => "access",
+        "journal" | "systemd" => "journal",
+        _ => "error",
+    };
+    let clamped = lines.clamp(10, 500);
+
+    if kind == "journal" {
+        let engine = webserver.store.load_config()?.frontend_engine;
+        let unit = if is_php_runtime(app.framework) {
+            php_fpm_from_tag(app.php_version).systemd_unit().to_string()
+        } else if !app.systemd_unit.is_empty() {
+            let parsed = ServiceName::parse(&app.systemd_unit)?;
+            parsed.unit_file_name()
+        } else {
+            match engine {
+                EngineKind::Nginx => "nginx.service".to_string(),
+                EngineKind::Ferrousx => "ferrousx.service".to_string(),
+            }
+        };
+        let executor = webserver.executor();
+        if !executor.is_binary_available(AllowedBinary::Journalctl) {
+            return Err(PanelError::BinaryUnavailable("journalctl"));
+        }
+        let lines_str = clamped.to_string();
+        let out = executor
+            .run(
+                AllowedBinary::Journalctl,
+                &["-u", &unit, "-n", &lines_str, "--no-pager", "-o", "short-iso"],
+                SYSTEMD_TIMEOUT,
+            )
+            .await?;
+        let content = if !out.stdout.is_empty() {
+            out.stdout
+        } else if !out.stderr.is_empty() {
+            out.stderr
+        } else {
+            format!("(Chưa có nhật ký systemd journald cho {unit})")
+        };
+        return Ok(AppLogsResponse {
+            app_id: app.id,
+            domain: app.domain,
+            kind: "journal".to_string(),
+            source_path: format!("journalctl -u {unit}"),
+            is_shared_log: is_php_runtime(app.framework) || app.systemd_unit.is_empty(),
+            size_bytes: u64::try_from(content.len()).unwrap_or(0),
+            lines: clamped,
+            content,
+            fetched_at: Utc::now().to_rfc3339(),
+        });
+    }
+
+    let vhost_path = webserver
+        .nginx
+        .paths()
+        .sites_available
+        .join(format!("{}.conf", domain.as_str()));
+    let (log_path, is_shared_log) = resolve_app_nginx_log_path(&domain, kind, &vhost_path);
+    let log_path_owned = log_path.clone();
+    let (size_bytes, content) =
+        tokio::task::spawn_blocking(move || read_log_tail_sync(&log_path_owned, clamped))
+            .await
+            .map_err(|_| PanelError::Internal("log reader worker cancelled".to_string()))??;
+
+    Ok(AppLogsResponse {
+        app_id: app.id,
+        domain: app.domain,
+        kind: kind.to_string(),
+        source_path: log_path.display().to_string(),
+        is_shared_log,
+        size_bytes,
+        lines: clamped,
+        content,
+        fetched_at: Utc::now().to_rfc3339(),
+    })
+}
+
+pub async fn clear_app_logs(
+    id: &str,
+    raw_kind: &str,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) -> Result<AppLogsResponse, PanelError> {
+    let app = store
+        .get_app(id)?
+        .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
+    let domain = Domain::parse(&app.domain)?;
+    let kind = match raw_kind.trim().to_ascii_lowercase().as_str() {
+        "access" => "access",
+        "error" => "error",
+        _ => {
+            return Err(PanelError::Validation(
+                "Chỉ hỗ trợ làm trống nhật ký 'access' hoặc 'error' (không xóa journald).".to_string(),
+            ))
+        }
+    };
+
+    let vhost_path = webserver
+        .nginx
+        .paths()
+        .sites_available
+        .join(format!("{}.conf", domain.as_str()));
+    let (log_path, is_shared_log) = resolve_app_nginx_log_path(&domain, kind, &vhost_path);
+
+    if !log_path.starts_with("/var/log/nginx") {
+        return Err(PanelError::Forbidden(
+            "Chỉ cho phép làm trống tệp nhật ký nằm bên trong /var/log/nginx/.".to_string(),
+        ));
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&log_path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(PanelError::Forbidden(
+                "Từ chối thao tác trên symlink hoặc thư mục không hợp lệ.".to_string(),
+            ));
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&log_path)?;
+    }
+
+    Ok(AppLogsResponse {
+        app_id: app.id,
+        domain: app.domain,
+        kind: kind.to_string(),
+        source_path: log_path.display().to_string(),
+        is_shared_log,
+        size_bytes: 0,
+        lines: 0,
+        content: "(Đã làm trống tệp nhật ký)".to_string(),
+        fetched_at: Utc::now().to_rfc3339(),
+    })
 }

@@ -9,6 +9,7 @@ pub mod files;
 pub mod health;
 pub mod jobs;
 pub mod security;
+pub mod sysops;
 pub mod telemetry;
 pub mod webserver;
 
@@ -41,9 +42,48 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             web::put().to(apps::update_site_settings),
         )
         .route("/apps/{id}/test-http", web::post().to(apps::test_http_live))
+        .route("/apps/{id}/ssl", web::get().to(apps::get_app_ssl))
+        .route(
+            "/apps/{id}/ssl/letsencrypt",
+            web::post().to(apps::install_app_ssl_letsencrypt),
+        )
+        .route(
+            "/apps/{id}/ssl/custom",
+            web::post().to(apps::install_app_ssl_custom),
+        )
+        .route(
+            "/apps/{id}/ssl/self-signed",
+            web::post().to(apps::install_app_ssl_self_signed),
+        )
+        .route(
+            "/apps/{id}/ssl/settings",
+            web::put().to(apps::update_app_ssl_settings),
+        )
+        .route("/apps/{id}/ssl", web::delete().to(apps::disable_app_ssl))
         .route("/apps/{id}/renew-ssl", web::post().to(apps::renew_ssl))
+        .route("/apps/{id}/vhost", web::get().to(apps::get_app_vhost))
+        .route("/apps/{id}/vhost", web::put().to(apps::save_app_vhost))
+        .route("/apps/{id}/logs", web::get().to(apps::get_app_logs))
+        .route("/apps/{id}/logs", web::delete().to(apps::clear_app_logs))
         .route("/apps/{id}", web::delete().to(apps::delete_app))
         .route("/nginx/validate", web::post().to(apps::validate_nginx))
+        // Linux SysOps: Pure-Rust /proc Processes, ss Ports, df Disks, Systemd Units/Journal, Swap & Sysctl
+        .route("/sysops/overview", web::get().to(sysops::get_overview))
+        .route(
+            "/sysops/processes/{pid}/signal",
+            web::post().to(sysops::signal_process),
+        )
+        .route("/sysops/swap", web::post().to(sysops::configure_swap))
+        .route("/sysops/swap", web::delete().to(sysops::remove_swap))
+        .route(
+            "/sysops/services/{unit}/action",
+            web::post().to(sysops::service_action),
+        )
+        .route(
+            "/sysops/services/{unit}/logs",
+            web::get().to(sysops::get_service_logs),
+        )
+        .route("/sysops/sysctl", web::put().to(sysops::update_sysctl))
         // SQL Databases & Pure-Rust FerrousAdmin (SQLite 3 WAL, MariaDB, PostgreSQL)
         .route("/databases", web::get().to(databases::list_databases))
         .route("/databases", web::post().to(databases::create_database))

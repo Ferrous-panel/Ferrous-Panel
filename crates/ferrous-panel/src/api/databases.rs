@@ -42,7 +42,21 @@ pub struct ImportSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct ExportSqlQuery {
     #[serde(default)]
-    pub download: Option<bool>,
+    pub download: Option<String>,
+}
+
+impl ExportSqlQuery {
+    fn is_download(&self) -> bool {
+        self.download
+            .as_deref()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -357,7 +371,7 @@ pub async fn export_database(
         &format!("id={id} bytes={}", sql.len()),
     )?;
 
-    if query.into_inner().download.unwrap_or(false) {
+    if query.into_inner().is_download() {
         let safe_filename: String = id
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')

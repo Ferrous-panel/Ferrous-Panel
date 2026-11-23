@@ -1,6 +1,6 @@
 // FerrousPanel Pure-Rust UI — Security, Optimizer/Diagnostics, SSH/Terminal, Jobs & Panel Settings
 import {
-  api, esc, fmtTime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer, handleLogout,
+  api, esc, fmtBytes, fmtTime, fmtUptime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer, handleLogout,
   capBannerHtml, capDisabledAttr, withBusy,
 } from './app.js';
 
@@ -1007,4 +1007,450 @@ export async function renderSettingsJobs(container) {
       await doSave();
     }
   });
+}
+
+// ============================================================================
+// 13. LINUX SYSOPS (PROCESSES /proc, PORTS ss, SYSTEMD SERVICES, SWAP & SYSCTL)
+// ============================================================================
+export async function renderSysops(container) {
+  let data = await api('GET', '/api/sysops/overview');
+  let activeTab = 'processes';
+  let search = '';
+
+  function openServiceJournalModal(unit) {
+    openModal(`Nhật ký Systemd: ${unit}`, '<div class="skel skel-lg" style="margin:12px 0"></div>', {
+      large: true,
+      onMount(body) {
+        async function fetchLogs(lines = 150) {
+          try {
+            const res = await api('GET', `/api/sysops/services/${encodeURIComponent(unit)}/logs?lines=${lines}`);
+            body.innerHTML = `
+              <div class="row-between" style="margin-bottom:10px">
+                <span class="meta-line mono">${esc(res.unit)} · ${esc(res.lines)} dòng cuối · ${esc(fmtTime(res.fetchedAt))}</span>
+                <button type="button" class="btn btn-sm" id="sysops-j-refresh">Làm mới</button>
+              </div>
+              <pre class="terminal-box" style="min-height:340px;max-height:480px;white-space:pre-wrap">${esc(res.content || '')}</pre>
+            `;
+            body.querySelector('#sysops-j-refresh')?.addEventListener('click', (e) => withBusy(e.currentTarget, () => fetchLogs(lines)));
+          } catch (err) {
+            body.innerHTML = `<div class="alert-err">${esc(err.message || 'Không đọc được nhật ký systemd.')}</div>`;
+          }
+        }
+        fetchLogs(150);
+      },
+    });
+  }
+
+  function draw() {
+    const h = data.host || {};
+    const sc = data.sysctl || {};
+    const procs = Array.isArray(data.processes) ? data.processes : [];
+    const ports = Array.isArray(data.ports) ? data.ports : [];
+    const disks = Array.isArray(data.disks) ? data.disks : [];
+    const services = Array.isArray(data.services) ? data.services : [];
+    const q = search.trim().toLowerCase();
+
+    const filteredProcs = q
+      ? procs.filter((p) => String(p.pid).includes(q) || String(p.name || '').toLowerCase().includes(q) || String(p.user || '').toLowerCase().includes(q) || String(p.command || '').toLowerCase().includes(q))
+      : procs;
+    const filteredPorts = q
+      ? ports.filter((p) => String(p.port).includes(q) || String(p.process || '').toLowerCase().includes(q) || String(p.localAddr || '').toLowerCase().includes(q))
+      : ports;
+    const filteredServices = q
+      ? services.filter((s) => String(s.unit || '').toLowerCase().includes(q) || String(s.description || '').toLowerCase().includes(q) || String(s.activeState || '').toLowerCase().includes(q))
+      : services;
+
+    const loadArr = Array.isArray(h.loadAvg) ? h.loadAvg : [0, 0, 0];
+    const memUsedMb = Math.max(0, Number(h.memTotalMb || 0) - Number(h.memAvailableMb || 0));
+
+    container.innerHTML = `
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Tiến trình, Dịch vụ &amp; Hệ thống Linux</h1>
+          <p class="page-desc">Quản trị tiến trình trực tiếp từ <span class="mono">/proc</span>, cổng lắng nghe <span class="mono">ss</span>, dịch vụ <span class="mono">systemd</span>, bộ nhớ Swap <span class="mono">/swapfile</span>, ổ đĩa và tham số nhân Kernel.</p>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-sm" id="sysops-refresh-btn">Cập nhật ngay</button>
+        </div>
+      </div>
+
+      <section class="surface" style="margin-bottom:16px">
+        <div class="kv-grid">
+          <div class="kv-item">
+            <span class="kv-label">Máy chủ &amp; Hệ điều hành</span>
+            <span class="kv-value"><strong>${esc(h.hostname || 'localhost')}</strong> · ${esc(h.osPretty || 'Linux')}</span>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">Kernel &amp; CPU / Múi giờ</span>
+            <span class="kv-value mono">${esc(h.kernel || '—')} (${esc(h.arch || '')}) · ${esc(h.cpuCores || 1)} vCPU · ${esc(h.timezone || 'UTC')}</span>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">Uptime &amp; Load Average</span>
+            <span class="kv-value mono">${esc(fmtUptime(h.uptimeSecs || 0))} · ${esc(loadArr.join(' / '))}</span>
+          </div>
+          <div class="kv-item">
+            <span class="kv-label">RAM &amp; Swap thực tế</span>
+            <span class="kv-value mono">RAM ${esc(memUsedMb)}/${esc(h.memTotalMb || 0)} MB · Swap ${esc(h.swapUsedMb || 0)}/${esc(h.swapTotalMb || 0)} MB</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="row-between" style="margin-bottom:14px;gap:12px;flex-wrap:wrap">
+        <div class="tabs">
+          <button type="button" class="tab-btn ${activeTab === 'processes' ? 'active' : ''}" data-sysops-tab="processes">Tiến trình (${procs.length})</button>
+          <button type="button" class="tab-btn ${activeTab === 'ports' ? 'active' : ''}" data-sysops-tab="ports">Cổng lắng nghe (${ports.length})</button>
+          <button type="button" class="tab-btn ${activeTab === 'services' ? 'active' : ''}" data-sysops-tab="services">Dịch vụ Systemd (${services.length})</button>
+          <button type="button" class="tab-btn ${activeTab === 'storage' ? 'active' : ''}" data-sysops-tab="storage">Swap, Ổ đĩa &amp; Kernel</button>
+        </div>
+        ${activeTab !== 'storage' ? `<input class="input" id="sysops-search" style="max-width:300px" placeholder="Lọc theo PID, tên, cổng hoặc unit…" value="${esc(search)}" />` : ''}
+      </div>
+
+      ${activeTab === 'processes' ? `
+        <section class="surface">
+          <div class="surface-head">
+            <h2 class="surface-title">Top tiến trình theo RAM (đọc trực tiếp từ /proc)</h2>
+            <span class="meta-line">Hiển thị <strong class="mono">${filteredProcs.length}</strong> tiến trình · Panel PID <span class="mono">${esc(h.panelPid || '—')}</span> được bảo vệ</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>PID</th>
+                  <th>User</th>
+                  <th>Tiến trình &amp; Lệnh</th>
+                  <th>Trạng thái</th>
+                  <th class="right">RAM (MB)</th>
+                  <th class="right">Threads</th>
+                  <th class="right">Thao tác</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  filteredProcs.length
+                    ? filteredProcs.map((p) => `
+                      <tr>
+                        <td class="mono"><strong>${esc(p.pid)}</strong></td>
+                        <td class="mono">${esc(p.user)}</td>
+                        <td>
+                          <div><strong>${esc(p.name)}</strong> ${p.protected ? '<span class="muted">(Được bảo vệ)</span>' : ''}</div>
+                          <div class="meta-line mono" style="max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.command)}">${esc(p.command)}</div>
+                        </td>
+                        <td class="mono">${esc(p.state)}</td>
+                        <td class="right mono"><strong>${esc(p.rssMb)}</strong></td>
+                        <td class="right mono">${esc(p.threads)}</td>
+                        <td class="right">
+                          ${
+                            p.protected
+                              ? '<span class="muted">Anti-Lockout</span>'
+                              : `<div class="row" style="justify-content:flex-end">
+                                   <button type="button" class="btn btn-sm" data-proc-sig="TERM" data-pid="${esc(p.pid)}" data-pname="${esc(p.name)}">TERM</button>
+                                   <button type="button" class="btn btn-sm btn-danger" data-proc-sig="KILL" data-pid="${esc(p.pid)}" data-pname="${esc(p.name)}">KILL</button>
+                                 </div>`
+                          }
+                        </td>
+                      </tr>`).join('')
+                    : '<tr><td colspan="7" class="empty-state">Không có tiến trình phù hợp bộ lọc.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : ''}
+
+      ${activeTab === 'ports' ? `
+        <section class="surface">
+          <div class="surface-head">
+            <h2 class="surface-title">Cổng mạng đang lắng nghe (ss -tulpnH)</h2>
+            <span class="meta-line">Tổng <strong class="mono">${filteredPorts.length}</strong> socket đang mở</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Giao thức</th>
+                  <th>Địa chỉ lắng nghe</th>
+                  <th>Cổng</th>
+                  <th>Tiến trình</th>
+                  <th>PID</th>
+                  <th>Trạng thái</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  filteredPorts.length
+                    ? filteredPorts.map((p) => `
+                      <tr>
+                        <td class="mono"><strong>${esc(String(p.protocol || '').toUpperCase())}</strong></td>
+                        <td class="mono">${esc(p.localAddr)}</td>
+                        <td class="mono"><strong>:${esc(p.port)}</strong></td>
+                        <td class="mono">${esc(p.process)}</td>
+                        <td class="mono">${esc(p.pid ?? '—')}</td>
+                        <td><span class="${statusClass(p.state === 'LISTEN' ? 'active' : 'running')}">${esc(p.state)}</span></td>
+                      </tr>`).join('')
+                    : '<tr><td colspan="6" class="empty-state">Không phát hiện cổng lắng nghe nào (hoặc thiếu lệnh ss).</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : ''}
+
+      ${activeTab === 'services' ? `
+        <section class="surface">
+          <div class="surface-head">
+            <h2 class="surface-title">Dịch vụ Systemd trên máy chủ</h2>
+            <span class="meta-line">Hiển thị <strong class="mono">${filteredServices.length}</strong> dịch vụ · Anti-Lockout bảo vệ SSH &amp; FerrousPanel</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Unit Systemd</th>
+                  <th>Trạng thái</th>
+                  <th>Mô tả</th>
+                  <th class="right">Điều khiển</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  filteredServices.length
+                    ? filteredServices.map((s) => `
+                      <tr>
+                        <td class="mono"><strong>${esc(s.unit)}</strong> ${s.protected ? '<span class="muted">(Core)</span>' : ''}</td>
+                        <td><span class="${statusClass(s.activeState)}">${esc(s.activeState)}</span> <span class="muted mono">(${esc(s.subState)})</span></td>
+                        <td style="max-width:360px">${esc(s.description)}</td>
+                        <td class="right">
+                          <div class="row" style="justify-content:flex-end">
+                            ${s.activeState !== 'active' ? `<button type="button" class="btn btn-sm btn-primary" data-svc-act="start" data-unit="${esc(s.unit)}">Start</button>` : ''}
+                            <button type="button" class="btn btn-sm" data-svc-act="restart" data-unit="${esc(s.unit)}">Restart</button>
+                            ${!s.protected && s.activeState === 'active' ? `<button type="button" class="btn btn-sm btn-danger" data-svc-act="stop" data-unit="${esc(s.unit)}">Stop</button>` : ''}
+                            <button type="button" class="btn btn-sm" data-svc-logs="${esc(s.unit)}">Nhật ký</button>
+                          </div>
+                        </td>
+                      </tr>`).join('')
+                    : '<tr><td colspan="4" class="empty-state">Không tải được danh sách dịch vụ systemd.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : ''}
+
+      ${activeTab === 'storage' ? `
+        <section class="surface" style="margin-bottom:16px">
+          <div class="surface-head">
+            <h2 class="surface-title">Phân vùng &amp; Ổ đĩa thực tế (df -PT)</h2>
+            <span class="meta-line">${disks.length} phân vùng</span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Thiết bị</th>
+                  <th>Loại FS</th>
+                  <th>Điểm gắn</th>
+                  <th class="right">Đã dùng / Tổng</th>
+                  <th class="right">Còn trống</th>
+                  <th class="right">Sử dụng</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  disks.length
+                    ? disks.map((d) => `
+                      <tr>
+                        <td class="mono">${esc(d.device)}</td>
+                        <td class="mono">${esc(d.fsType)}</td>
+                        <td class="mono"><strong>${esc(d.mountPoint)}</strong></td>
+                        <td class="right mono">${esc(fmtBytes(d.usedBytes))} / ${esc(fmtBytes(d.totalBytes))}</td>
+                        <td class="right mono">${esc(fmtBytes(d.availableBytes))}</td>
+                        <td class="right mono"><strong class="${d.usePercent > 85 ? 'st-err' : d.usePercent > 70 ? 'st-warn' : 'st-ok'}">${esc(d.usePercent)}%</strong></td>
+                      </tr>`).join('')
+                    : '<tr><td colspan="6" class="empty-state">Không đọc được thông tin phân vùng ổ đĩa.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <div class="grid-2">
+          <section class="surface">
+            <div class="surface-head">
+              <h2 class="surface-title">Bộ nhớ ảo Swap (/swapfile)</h2>
+              <span class="${h.swapFileActive ? 'st-ok' : 'st-muted'}">${h.swapFileActive ? `Đang bật (${h.swapFileSizeMb} MB)` : 'Chưa kích hoạt'}</span>
+            </div>
+            <p class="page-desc" style="margin-bottom:12px">
+              Tạo tệp <span class="mono">/swapfile</span> quyền <span class="mono">0600</span> thuần Rust, kích hoạt qua <span class="mono">mkswap</span> + <span class="mono">swapon</span> và tự ghi vào <span class="mono">/etc/fstab</span> để giữ sau khi reboot.
+            </p>
+            <form id="sysops-swap-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label>Dung lượng Swap (MB, 128 – 16384)</label>
+                  <input class="input mono" name="sizeMb" type="number" min="128" max="16384" value="${esc(h.swapFileSizeMb || 2048)}" required />
+                </div>
+                <div class="field">
+                  <label>vm.swappiness (0 – 100)</label>
+                  <input class="input mono" name="swappiness" type="number" min="0" max="100" value="${esc(sc.swappiness ?? 10)}" />
+                </div>
+              </div>
+              <div class="row" style="margin-top:12px;gap:8px;flex-wrap:wrap">
+                <button type="submit" class="btn btn-primary" id="sysops-swap-sub">Tạo / Cập nhật /swapfile</button>
+                ${(h.swapFileActive || h.swapFileSizeMb > 0) ? '<button type="button" class="btn btn-danger" id="sysops-swap-del">Tắt &amp; Xóa /swapfile</button>' : ''}
+              </div>
+            </form>
+          </section>
+
+          <section class="surface">
+            <div class="surface-head">
+              <h2 class="surface-title">Tinh chỉnh nhân Linux (Sysctl Allowlist)</h2>
+              <span class="meta-line mono">/etc/sysctl.d/99-ferrous-sysops.conf</span>
+            </div>
+            <form id="sysops-sysctl-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label>vm.swappiness (0 – 100)</label>
+                  <input class="input mono" name="swappiness" type="number" min="0" max="100" value="${esc(sc.swappiness ?? 10)}" required />
+                </div>
+                <div class="field">
+                  <label>net.core.somaxconn (128 – 65535)</label>
+                  <input class="input mono" name="somaxconn" type="number" min="128" max="65535" value="${esc(sc.somaxconn ?? 4096)}" required />
+                </div>
+                <div class="field">
+                  <label>TCP Congestion Control</label>
+                  <select class="select mono" name="tcpCongestionControl">
+                    ${['bbr', 'cubic', 'reno'].map((cc) => `<option value="${cc}" ${sc.tcpCongestionControl === cc ? 'selected' : ''}>${cc}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="field">
+                  <label>fs.file-max (65536 – 10000000)</label>
+                  <input class="input mono" name="fileMax" type="number" min="65536" max="10000000" value="${esc(sc.fileMax ?? 1048576)}" required />
+                </div>
+              </div>
+              <div class="row" style="margin-top:12px">
+                <button type="submit" class="btn btn-primary" id="sysops-sysctl-sub">Áp dụng &amp; Lưu bền vững</button>
+              </div>
+            </form>
+          </section>
+        </div>
+      ` : ''}
+    `;
+
+    document.getElementById('sysops-refresh-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+      try {
+        data = await api('GET', '/api/sysops/overview');
+        draw();
+      } catch (err) { toast(err.message, 'err'); }
+    }));
+
+    container.querySelectorAll('[data-sysops-tab]').forEach((b) => {
+      b.addEventListener('click', () => {
+        activeTab = b.dataset.sysopsTab;
+        draw();
+      });
+    });
+
+    document.getElementById('sysops-search')?.addEventListener('input', (e) => {
+      search = e.target.value;
+      draw();
+      const el = document.getElementById('sysops-search');
+      if (el) { el.focus(); el.setSelectionRange(search.length, search.length); }
+    });
+
+    container.querySelectorAll('[data-proc-sig]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const pid = Number(b.dataset.pid);
+        const sig = b.dataset.procSig;
+        const pname = b.dataset.pname || `PID ${pid}`;
+        confirmAction(
+          `Gửi SIG${sig} tới tiến trình`,
+          `Xác nhận gửi tín hiệu SIG${sig} tới tiến trình ${pname} (PID ${pid})?`,
+          () => withBusy(b, async () => {
+            try {
+              const res = await api('POST', `/api/sysops/processes/${pid}/signal`, { signal: sig });
+              toast(res.message || `Đã gửi SIG${sig} tới PID ${pid}.`);
+              data = await api('GET', '/api/sysops/overview');
+              draw();
+            } catch (err) { toast(err.message, 'err'); }
+          }),
+          sig === 'KILL',
+        );
+      });
+    });
+
+    container.querySelectorAll('[data-svc-act]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const unit = b.dataset.unit;
+        const action = b.dataset.svcAct;
+        const execAction = () => withBusy(b, async () => {
+          try {
+            const res = await api('POST', `/api/sysops/services/${encodeURIComponent(unit)}/action`, { action });
+            toast(res.message || `Đã ${action} ${unit}.`);
+            data = await api('GET', '/api/sysops/overview');
+            draw();
+          } catch (err) { toast(err.message, 'err'); }
+        });
+        if (action === 'stop') {
+          confirmAction(`Dừng dịch vụ ${unit}`, `Xác nhận chạy systemctl stop ${unit}?`, execAction, true);
+        } else {
+          execAction();
+        }
+      });
+    });
+
+    container.querySelectorAll('[data-svc-logs]').forEach((b) => {
+      b.addEventListener('click', () => openServiceJournalModal(b.dataset.svcLogs));
+    });
+
+    document.getElementById('sysops-swap-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await withBusy(document.getElementById('sysops-swap-sub'), async () => {
+        const fd = new FormData(e.target);
+        const sizeMb = Number(fd.get('sizeMb') || 2048);
+        const swRaw = String(fd.get('swappiness') || '').trim();
+        try {
+          data = await api('POST', '/api/sysops/swap', {
+            sizeMb,
+            swappiness: swRaw !== '' ? Number(swRaw) : undefined,
+          });
+          toast(`Đã cấu hình & kích hoạt /swapfile (${sizeMb} MB) thành công.`);
+          draw();
+        } catch (err) { toast(err.message, 'err'); }
+      });
+    });
+
+    document.getElementById('sysops-swap-del')?.addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      confirmAction(
+        'Tắt & Xóa /swapfile',
+        'Xác nhận chạy swapoff, xóa tệp /swapfile và gỡ dòng tương ứng khỏi /etc/fstab?',
+        () => withBusy(btn, async () => {
+          try {
+            data = await api('DELETE', '/api/sysops/swap');
+            toast('Đã tắt và xóa /swapfile.');
+            draw();
+          } catch (err) { toast(err.message, 'err'); }
+        }),
+      );
+    });
+
+    document.getElementById('sysops-sysctl-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      await withBusy(document.getElementById('sysops-sysctl-sub'), async () => {
+        const fd = new FormData(e.target);
+        try {
+          const updated = await api('PUT', '/api/sysops/sysctl', {
+            swappiness: Number(fd.get('swappiness')),
+            somaxconn: Number(fd.get('somaxconn')),
+            tcpCongestionControl: String(fd.get('tcpCongestionControl') || 'cubic'),
+            fileMax: Number(fd.get('fileMax')),
+          });
+          data.sysctl = updated;
+          toast('Đã áp dụng tham số sysctl trực tiếp và lưu vào /etc/sysctl.d/99-ferrous-sysops.conf.');
+          draw();
+        } catch (err) { toast(err.message, 'err'); }
+      });
+    });
+  }
+
+  draw();
 }

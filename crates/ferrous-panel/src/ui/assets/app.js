@@ -1,7 +1,7 @@
 // FerrousPanel Pure-Rust Native Frontend Core (Zero Node.js)
 import { renderOverview, renderApps, renderFiles, renderDatabases } from './views-core.js';
 import { renderWebserver, renderPhpSoftware, renderCpanel, renderMail, renderEdgePolyglot } from './views-infra.js';
-import { renderSecurity, renderOptimizer, renderSsh, renderSettingsJobs } from './views-security.js';
+import { renderSecurity, renderOptimizer, renderSsh, renderSettingsJobs, renderSysops } from './views-security.js';
 
 const TOKEN_KEY = 'fp_session_token';
 const THEME_KEY = 'fp_theme';
@@ -414,6 +414,7 @@ const NAV_GROUPS = [
   {
     label: 'Bảo mật & Hệ thống',
     items: [
+      { id: 'sysops', label: 'Tiến trình & Hệ thống' },
       { id: 'security', label: 'Bảo mật & Audit Log' },
       { id: 'optimizer', label: 'Tối ưu & Chẩn đoán' },
       { id: 'ssh', label: 'SSH & Terminal' },
@@ -559,6 +560,9 @@ export async function renderCurrentView(forceCaps = false) {
         break;
       case 'edge':
         await renderEdgePolyglot(container);
+        break;
+      case 'sysops':
+        await renderSysops(container);
         break;
       case 'security':
         await renderSecurity(container);

@@ -36,6 +36,100 @@ pub struct SiteSettingsRequest {
     pub url_rewrite_rules: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallLetsEncryptRequest {
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default = "default_true_flag")]
+    pub force_https: bool,
+    #[serde(default = "default_true_flag")]
+    pub auto_install_certbot: bool,
+    #[serde(default)]
+    pub force_renewal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallCustomSslRequest {
+    pub fullchain_pem: String,
+    pub private_key_pem: String,
+    #[serde(default = "default_true_flag")]
+    pub force_https: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSelfSignedSslRequest {
+    #[serde(default = "default_self_signed_days")]
+    pub validity_days: u32,
+    #[serde(default)]
+    pub force_https: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAppSslSettingsRequest {
+    #[serde(default)]
+    pub force_https: Option<bool>,
+    #[serde(default)]
+    pub enable_auto_renew: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DisableAppSslQuery {
+    #[serde(default)]
+    pub delete_files: Option<String>,
+}
+
+impl DisableAppSslQuery {
+    fn should_delete_files(&self) -> bool {
+        self.delete_files
+            .as_deref()
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+}
+
+fn default_true_flag() -> bool {
+    true
+}
+
+fn default_self_signed_days() -> u32 {
+    365
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAppVhostRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLogsQuery {
+    #[serde(default = "default_log_kind")]
+    pub kind: String,
+    #[serde(default = "default_app_log_lines")]
+    pub lines: usize,
+}
+
+fn default_log_kind() -> String {
+    "error".to_string()
+}
+
+fn default_app_log_lines() -> usize {
+    150
+}
+
 fn actor_and_ip(req: &HttpRequest) -> (String, String) {
     let actor = req
         .extensions()
@@ -344,6 +438,199 @@ pub async fn test_http_live(
     Ok(HttpResponse::Ok().json(result))
 }
 
+/// `GET /api/apps/{id}/ssl` — returns real X.509 cert metadata, DNS preflight, Certbot/OpenSSL status, and renewal timer.
+pub async fn get_app_ssl(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let overview = apps_mod::get_app_ssl_overview(&id, &state.modules, &state.webserver).await?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
+/// `POST /api/apps/{id}/ssl/letsencrypt` — issues/expands/renews a real Let's Encrypt certificate via Certbot HTTP-01 webroot.
+pub async fn install_app_ssl_letsencrypt(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<InstallLetsEncryptRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let body = payload.into_inner();
+    let overview = apps_mod::install_app_ssl_letsencrypt(
+        &id,
+        body.email.as_deref(),
+        &body.aliases,
+        body.force_https,
+        body.auto_install_certbot,
+        body.force_renewal,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.ssl.letsencrypt",
+        &format!(
+            "id={id} domain={} forceHttps={}",
+            overview.domain, overview.force_https
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
+/// `POST /api/apps/{id}/ssl/custom` — cryptographically verifies and installs a user-supplied PEM cert + private key.
+pub async fn install_app_ssl_custom(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<InstallCustomSslRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let body = payload.into_inner();
+    let overview = apps_mod::install_app_ssl_custom(
+        &id,
+        &body.fullchain_pem,
+        &body.private_key_pem,
+        body.force_https,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.ssl.custom",
+        &format!(
+            "id={id} domain={} provider={} forceHttps={}",
+            overview.domain,
+            overview.cert.provider.as_deref().unwrap_or("Custom"),
+            overview.force_https
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
+/// `POST /api/apps/{id}/ssl/self-signed` — generates a real RSA-2048 X.509 v3 self-signed cert with SANs via OpenSSL.
+pub async fn install_app_ssl_self_signed(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<InstallSelfSignedSslRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let body = payload.into_inner();
+    let overview = apps_mod::install_app_ssl_self_signed(
+        &id,
+        body.validity_days,
+        body.force_https,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.ssl.self_signed",
+        &format!(
+            "id={id} domain={} days={} forceHttps={}",
+            overview.domain, body.validity_days, overview.force_https
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
+/// `PUT /api/apps/{id}/ssl/settings` — updates Force HTTPS (301) and/or installs systemd auto-renew timer.
+pub async fn update_app_ssl_settings(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<UpdateAppSslSettingsRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let body = payload.into_inner();
+    let overview = apps_mod::update_app_ssl_settings(
+        &id,
+        body.force_https,
+        body.enable_auto_renew,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.ssl.settings",
+        &format!(
+            "id={id} domain={} forceHttps={} timerActive={}",
+            overview.domain, overview.force_https, overview.renewal_timer.active
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
+/// `DELETE /api/apps/{id}/ssl` — disables HTTPS on the website vhost and optionally removes certificate files.
+pub async fn disable_app_ssl(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<DisableAppSslQuery>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let delete_files = query.into_inner().should_delete_files();
+    let overview = apps_mod::disable_app_ssl(
+        &id,
+        delete_files,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.ssl.disable",
+        &format!(
+            "id={id} domain={} deleteFiles={delete_files}",
+            overview.domain
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(overview))
+}
+
 /// `POST /api/apps/{id}/renew-ssl` — runs real Certbot renewal and reloads the active engine.
 pub async fn renew_ssl(
     req: HttpRequest,
@@ -395,4 +682,88 @@ pub async fn delete_app(
         .auth_store
         .append_audit_log(Some(&actor), &ip, "app.delete", &format!("id={id}"))?;
     Ok(HttpResponse::Ok().json(remaining))
+}
+
+/// `GET /api/apps/{id}/vhost` — reads the live active Nginx `.conf` or FerrousX `.toml` vhost file.
+pub async fn get_app_vhost(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let info = apps_mod::get_app_vhost(&id, &state.modules, &state.webserver).await?;
+    Ok(HttpResponse::Ok().json(info))
+}
+
+/// `PUT /api/apps/{id}/vhost` — atomically writes vhost, validates via engine binary, rolls back on error, and reloads.
+pub async fn save_app_vhost(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<SaveAppVhostRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let content = payload.into_inner().content;
+    let saved = apps_mod::save_app_vhost(&id, &content, &state.modules, &state.webserver).await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.vhost.save",
+        &format!(
+            "id={id} domain={} engine={} path={}",
+            saved.domain, saved.engine, saved.config_path
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(saved))
+}
+
+/// `GET /api/apps/{id}/logs?kind=error|access|journal&lines=150` — reads live website or systemd journal logs.
+pub async fn get_app_logs(
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<AppLogsQuery>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let q = query.into_inner();
+    let logs =
+        apps_mod::get_app_logs(&id, &q.kind, q.lines, &state.modules, &state.webserver).await?;
+    Ok(HttpResponse::Ok().json(logs))
+}
+
+/// `DELETE /api/apps/{id}/logs?kind=error|access` — safely truncates website log file inside `/var/log/nginx/`.
+pub async fn clear_app_logs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    query: web::Query<AppLogsQuery>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let id = path.into_inner();
+    let kind = query.into_inner().kind;
+    let cleared =
+        apps_mod::clear_app_logs(&id, &kind, &state.modules, &state.webserver).await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "app.logs.clear",
+        &format!(
+            "id={id} domain={} kind={} path={}",
+            cleared.domain, cleared.kind, cleared.source_path
+        ),
+    )?;
+    Ok(HttpResponse::Ok().json(cleared))
 }

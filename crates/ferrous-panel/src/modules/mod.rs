@@ -6,6 +6,7 @@ pub mod extended;
 pub mod files;
 pub mod jobs;
 pub mod security;
+pub mod sysops;
 
 use crate::api::contract::{BackupArchiveItem, ManagedApp, TelemetryHistoryPoint};
 use crate::error::PanelError;

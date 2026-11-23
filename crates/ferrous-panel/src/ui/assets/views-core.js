@@ -273,7 +273,7 @@ export async function renderApps(container) {
                           <div class="meta-line">
                             <span>${esc(a.webServerEngine || 'nginx')}</span>
                             <span>·</span>
-                            <span>SSL: ${a.sslEnabled ? 'Bật' : 'Tắt'}</span>
+                            <span class="${a.sslEnabled ? 'status-ok' : 'muted'}">${a.sslEnabled ? (a.forceHttps ? 'HTTPS (301)' : 'HTTPS: Bật') : 'HTTP (chưa có SSL)'}</span>
                             ${a.rateLimitRps ? `<span>·</span><span class="mono">${esc(a.rateLimitRps)} rps</span>` : ''}
                           </div>
                         </td>
@@ -281,11 +281,12 @@ export async function renderApps(container) {
                         <td class="mono">${esc(a.internalPort || '—')}</td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
+                            <button type="button" class="btn btn-sm ${a.sslEnabled ? '' : 'btn-primary'}" data-app-ssl="${esc(a.id)}">SSL / HTTPS</button>
+                            <button type="button" class="btn btn-sm" data-app-vhost="${esc(a.id)}">Vhost &amp; Log</button>
                             <button type="button" class="btn btn-sm" data-app-settings="${esc(a.id)}">Cài đặt Site</button>
                             <button type="button" class="btn btn-sm" data-app-act="restart" data-id="${esc(a.id)}">Restart</button>
                             <button type="button" class="btn btn-sm" data-app-job="rebuild" data-id="${esc(a.id)}">Rebuild</button>
                             ${a.gitRepoUrl ? `<button type="button" class="btn btn-sm" data-app-job="git-deploy" data-id="${esc(a.id)}">Git Pull</button>` : ''}
-                            <button type="button" class="btn btn-sm" data-app-job="renew-ssl" data-id="${esc(a.id)}" ${capDisabledAttr('ssl_certbot')}>SSL</button>
                             <button type="button" class="btn btn-sm" data-app-probe="${esc(a.id)}">Test HTTP</button>
                             <button type="button" class="btn btn-sm btn-danger" data-app-del="${esc(a.id)}" data-domain="${esc(a.domain)}">Xóa</button>
                           </div>
@@ -325,6 +326,20 @@ export async function renderApps(container) {
     document.getElementById('tab-oneclick')?.addEventListener('click', () => { activeTab = 'oneclick'; draw(); });
     document.getElementById('apps-search')?.addEventListener('input', (e) => { searchTerm = e.target.value; draw(); });
     document.getElementById('btn-deploy-app')?.addEventListener('click', () => openDeployModal(container));
+
+    container.querySelectorAll('[data-app-ssl]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const app = apps.find((x) => x.id === btn.dataset.appSsl);
+        if (app) openSslManagerModal(app, container);
+      });
+    });
+
+    container.querySelectorAll('[data-app-vhost]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const app = apps.find((x) => x.id === btn.dataset.appVhost);
+        if (app) openVhostLogsModal(app, container);
+      });
+    });
 
     container.querySelectorAll('[data-app-settings]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -486,6 +501,574 @@ export async function renderApps(container) {
   }
 
   draw();
+}
+
+function openSslManagerModal(app, container) {
+  let activeTab = 'letsencrypt';
+  let info = null;
+
+  openModal(`Quản lý SSL / HTTPS: ${app.domain}`, '<div class="skel skel-lg" style="margin:12px 0"></div><div class="skel skel-row"></div>', {
+    large: true,
+    onMount(body) {
+      async function refresh() {
+        try {
+          info = await api('GET', `/api/apps/${encodeURIComponent(app.id)}/ssl`);
+          paint();
+        } catch (err) {
+          body.innerHTML = `<div class="alert-err">${esc(err.message || 'Không tải được trạng thái SSL.')}</div>`;
+        }
+      }
+
+      function paint() {
+        const cert = info.cert || {};
+        const timer = info.renewalTimer || {};
+        const dnsList = Array.isArray(info.dnsPreflight) ? info.dnsPreflight : [];
+        const certStateLabel = {
+          valid: 'Hợp lệ',
+          expiring_soon: 'Sắp hết hạn',
+          expired: 'Đã hết hạn',
+          missing: 'Chưa cài',
+        }[cert.status] || cert.status || 'missing';
+        const certStateCls = cert.status === 'valid'
+          ? 'status-ok'
+          : (cert.status === 'expiring_soon' ? 'status-warn' : (cert.status === 'expired' ? 'status-err' : 'muted'));
+
+        body.innerHTML = `
+          <div id="ssl-feedback"></div>
+
+          <div class="kv-grid" style="margin-bottom:14px">
+            <div class="kv-item">
+              <span class="kv-label">Trạng thái HTTPS (${esc(info.webServerEngine || 'nginx')})</span>
+              <span class="kv-value">
+                <strong class="${info.sslEnabled ? 'status-ok' : 'muted'}">${info.sslEnabled ? 'HTTPS Đang bật' : 'Chỉ HTTP (80)'}</strong>
+                ${info.sslEnabled ? ` · <span class="mono">${info.forceHttps ? 'Force 301' : 'HTTP+HTTPS'}</span>` : ''}
+              </span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Chứng chỉ X.509</span>
+              <span class="kv-value">
+                <strong class="${certStateCls}">${esc(certStateLabel)}</strong>
+                ${cert.provider ? ` · ${esc(cert.provider)}` : ''}
+              </span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Hạn sử dụng</span>
+              <span class="kv-value mono">
+                ${cert.present && cert.notAfter ? `${esc(cert.notAfter.slice(0, 10))} (${esc(cert.daysRemaining ?? 0)} ngày)` : '—'}
+              </span>
+            </div>
+            <div class="kv-item">
+              <span class="kv-label">Tự động gia hạn (systemd)</span>
+              <span class="kv-value mono">
+                <span class="${timer.active ? 'status-ok' : 'muted'}">${timer.active ? 'Đang chạy' : 'Chưa bật'}</span>
+                ${timer.nextRun ? ` · ${esc(timer.nextRun)}` : ''}
+              </span>
+            </div>
+          </div>
+
+          <div class="table-wrap" style="margin-bottom:14px">
+            <table class="data-table">
+              <thead><tr><th>Kiểm tra DNS Preflight</th><th>IP phân giải</th><th>Trạng thái ACME HTTP-01</th></tr></thead>
+              <tbody>
+                ${dnsList.map((d) => `
+                  <tr>
+                    <td class="mono"><strong>${esc(d.domain)}</strong></td>
+                    <td class="mono">${d.ips && d.ips.length ? esc(d.ips.join(', ')) : '—'}</td>
+                    <td>${d.resolved
+                      ? '<span class="status-ok">Sẵn sàng cấp Let\'s Encrypt</span>'
+                      : `<span class="status-err">${esc(d.warning || 'Chưa phân giải DNS')}</span>`}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+
+          ${cert.present ? `
+            <div class="meta-line" style="margin-bottom:14px;flex-wrap:wrap">
+              <span>Issuer: <strong class="mono">${esc(cert.issuer || '—')}</strong></span>
+              <span>·</span>
+              <span>SANs: <strong class="mono">${esc((cert.sanDomains && cert.sanDomains.length ? cert.sanDomains : [info.domain]).join(', '))}</strong></span>
+              ${cert.sha256Fingerprint ? `<span>·</span><span class="mono" title="${esc(cert.sha256Fingerprint)}">SHA-256: ${esc(cert.sha256Fingerprint.slice(0, 26))}…</span>` : ''}
+            </div>
+          ` : ''}
+
+          <div class="tabs" style="margin-bottom:14px">
+            <button type="button" class="tab-btn ${activeTab === 'letsencrypt' ? 'active' : ''}" data-ssl-tab="letsencrypt">Let's Encrypt (Miễn phí)</button>
+            <button type="button" class="tab-btn ${activeTab === 'custom' ? 'active' : ''}" data-ssl-tab="custom">Chứng chỉ PEM / Cloudflare</button>
+            <button type="button" class="tab-btn ${activeTab === 'selfsigned' ? 'active' : ''}" data-ssl-tab="selfsigned">Self-Signed (OpenSSL)</button>
+            <button type="button" class="tab-btn ${activeTab === 'manage' ? 'active' : ''}" data-ssl-tab="manage">Cài đặt &amp; Gỡ SSL</button>
+          </div>
+
+          ${activeTab === 'letsencrypt' ? `
+            <form id="ssl-le-form">
+              <div class="form-grid">
+                <div class="field">
+                  <label>Email thông báo ACME (tùy chọn)</label>
+                  <input class="input" name="email" type="email" inputmode="email" autocapitalize="none" placeholder="admin@${esc(info.domain)}" />
+                </div>
+                <div class="field">
+                  <label>Tên miền phụ / SAN bổ sung (phân cách dấu phẩy)</label>
+                  <input class="input mono" name="aliases" value="${esc((info.aliases || []).join(', '))}" placeholder="www.${esc(info.domain)}" />
+                </div>
+              </div>
+              <div class="row" style="margin:8px 0 12px;gap:14px">
+                <label class="checkbox-row">
+                  <input type="checkbox" name="forceHttps" ${info.sslEnabled ? (info.forceHttps ? 'checked' : '') : 'checked'} />
+                  <span>Ép chuyển hướng HTTP → HTTPS (301)</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="autoInstallCertbot" ${info.certbotInstalled ? '' : 'checked'} />
+                  <span>Tự động cài Certbot (apt-get) nếu thiếu ${info.certbotInstalled ? '(đã cài)' : '(chưa cài)'}</span>
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="forceRenewal" />
+                  <span>Ép cấp lại ngay (--force-renewal)</span>
+                </label>
+              </div>
+              <p class="page-desc" style="margin-bottom:12px">
+                Xác thực thực qua webroot <code class="mono">${esc(info.acmeWebroot || '/www/acme')}/.well-known/acme-challenge/</code> trên cổng 80, tự động bật <code>ferrous-certbot-renew.timer</code> và tải lại ${esc(info.webServerEngine || 'nginx')}.
+              </p>
+              <div class="row" style="justify-content:flex-end">
+                <button type="submit" class="btn btn-primary" id="ssl-le-submit">Cấp / Gia hạn Let's Encrypt</button>
+              </div>
+            </form>
+          ` : ''}
+
+          ${activeTab === 'custom' ? `
+            <form id="ssl-custom-form">
+              <div class="field">
+                <div class="row" style="justify-content:space-between;margin-bottom:6px">
+                  <label style="margin:0">Certificate / Fullchain PEM (<code>.pem</code> / <code>.crt</code>)</label>
+                  <label class="btn btn-sm" style="cursor:pointer">Nạp từ tệp<input type="file" id="ssl-cert-file" accept=".pem,.crt,.cer,.txt" hidden /></label>
+                </div>
+                <textarea class="textarea mono" name="fullchainPem" id="ssl-cert-ta" style="min-height:110px" placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----" required></textarea>
+              </div>
+              <div class="field">
+                <div class="row" style="justify-content:space-between;margin-bottom:6px">
+                  <label style="margin:0">Private Key PEM (<code>.key</code> / <code>.pem</code> — lưu quyền 0600, không ghi log)</label>
+                  <label class="btn btn-sm" style="cursor:pointer">Nạp từ tệp<input type="file" id="ssl-key-file" accept=".key,.pem,.txt" hidden /></label>
+                </div>
+                <textarea class="textarea mono" name="privateKeyPem" id="ssl-key-ta" style="min-height:110px" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" required></textarea>
+              </div>
+              <div class="row" style="justify-content:space-between;margin-top:10px">
+                <label class="checkbox-row">
+                  <input type="checkbox" name="forceHttps" checked />
+                  <span>Ép chuyển hướng HTTP → HTTPS (301)</span>
+                </label>
+                <button type="submit" class="btn btn-primary" id="ssl-custom-submit">Kiểm tra khóa &amp; Cài chứng chỉ</button>
+              </div>
+            </form>
+          ` : ''}
+
+          ${activeTab === 'selfsigned' ? `
+            <form id="ssl-self-form">
+              <p class="page-desc" style="margin-bottom:12px">
+                Tạo chứng chỉ X.509 v3 RSA-2048 SHA-256 kèm SANs trực tiếp bằng <code>openssl req</code>. Thích hợp cho môi trường nội bộ, kiểm thử hoặc <strong>Cloudflare SSL Mode = Full</strong>.
+              </p>
+              <div class="form-grid">
+                <div class="field">
+                  <label>Thời hạn hiệu lực</label>
+                  <select class="select" name="validityDays">
+                    <option value="365" selected>365 ngày (1 năm)</option>
+                    <option value="730">730 ngày (2 năm)</option>
+                    <option value="3650">3650 ngày (10 năm)</option>
+                  </select>
+                </div>
+                <div class="field" style="display:flex;align-items:flex-end">
+                  <label class="checkbox-row" style="margin-bottom:8px">
+                    <input type="checkbox" name="forceHttps" />
+                    <span>Ép chuyển hướng HTTP → HTTPS (301)</span>
+                  </label>
+                </div>
+              </div>
+              <div class="row" style="justify-content:flex-end;margin-top:12px">
+                <button type="submit" class="btn btn-primary" id="ssl-self-submit">Tạo &amp; Áp dụng Self-Signed SSL</button>
+              </div>
+            </form>
+          ` : ''}
+
+          ${activeTab === 'manage' ? `
+            <div class="row" style="justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+              <div>
+                <strong>Ép chuyển hướng HTTPS (HTTP 301)</strong>
+                <div class="meta-line">Tự động chuyển mọi truy cập cổng 80 sang HTTPS (trừ đường dẫn ACME challenge).</div>
+              </div>
+              <button type="button" class="btn btn-sm" id="ssl-toggle-force" ${info.sslEnabled ? '' : 'disabled'}>
+                ${info.forceHttps ? 'Tắt Force HTTPS' : 'Bật Force HTTPS (301)'}
+              </button>
+            </div>
+            <div class="row" style="justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+              <div>
+                <strong>Bộ hẹn giờ gia hạn tự động (systemd)</strong>
+                <div class="meta-line">Cài đặt <code>ferrous-certbot-renew.timer</code> chạy 2 lần/ngày (00:00 &amp; 12:00) kèm reload hook.</div>
+              </div>
+              <div class="row">
+                <button type="button" class="btn btn-sm" id="ssl-enable-timer">Bật Auto-Renew Timer</button>
+                <button type="button" class="btn btn-sm" id="ssl-bg-renew" ${info.certbotInstalled ? '' : 'disabled'}>Gia hạn nền (Job)</button>
+              </div>
+            </div>
+            <div class="row" style="justify-content:space-between;padding:10px 0">
+              <div>
+                <strong>Tắt HTTPS / Gỡ chứng chỉ</strong>
+                <div class="meta-line">Đưa vhost về chỉ phục vụ HTTP (cổng 80) và kiểm chứng cấu hình trước khi tải lại.</div>
+              </div>
+              <div class="row">
+                <button type="button" class="btn btn-sm" id="ssl-disable-only" ${info.sslEnabled ? '' : 'disabled'}>Tắt HTTPS (giữ tệp)</button>
+                <button type="button" class="btn btn-sm btn-danger" id="ssl-disable-del" ${info.sslEnabled || cert.present ? '' : 'disabled'}>Tắt &amp; Xóa chứng chỉ</button>
+              </div>
+            </div>
+          ` : ''}
+        `;
+
+        const showErr = (msg) => {
+          const fb = body.querySelector('#ssl-feedback');
+          if (fb) {
+            fb.className = 'alert-err';
+            fb.textContent = msg;
+          }
+          toast(msg, 'err');
+        };
+        const showOk = (msg) => {
+          const fb = body.querySelector('#ssl-feedback');
+          if (fb) {
+            fb.className = '';
+            fb.textContent = '';
+          }
+          toast(msg);
+        };
+
+        body.querySelectorAll('[data-ssl-tab]').forEach((b) => {
+          b.addEventListener('click', () => {
+            activeTab = b.dataset.sslTab;
+            paint();
+          });
+        });
+
+        body.querySelector('#ssl-cert-file')?.addEventListener('change', (ev) => {
+          const f = ev.target.files?.[0];
+          if (!f) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const ta = body.querySelector('#ssl-cert-ta');
+            if (ta) ta.value = String(reader.result || '');
+          };
+          reader.readAsText(f);
+        });
+        body.querySelector('#ssl-key-file')?.addEventListener('change', (ev) => {
+          const f = ev.target.files?.[0];
+          if (!f) return;
+          const reader = new FileReader();
+          reader.onload = () => {
+            const ta = body.querySelector('#ssl-key-ta');
+            if (ta) ta.value = String(reader.result || '');
+          };
+          reader.readAsText(f);
+        });
+
+        body.querySelector('#ssl-le-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = body.querySelector('#ssl-le-submit');
+          await withBusy(btn, async () => {
+            const fd = new FormData(e.target);
+            const aliases = String(fd.get('aliases') || '')
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            try {
+              info = await api('POST', `/api/apps/${encodeURIComponent(app.id)}/ssl/letsencrypt`, {
+                email: String(fd.get('email') || '').trim() || undefined,
+                aliases,
+                forceHttps: fd.get('forceHttps') === 'on',
+                autoInstallCertbot: fd.get('autoInstallCertbot') === 'on',
+                forceRenewal: fd.get('forceRenewal') === 'on',
+              });
+              showOk(`Đã cấp & kích hoạt SSL Let's Encrypt thật cho ${info.domain}.`);
+              paint();
+              await renderApps(container);
+            } catch (err) {
+              showErr(err.message || 'Cấp SSL Let\'s Encrypt thất bại.');
+            }
+          });
+        });
+
+        body.querySelector('#ssl-custom-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = body.querySelector('#ssl-custom-submit');
+          await withBusy(btn, async () => {
+            const fd = new FormData(e.target);
+            try {
+              info = await api('POST', `/api/apps/${encodeURIComponent(app.id)}/ssl/custom`, {
+                fullchainPem: String(fd.get('fullchainPem') || ''),
+                privateKeyPem: String(fd.get('privateKeyPem') || ''),
+                forceHttps: fd.get('forceHttps') === 'on',
+              });
+              showOk(`Đã xác minh khớp cặp khóa & cài chứng chỉ SSL cho ${info.domain}.`);
+              paint();
+              await renderApps(container);
+            } catch (err) {
+              showErr(err.message || 'Cài chứng chỉ PEM thất bại.');
+            }
+          });
+        });
+
+        body.querySelector('#ssl-self-form')?.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const btn = body.querySelector('#ssl-self-submit');
+          await withBusy(btn, async () => {
+            const fd = new FormData(e.target);
+            try {
+              info = await api('POST', `/api/apps/${encodeURIComponent(app.id)}/ssl/self-signed`, {
+                validityDays: Number(fd.get('validityDays') || 365),
+                forceHttps: fd.get('forceHttps') === 'on',
+              });
+              showOk(`Đã tạo & áp dụng chứng chỉ Self-Signed cho ${info.domain}.`);
+              paint();
+              await renderApps(container);
+            } catch (err) {
+              showErr(err.message || 'Tạo chứng chỉ Self-Signed thất bại.');
+            }
+          });
+        });
+
+        body.querySelector('#ssl-toggle-force')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            info = await api('PUT', `/api/apps/${encodeURIComponent(app.id)}/ssl/settings`, {
+              forceHttps: !info.forceHttps,
+            });
+            showOk(info.forceHttps ? 'Đã bật chuyển hướng HTTPS (301).' : 'Đã tắt ép chuyển hướng HTTPS.');
+            paint();
+            await renderApps(container);
+          } catch (err) { showErr(err.message); }
+        }));
+
+        body.querySelector('#ssl-enable-timer')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            info = await api('PUT', `/api/apps/${encodeURIComponent(app.id)}/ssl/settings`, {
+              enableAutoRenew: true,
+            });
+            showOk('Đã kích hoạt ferrous-certbot-renew.timer tự động gia hạn 2 lần/ngày.');
+            paint();
+          } catch (err) { showErr(err.message); }
+        }));
+
+        body.querySelector('#ssl-bg-renew')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            const job = await api('POST', `/api/jobs/apps/${encodeURIComponent(app.id)}/renew-ssl`, {});
+            closeModal();
+            toast(`Đã xếp hàng tác vụ ${job.title}`);
+            openJobDrawer(job.id);
+          } catch (err) { showErr(err.message); }
+        }));
+
+        body.querySelector('#ssl-disable-only')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            info = await api('DELETE', `/api/apps/${encodeURIComponent(app.id)}/ssl?deleteFiles=false`);
+            showOk(`Đã tắt HTTPS trên vhost ${info.domain} (tệp chứng chỉ vẫn được giữ lại).`);
+            paint();
+            await renderApps(container);
+          } catch (err) { showErr(err.message); }
+        }));
+
+        body.querySelector('#ssl-disable-del')?.addEventListener('click', () => {
+          confirmAction('Tắt HTTPS & Xóa chứng chỉ', `Xác nhận tắt HTTPS và xóa tệp fullchain.pem / privkey.pem của ${app.domain}?`, async () => {
+            try {
+              await api('DELETE', `/api/apps/${encodeURIComponent(app.id)}/ssl?deleteFiles=true`);
+              toast(`Đã tắt HTTPS và xóa chứng chỉ của ${app.domain}.`);
+              await renderApps(container);
+              openSslManagerModal(app, container);
+            } catch (err) { toast(err.message, 'err'); }
+          });
+        });
+      }
+
+      refresh();
+    },
+  });
+}
+
+function openVhostLogsModal(app, container) {
+  let activeTab = 'vhost';
+  let vhostData = null;
+  let logKind = 'error';
+  let logLines = 150;
+  let logData = null;
+
+  openModal(`Vhost & Nhật ký: ${app.domain}`, '<div class="skel skel-lg" style="margin:12px 0"></div><div class="skel skel-row"></div>', {
+    large: true,
+    onMount(body) {
+      async function loadVhost() {
+        vhostData = await api('GET', `/api/apps/${encodeURIComponent(app.id)}/vhost`);
+      }
+
+      async function loadLogs() {
+        logData = await api(
+          'GET',
+          `/api/apps/${encodeURIComponent(app.id)}/logs?kind=${encodeURIComponent(logKind)}&lines=${logLines}`,
+        );
+      }
+
+      async function initLoad() {
+        try {
+          await loadVhost();
+          paint();
+        } catch (err) {
+          body.innerHTML = `<div class="alert-err">${esc(err.message || 'Không tải được cấu hình Vhost.')}</div>`;
+        }
+      }
+
+      function paint() {
+        body.innerHTML = `
+          <div id="vh-feedback"></div>
+          <div class="tabs" style="margin-bottom:14px">
+            <button type="button" class="tab-btn ${activeTab === 'vhost' ? 'active' : ''}" data-vh-tab="vhost">Cấu hình Vhost trực tiếp</button>
+            <button type="button" class="tab-btn ${activeTab === 'logs' ? 'active' : ''}" data-vh-tab="logs">Nhật ký Website (Error / Access / Journal)</button>
+          </div>
+
+          ${activeTab === 'vhost' ? `
+            <div class="meta-line" style="margin-bottom:10px;flex-wrap:wrap">
+              <span>Engine: <strong class="mono">${esc(vhostData?.engine || 'nginx')}</strong></span>
+              <span>·</span>
+              <span>Tệp: <strong class="mono">${esc(vhostData?.configPath || '')}</strong></span>
+              <span>·</span>
+              <span class="${vhostData?.exists ? 'status-ok' : 'status-warn'}">${vhostData?.exists ? 'Đang có trên đĩa' : 'Chưa ghi trên đĩa'}</span>
+            </div>
+            <p class="page-desc" style="margin-bottom:10px">
+              Khi lưu, hệ thống sẽ sao lưu snapshot tệp cũ, ghi atomic, chạy kiểm tra cú pháp thật (<span class="mono">nginx -t</span> / <span class="mono">ferrousx-bin --check-config</span>), tự động khôi phục nếu sai cú pháp và reload dịch vụ.
+            </p>
+            <div class="field">
+              <textarea class="textarea mono" id="vh-editor" style="min-height:340px;font-size:12px;line-height:1.5" spellcheck="false">${esc(vhostData?.content || '')}</textarea>
+            </div>
+            <div class="row" style="justify-content:flex-end;margin-top:12px">
+              <button type="button" class="btn" id="vh-reload-btn">Đọc lại từ đĩa</button>
+              <button type="button" class="btn btn-primary" id="vh-save-btn">Kiểm tra cú pháp &amp; Áp dụng (Reload)</button>
+            </div>
+          ` : `
+            <div class="row-between" style="margin-bottom:10px;gap:10px;flex-wrap:wrap">
+              <div class="row" style="gap:8px;flex-wrap:wrap">
+                <select class="select" id="vh-log-kind" style="width:auto">
+                  <option value="error" ${logKind === 'error' ? 'selected' : ''}>Nginx Error Log</option>
+                  <option value="access" ${logKind === 'access' ? 'selected' : ''}>Nginx Access Log</option>
+                  <option value="journal" ${logKind === 'journal' ? 'selected' : ''}>Systemd Journal (App / PHP-FPM)</option>
+                </select>
+                <select class="select" id="vh-log-lines" style="width:auto">
+                  <option value="50" ${logLines === 50 ? 'selected' : ''}>50 dòng cuối</option>
+                  <option value="150" ${logLines === 150 ? 'selected' : ''}>150 dòng cuối</option>
+                  <option value="300" ${logLines === 300 ? 'selected' : ''}>300 dòng cuối</option>
+                </select>
+              </div>
+              <div class="row" style="gap:8px">
+                <button type="button" class="btn btn-sm" id="vh-log-refresh">Làm mới</button>
+                ${logKind !== 'journal' ? '<button type="button" class="btn btn-sm btn-danger" id="vh-log-clear">Làm trống log</button>' : ''}
+              </div>
+            </div>
+            <div class="meta-line" style="margin-bottom:10px;flex-wrap:wrap">
+              <span>Nguồn: <strong class="mono">${esc(logData?.sourcePath || '—')}</strong></span>
+              <span>·</span>
+              <span>Dung lượng: <strong class="mono">${esc(fmtBytes(logData?.sizeBytes || 0))}</strong></span>
+              ${logData?.isSharedLog ? '<span>·</span><span class="status-warn">Log dùng chung của hệ thống</span>' : ''}
+            </div>
+            <pre class="terminal-box" id="vh-log-output" style="min-height:320px;max-height:460px;white-space:pre-wrap">${esc(logData?.content || 'Đang tải nhật ký…')}</pre>
+          `}
+        `;
+
+        const fb = body.querySelector('#vh-feedback');
+        const showMsg = (msg, err = false) => {
+          if (fb) fb.innerHTML = `<div class="${err ? 'alert-err' : 'alert-ok'}" style="margin-bottom:12px;white-space:pre-wrap">${esc(msg)}</div>`;
+          toast(msg, err ? 'err' : 'ok');
+        };
+
+        body.querySelectorAll('[data-vh-tab]').forEach((b) => {
+          b.addEventListener('click', async () => {
+            activeTab = b.dataset.vhTab;
+            if (activeTab === 'logs' && !logData) {
+              paint();
+              try {
+                await loadLogs();
+                paint();
+              } catch (err) {
+                showMsg(err.message || 'Không tải được nhật ký.', true);
+              }
+            } else {
+              paint();
+            }
+          });
+        });
+
+        body.querySelector('#vh-reload-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            await loadVhost();
+            paint();
+            toast('Đã tải lại cấu hình Vhost từ đĩa.');
+          } catch (err) {
+            showMsg(err.message, true);
+          }
+        }));
+
+        body.querySelector('#vh-save-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          const content = body.querySelector('#vh-editor')?.value || '';
+          try {
+            const res = await api('PUT', `/api/apps/${encodeURIComponent(app.id)}/vhost`, { content });
+            vhostData = { ...(vhostData || {}), exists: true, content, configPath: res.configPath };
+            showMsg(`Đã kiểm tra cú pháp & reload ${res.engine} thành công (${res.configPath}).`);
+            await renderApps(container);
+          } catch (err) {
+            showMsg(err.message || 'Lưu cấu hình Vhost thất bại.', true);
+          }
+        }));
+
+        body.querySelector('#vh-log-kind')?.addEventListener('change', async (e) => {
+          logKind = e.target.value;
+          try {
+            await loadLogs();
+            paint();
+          } catch (err) {
+            showMsg(err.message, true);
+          }
+        });
+
+        body.querySelector('#vh-log-lines')?.addEventListener('change', async (e) => {
+          logLines = Number(e.target.value || 150);
+          try {
+            await loadLogs();
+            paint();
+          } catch (err) {
+            showMsg(err.message, true);
+          }
+        });
+
+        body.querySelector('#vh-log-refresh')?.addEventListener('click', (e) => withBusy(e.currentTarget, async () => {
+          try {
+            await loadLogs();
+            paint();
+          } catch (err) {
+            showMsg(err.message, true);
+          }
+        }));
+
+        body.querySelector('#vh-log-clear')?.addEventListener('click', (e) => {
+          const btn = e.currentTarget;
+          confirmAction(
+            'Làm trống tệp nhật ký',
+            `Xác nhận làm trống tệp nhật ký ${logData?.sourcePath || logKind} (0 byte)?`,
+            () => withBusy(btn, async () => {
+              try {
+                logData = await api(
+                  'DELETE',
+                  `/api/apps/${encodeURIComponent(app.id)}/logs?kind=${encodeURIComponent(logKind)}`,
+                );
+                paint();
+                toast('Đã làm trống tệp nhật ký.');
+              } catch (err) {
+                showMsg(err.message, true);
+              }
+            }),
+          );
+        });
+      }
+
+      initLoad();
+    },
+  });
 }
 
 function openSiteSettingsModal(app, container) {
