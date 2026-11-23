@@ -1140,6 +1140,32 @@ pub async fn run_fp_command(
                 "Updated FERROUS_BIND={ip_str} in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
             );
+            let public_host = detect_display_host(env_file);
+            if parsed_ip.is_loopback() {
+                println!(
+                    "Local URL : http://127.0.0.1:{}{}",
+                    config.port, config.security_entrance
+                );
+                println!(
+                    "SSH tunnel: ssh -L {}:127.0.0.1:{} root@{}",
+                    config.port, config.port, public_host
+                );
+            } else {
+                if !config.secure_cookie {
+                    eprintln!(
+                        "[WARNING] CANH BAO BAO MAT: Panel dang chay HTTP khong ma hoa tren {ip_str}:{} (FERROUS_SECURE_COOKIE=false). Nen cau hinh HTTPS reverse proxy hoac quay lai 127.0.0.1.",
+                        config.port
+                    );
+                }
+                println!(
+                    "Direct URL: http://{}:{}{}",
+                    public_host, config.port, config.security_entrance
+                );
+                println!(
+                    "Note: Ensure TCP port {} is also allowed in your cloud provider firewall / security group.",
+                    config.port
+                );
+            }
         }
         FpCommand::Repair => {
             std::fs::create_dir_all(&config.wwwroot)?;

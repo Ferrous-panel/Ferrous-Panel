@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 
 use actix_web::body::to_bytes;
 use actix_web::http::{header, StatusCode};

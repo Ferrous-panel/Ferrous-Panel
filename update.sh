@@ -59,6 +59,8 @@ SOURCE_ONLY=false
 FULL_LTO=false
 FORCE_REBUILD=false
 DO_ROLLBACK=false
+EXPLICIT_BIND=""
+PANEL_CONFIG_CHANGED=false
 
 usage() {
   cat <<'EOF_HELP'
@@ -86,6 +88,7 @@ Options:
   --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
   --version <TAG|latest>       GitHub Release tag for prebuilt binary (default: latest)
+  --bind <IP>                  Set panel listen IP in panel.env (e.g. 0.0.0.0 for public IP, 127.0.0.1 for local-only)
   -h, --help                   Show this help message
 EOF_HELP
 }
@@ -170,6 +173,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --version)
       RELEASE_TAG="$2"
+      shift 2
+      ;;
+    --bind)
+      EXPLICIT_BIND="${2:-}"
+      if [ -z "${EXPLICIT_BIND}" ] || ! [[ "${EXPLICIT_BIND}" =~ ^[0-9a-fA-F.:]+$ ]]; then
+        echo -e "${RED}[ERROR] --bind requires a valid IP address (e.g. 0.0.0.0 or 127.0.0.1).${NC}" >&2
+        exit 1
+      fi
       shift 2
       ;;
     -h|--help)
@@ -1003,7 +1014,15 @@ if [ "$UPDATE_PANEL" = true ]; then
     if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_MODE=' /etc/ferrous-panel/panel.env 2>/dev/null; then
       echo "FERROUS_MODE=production" >> /etc/ferrous-panel/panel.env
     fi
-    if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+    if [ -n "${EXPLICIT_BIND}" ]; then
+      if grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+        sed -i -E "s|^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=.*|FERROUS_BIND=${EXPLICIT_BIND}|" /etc/ferrous-panel/panel.env
+      else
+        echo "FERROUS_BIND=${EXPLICIT_BIND}" >> /etc/ferrous-panel/panel.env
+      fi
+      PANEL_CONFIG_CHANGED=true
+      echo -e "${CYAN}[*] Updated FERROUS_BIND=${EXPLICIT_BIND} in /etc/ferrous-panel/panel.env.${NC}"
+    elif ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?FERROUS_BIND=' /etc/ferrous-panel/panel.env 2>/dev/null; then
       echo "FERROUS_BIND=127.0.0.1" >> /etc/ferrous-panel/panel.env
     fi
     if [ -n "${VPS_PUBLIC_IP:-}" ] && [ "${VPS_PUBLIC_IP}" != "127.0.0.1" ]; then
@@ -1097,14 +1116,21 @@ EOF_SVC
     PROBE_HOST="127.0.0.1"
   fi
 
-  if [ "$PANEL_BINARY_UPDATED" = true ] || ! systemctl is-active --quiet ferrous-panel.service 2>/dev/null; then
+  if [ "$PANEL_BINARY_UPDATED" = true ] || [ "$PANEL_CONFIG_CHANGED" = true ] || ! systemctl is-active --quiet ferrous-panel.service 2>/dev/null; then
     systemctl restart ferrous-panel.service 2>/dev/null || true
     if probe_panel_health "${PROBE_HOST}" "${ACTIVE_PANEL_PORT}" 25; then
       echo -e "${GREEN}[+] ferrous-panel.service is live on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (ports 80/443 reserved exclusively for websites).${NC}"
-      echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-      if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
-        echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-        echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
+      if [ "${ACTIVE_PANEL_BIND}" = "127.0.0.1" ] || [ "${ACTIVE_PANEL_BIND}" = "::1" ]; then
+        echo -e "${GREEN}[+] Panel URL (Local)    : http://127.0.0.1:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+        echo -e "${YELLOW}[!] Loopback-only mode   : Panel chi nghe tren ${ACTIVE_PANEL_BIND} (bao mat mac dinh). Truy cap truc tiep IP cong khai se bao tu choi ket noi.${NC}"
+        echo -e "${CYAN}[*] SSH Tunnel (Recommended): ssh -L ${ACTIVE_PANEL_PORT}:127.0.0.1:${ACTIVE_PANEL_PORT} root@${VPS_PUBLIC_IP}${NC}"
+        echo -e "${CYAN}[*] Open Public IP Access   : sudo fp bind 0.0.0.0${NC}"
+      else
+        echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+        if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
+          echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+          echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
+        fi
       fi
     else
       echo -e "${RED}[ERROR] ferrous-panel.service failed /api/health on ${PROBE_HOST}:${ACTIVE_PANEL_PORT} after update!${NC}" >&2
@@ -1117,6 +1143,9 @@ EOF_SVC
     fi
   else
     echo -e "${GREEN}[+] ferrous-panel.service already active on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (zero restart needed).${NC}"
+    if [ "${ACTIVE_PANEL_BIND}" = "127.0.0.1" ] || [ "${ACTIVE_PANEL_BIND}" = "::1" ]; then
+      echo -e "${YELLOW}[!] Loopback-only mode   : Panel chi nghe tren ${ACTIVE_PANEL_BIND}. Dung 'ssh -L ${ACTIVE_PANEL_PORT}:127.0.0.1:${ACTIVE_PANEL_PORT} root@${VPS_PUBLIC_IP}' hoac 'sudo fp bind 0.0.0.0'.${NC}"
+    fi
   fi
 fi
 

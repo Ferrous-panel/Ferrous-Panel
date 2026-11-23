@@ -211,7 +211,6 @@ fn web_ssh_enforces_readonly_allowlist_and_rejects_missing_binary_with_409() -> 
                 AllowedBinary::Ss,
                 AllowedBinary::Journalctl,
                 AllowedBinary::Id,
-                AllowedBinary::Ls,
             ],
             |bin, args, _, _| match bin {
                 AllowedBinary::Id => ok_out("root\n"),
