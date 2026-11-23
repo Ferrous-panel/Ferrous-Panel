@@ -1559,8 +1559,8 @@ impl WebServerManager {
                             let _ = link_snap.restore();
                             let _ = avail_snap.restore();
                             let _ = self.nginx.reload().await;
-                            return Err(PanelError::BadGateway(format!(
-                                "nginx returned HTTP {code} for {} after reload; previous vhost restored",
+                            return Err(PanelError::Conflict(format!(
+                                "nginx returned HTTP {code} for {} after reload (upstream/PHP-FPM not ready); previous vhost restored",
                                 spec.domain.as_str()
                             )));
                         }
@@ -1593,8 +1593,8 @@ impl WebServerManager {
                         if code >= 500 {
                             let _ = site_snap.restore();
                             let _ = self.ferrousx.reload().await;
-                            return Err(PanelError::BadGateway(format!(
-                                "FerrousX returned HTTP {code} for {} after reload; previous vhost restored",
+                            return Err(PanelError::Conflict(format!(
+                                "FerrousX returned HTTP {code} for {} after reload (upstream/PHP-FPM not ready); previous vhost restored",
                                 spec.domain.as_str()
                             )));
                         }

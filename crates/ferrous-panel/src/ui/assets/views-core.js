@@ -301,9 +301,9 @@ export async function renderApps(container) {
                   <div class="meta-line" style="margin-bottom:14px">
                     <span>${esc(t.category || 'App')}</span>
                     <span>·</span>
-                    <span>${esc(t.runtime || '')}</span>
+                    <span>${esc(t.requiresDb && t.requiresDb !== 'None' ? `CSDL: ${t.requiresDb}` : (t.popularScore || t.framework || 'Static'))}</span>
                   </div>
-                  <button type="button" class="btn btn-primary btn-sm" data-oc-deploy="${esc(t.id)}" data-oc-name="${esc(t.name)}">Triển khai ngay</button>
+                  <button type="button" class="btn btn-primary btn-sm" data-oc-deploy="${esc(t.id)}" data-oc-name="${esc(t.name)}" data-oc-db="${esc(t.requiresDb || 'None')}">Triển khai ngay</button>
                 </div>`).join('')
               : '<div class="surface"><div class="empty-state">Không có mẫu 1-Click nào khả dụng.</div></div>'
           }
@@ -376,19 +376,37 @@ export async function renderApps(container) {
 
     container.querySelectorAll('[data-oc-deploy]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        const requiresDb = btn.dataset.ocDb && btn.dataset.ocDb !== 'None' ? btn.dataset.ocDb : '';
         openModal(`Triển khai 1-Click: ${btn.dataset.ocName}`, `
           <form id="oc-form">
+            <div id="oc-form-err"></div>
             <div class="field">
-              <label>Tên miền triển khai</label>
-              <input class="input" name="domain" placeholder="blog.example.com" required />
+              <label for="oc-domain">Tên miền triển khai</label>
+              <input class="input" id="oc-domain" name="domain" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="blog.example.com" required />
             </div>
             <div class="field">
-              <label>Tiêu đề trang</label>
-              <input class="input" name="siteTitle" value="${esc(btn.dataset.ocName)}" />
+              <label for="oc-title">Tiêu đề trang</label>
+              <input class="input" id="oc-title" name="siteTitle" value="${esc(btn.dataset.ocName)}" />
             </div>
             <div class="field">
-              <label>Email quản trị (dùng cho SSL / Admin)</label>
-              <input class="input" name="adminEmail" type="email" placeholder="admin@example.com" />
+              <label for="oc-email">Email quản trị (dùng cho SSL / Admin)</label>
+              <input class="input" id="oc-email" name="adminEmail" type="email" inputmode="email" autocapitalize="none" placeholder="admin@example.com" />
+            </div>
+            ${
+              requiresDb
+                ? `<div class="field">
+                    <label class="checkbox-row">
+                      <input type="checkbox" name="createDb" checked />
+                      <span>Tự động tạo cơ sở dữ liệu (${esc(requiresDb)}) &amp; cấu hình kết nối</span>
+                    </label>
+                  </div>`
+                : ''
+            }
+            <div class="field">
+              <label class="checkbox-row">
+                <input type="checkbox" name="enableSsl" />
+                <span>Bật HTTPS / SSL ngay (yêu cầu tên miền đã trỏ DNS về máy chủ)</span>
+              </label>
             </div>
             <div class="row" style="justify-content:flex-end;margin-top:16px">
               <button type="submit" class="btn btn-primary" id="oc-submit-btn">Bắt đầu triển khai</button>
@@ -399,21 +417,31 @@ export async function renderApps(container) {
             body.querySelector('#oc-form')?.addEventListener('submit', async (e) => {
               e.preventDefault();
               const sub = body.querySelector('#oc-submit-btn');
+              const errBox = body.querySelector('#oc-form-err');
+              if (errBox) {
+                errBox.className = '';
+                errBox.textContent = '';
+              }
               await withBusy(sub, async () => {
                 const fd = new FormData(e.target);
+                const domain = String(fd.get('domain') || '').trim();
                 try {
                   await api('POST', '/api/oneclick/deploy', {
                     templateId: btn.dataset.ocDeploy,
-                    domain: fd.get('domain'),
-                    siteTitle: fd.get('siteTitle') || '',
-                    adminEmail: fd.get('adminEmail') || '',
-                    enableSsl: false,
-                    autoCreateDb: true,
+                    domain,
+                    siteTitle: String(fd.get('siteTitle') || '').trim(),
+                    adminEmail: String(fd.get('adminEmail') || '').trim(),
+                    enableSsl: fd.get('enableSsl') === 'on',
+                    createDb: requiresDb ? fd.get('createDb') === 'on' : false,
                   });
                   closeModal();
-                  toast('Đã triển khai ứng dụng 1-Click.');
+                  toast(`Đã triển khai 1-Click ${btn.dataset.ocName} cho ${domain}.`);
                   await renderApps(container);
                 } catch (err) {
+                  if (errBox) {
+                    errBox.className = 'alert-err';
+                    errBox.textContent = err.message || 'Triển khai 1-Click thất bại.';
+                  }
                   toast(err.message, 'err');
                 }
               });

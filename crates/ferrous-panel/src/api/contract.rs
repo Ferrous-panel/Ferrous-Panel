@@ -407,9 +407,16 @@ pub struct OneClickTemplate {
 pub struct OneClickDeployRequest {
     pub template_id: String,
     pub domain: String,
+    #[serde(default, alias = "autoCreateDb")]
     pub create_db: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_server_engine: Option<WebServerEngineType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_email: Option<String>,
+    #[serde(default)]
+    pub enable_ssl: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

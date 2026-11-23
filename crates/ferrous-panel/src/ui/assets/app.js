@@ -138,16 +138,66 @@ export async function withBusy(btn, fn) {
   }
 }
 
+function formatHttpError(status, contentType, text, data) {
+  if (data && typeof data === 'object') {
+    const raw = data.error || data.message;
+    if (typeof raw === 'string' && raw.trim()) {
+      const clean = raw.trim();
+      return clean.length > 340 ? `${clean.slice(0, 340)}…` : clean;
+    }
+  }
+
+  const ct = String(contentType || '').toLowerCase();
+  const body = String(text || '').trim();
+  const looksHtml =
+    ct.includes('text/html') ||
+    /^\s*(<!doctype\s+html|<html\b|<head\b|<body\b)/i.test(body);
+
+  if (looksHtml) {
+    const titleMatch = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const title = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
+    const rayMatch = body.match(/Ray ID:\s*<[^>]*>([a-zA-Z0-9-]+)</i) || body.match(/Ray ID:\s*([a-zA-Z0-9-]+)/i);
+    const raySuffix = rayMatch ? ` (Ray ID: ${rayMatch[1]})` : '';
+    if (status === 502) {
+      return `Lỗi cổng kết nối HTTP 502 Bad Gateway${raySuffix}. Máy chủ hoặc dịch vụ backend chưa phản hồi — vui lòng kiểm tra trạng thái dịch vụ và thử lại.`;
+    }
+    if (status === 503) {
+      return `Dịch vụ tạm thời gián đoạn (HTTP 503)${raySuffix}. Vui lòng thử lại sau ít giây.`;
+    }
+    if (status === 504 || status === 524) {
+      return `Quá thời gian chờ phản hồi từ máy chủ (HTTP ${status})${raySuffix}. Tác vụ có thể đang chạy chậm hoặc bị ngắt bởi proxy.`;
+    }
+    if (title) {
+      return `HTTP ${status}: ${title}${raySuffix}`;
+    }
+    return `Máy chủ hoặc proxy trả về trang lỗi HTML (HTTP ${status})${raySuffix}.`;
+  }
+
+  if (body) {
+    const singleLine = body.replace(/\s+/g, ' ').trim();
+    return singleLine.length > 300 ? `${singleLine.slice(0, 300)}…` : singleLine;
+  }
+  return `Yêu cầu thất bại (HTTP ${status})`;
+}
+
 export function toast(message, kind = 'ok') {
   const root = document.getElementById('toast-root');
   if (!root) return;
+  while (root.children.length >= 3) {
+    root.firstElementChild?.remove();
+  }
+  const raw = String(message ?? '').trim();
+  const display = raw.length > 320 ? `${raw.slice(0, 320)}…` : raw;
   const el = document.createElement('div');
   el.className = `toast ${kind === 'err' ? 'err' : 'ok'}`;
-  el.innerHTML = `<span>${esc(message)}</span>`;
-  root.appendChild(el);
-  setTimeout(() => {
+  el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+  el.innerHTML = `<div class="toast-msg">${esc(display)}</div><button type="button" class="toast-close" aria-label="Đóng thông báo">×</button>`;
+  const removeToast = () => {
     el.remove();
-  }, 5200);
+  };
+  el.querySelector('.toast-close')?.addEventListener('click', removeToast);
+  root.appendChild(el);
+  setTimeout(removeToast, kind === 'err' ? 7500 : 4800);
 }
 
 export function closeModal() {
@@ -297,10 +347,14 @@ export async function api(method, path, body = undefined, { rawBody = false, con
     throw new Error('Unauthorized');
   }
 
+  const respContentType = resp.headers.get('content-type') || '';
+
   if (responseType === 'blob') {
     if (!resp.ok) {
       const txt = await resp.text();
-      throw new Error(txt || `HTTP ${resp.status}`);
+      const err = new Error(formatHttpError(resp.status, respContentType, txt, null));
+      err.status = resp.status;
+      throw err;
     }
     return resp.blob();
   }
@@ -313,7 +367,7 @@ export async function api(method, path, body = undefined, { rawBody = false, con
     data = text;
   }
   if (!resp.ok) {
-    const msg = (data && (data.error || data.message)) || (typeof data === 'string' && data) || `HTTP ${resp.status}`;
+    const msg = formatHttpError(resp.status, respContentType, text, data);
     const err = new Error(msg);
     err.status = resp.status;
     throw err;
@@ -330,8 +384,11 @@ function applyTheme(theme) {
 function toggleTheme() {
   const next = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
   applyTheme(next);
+  const label = next === 'dark' ? 'Giao diện sáng' : 'Giao diện tối';
   const btn = document.getElementById('theme-toggle-btn');
-  if (btn) btn.textContent = next === 'dark' ? 'Giao diện sáng' : 'Giao diện tối';
+  if (btn) btn.textContent = label;
+  const mobBtn = document.getElementById('sidebar-theme-btn');
+  if (mobBtn) mobBtn.textContent = label;
 }
 
 const NAV_GROUPS = [
@@ -388,6 +445,9 @@ function updateShellChrome() {
   if (bc) bc.textContent = ROUTE_TITLES[state.route] || 'Tổng quan hệ thống';
   const sidebar = document.getElementById('fp-sidebar');
   if (sidebar) sidebar.classList.toggle('open', state.mobileNavOpen);
+  const backdrop = document.getElementById('fp-sidebar-backdrop');
+  if (backdrop) backdrop.classList.toggle('open', state.mobileNavOpen);
+  document.body.classList.toggle('nav-open', state.mobileNavOpen);
 }
 
 export async function renderCurrentView(forceCaps = false) {
@@ -505,9 +565,14 @@ function renderShell() {
             <span class="brand-mark">FP</span>
             <span>FerrousPanel</span>
           </a>
+          <button type="button" class="sidebar-close-btn" id="mobile-nav-close" aria-label="Đóng menu">×</button>
         </div>
         <nav class="nav-scroll" aria-label="Điều hướng chính">${navHtml}</nav>
         <div class="sidebar-foot">
+          <div class="sidebar-mobile-actions">
+            <a class="btn btn-sm" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
+            <button type="button" class="btn btn-sm" id="sidebar-theme-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
+          </div>
           <div class="sidebar-foot-meta">
             <span>${esc(state.user?.username || 'admin')}</span>
             <span>·</span>
@@ -520,6 +585,7 @@ function renderShell() {
           </div>
         </div>
       </aside>
+      <div class="sidebar-backdrop" id="fp-sidebar-backdrop"></div>
       <div class="workspace">
         <header class="topbar">
           <div class="topbar-left">
@@ -531,9 +597,9 @@ function renderShell() {
             </div>
           </div>
           <div class="topbar-actions">
-            <a class="btn btn-sm" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
+            <a class="btn btn-sm hide-mobile" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
             <button type="button" class="btn btn-sm" id="topbar-refresh-btn">Làm mới</button>
-            <button type="button" class="btn btn-sm" id="theme-toggle-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
+            <button type="button" class="btn btn-sm hide-mobile" id="theme-toggle-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
             <button type="button" class="btn btn-sm btn-danger" id="topbar-logout-btn">Đăng xuất</button>
           </div>
         </header>
@@ -553,8 +619,17 @@ function renderShell() {
     state.mobileNavOpen = !state.mobileNavOpen;
     updateShellChrome();
   });
+  document.getElementById('mobile-nav-close')?.addEventListener('click', () => {
+    state.mobileNavOpen = false;
+    updateShellChrome();
+  });
+  document.getElementById('fp-sidebar-backdrop')?.addEventListener('click', () => {
+    state.mobileNavOpen = false;
+    updateShellChrome();
+  });
   document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => renderCurrentView(true));
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleTheme);
+  document.getElementById('sidebar-theme-btn')?.addEventListener('click', toggleTheme);
   document.getElementById('topbar-logout-btn')?.addEventListener('click', handleLogout);
 
   renderCurrentView(true);
@@ -661,6 +736,18 @@ window.addEventListener('hashchange', () => {
     updateShellChrome();
     renderCurrentView();
   }
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  if (state.mobileNavOpen) {
+    state.mobileNavOpen = false;
+    updateShellChrome();
+  }
+  const modalRoot = document.getElementById('modal-root');
+  if (modalRoot && modalRoot.innerHTML) closeModal();
+  const drawerRoot = document.getElementById('drawer-root');
+  if (drawerRoot && drawerRoot.innerHTML) closeJobDrawer();
 });
 
 bootstrap();

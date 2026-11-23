@@ -5,10 +5,11 @@ use actix_web::http::{header, StatusCode};
 use actix_web::test::{init_service, try_call_service, TestRequest};
 use actix_web::App;
 use anyhow::{bail, Context, Result};
+use ferrous_panel::api::contract::OneClickDeployRequest;
 use ferrous_panel::config::{Config, RuntimeMode};
 use ferrous_panel::configure_app;
 use ferrous_panel::error::PanelError;
-use ferrous_panel::modules::extended::{mail, ssh_admin};
+use ferrous_panel::modules::extended::{mail, oneclick, ssh_admin};
 use ferrous_panel::modules::{databases, files, security, ModuleStore};
 use ferrous_panel::state::AppState;
 use ferrous_panel::system::cmd::{validate_no_flag_injection, AllowedBinary, CmdOutput};
@@ -16,16 +17,18 @@ use ferrous_panel::system::paths::SafePath;
 use ferrous_panel::system::validate::{Domain, Port};
 use ferrous_panel::webserver::ferrousx::{FerrousxEngine, FerrousxPaths};
 use ferrous_panel::webserver::nginx::{NginxEngine, NginxPaths};
+use ferrous_panel::webserver::ssl::{SslManager, SslPaths};
 use ferrous_panel::webserver::{
     BoxFuture, CommandExecutor, SafeFilename, SiteDirectoryAuth, SiteHotlinkProtection, SiteMode,
-    SiteRedirectRule, SiteSpec, UpstreamHost, UpstreamTarget, WebServerEngine, WwwRootPath,
+    SiteRedirectRule, SiteSpec, UpstreamHost, UpstreamTarget, WebServerEngine, WebServerManager,
+    WebServerStore, WwwRootPath,
 };
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::future::Future;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -877,6 +880,176 @@ fn mock_executor_verifies_atomic_rollback_when_command_n_fails() -> Result<()> {
         ensure_eq(&calls.len(), &1usize, "only nginx -t should run before rollback")?;
         ensure_eq(&calls[0].binary, &"nginx", "first command binary")?;
         ensure_eq(&calls[0].args, &vec!["-t".to_string()], "first command args")?;
+
+        Ok(())
+    })
+}
+
+// ============================================================================
+// One-Click WordPress Payload Contract, 400 Strict Validation & 409 Pre-Flight
+// ============================================================================
+
+#[test]
+fn oneclick_request_accepts_create_db_and_legacy_auto_create_db_alias() -> Result<()> {
+    let modern: OneClickDeployRequest = serde_json::from_value(json!({
+        "templateId": "tpl-wordpress-fpm",
+        "domain": "wordpress.example.com",
+        "siteTitle": "My Blog",
+        "adminEmail": "admin@example.com",
+        "createDb": true,
+        "enableSsl": true
+    }))?;
+    ensure_eq(&modern.template_id, &"tpl-wordpress-fpm".to_string(), "template_id")?;
+    ensure_eq(&modern.domain, &"wordpress.example.com".to_string(), "domain")?;
+    ensure_eq(&modern.create_db, &true, "createDb true")?;
+    ensure_eq(&modern.enable_ssl, &true, "enableSsl true")?;
+    ensure_eq(&modern.site_title, &Some("My Blog".to_string()), "siteTitle")?;
+    ensure_eq(&modern.admin_email, &Some("admin@example.com".to_string()), "adminEmail")?;
+
+    let legacy: OneClickDeployRequest = serde_json::from_value(json!({
+        "templateId": "tpl-wordpress-fpm",
+        "domain": "blog.example.com",
+        "autoCreateDb": true
+    }))?;
+    ensure_eq(&legacy.create_db, &true, "autoCreateDb alias must map to create_db")?;
+    ensure_eq(&legacy.enable_ssl, &false, "enableSsl defaults to false")?;
+
+    let minimal: OneClickDeployRequest = serde_json::from_value(json!({
+        "templateId": "tpl-tailwind-static",
+        "domain": "static.example.com"
+    }))?;
+    ensure_eq(&minimal.create_db, &false, "create_db defaults to false")?;
+
+    Ok(())
+}
+
+#[test]
+fn oneclick_wordpress_preflight_returns_409_and_api_rejects_invalid_json_with_400() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("oneclick-wp")?;
+        let wwwroot = ws.path().join("wwwroot");
+        std::fs::create_dir_all(&wwwroot)?;
+        let cfg = Config::for_test(ws.path().to_path_buf(), wwwroot.clone());
+
+        let (state, secret) = AppState::init(cfg.clone())?;
+        let password = secret
+            .ok_or_else(|| anyhow::anyhow!("missing first-run secret"))?
+            .expose()
+            .to_string();
+
+        let shared = actix_web::web::Data::new(state);
+        let app = init_service(App::new().configure(|c| configure_app(c, shared.clone()))).await;
+
+        let login = try_call_service(
+            &app,
+            TestRequest::post()
+                .uri("/api/auth/login")
+                .set_json(json!({ "username": "admin_ferrous", "password": password }))
+                .to_request(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("login error: {e}"))?;
+        let login_json: Value = serde_json::from_slice(&to_bytes(login.into_body()).await?)?;
+        let token = login_json["token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("missing token"))?;
+
+        // Invalid/incomplete JSON MUST return 400 Bad Request, never silently deploy demo.ferrous-panel.local
+        let bad_req = try_call_service(
+            &app,
+            TestRequest::post()
+                .uri("/api/oneclick/deploy")
+                .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+                .set_json(json!({}))
+                .to_request(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("POST /api/oneclick/deploy invalid json error: {e}"))?;
+        ensure_eq(
+            &bad_req.status(),
+            &StatusCode::BAD_REQUEST,
+            "POST /api/oneclick/deploy empty JSON must return 400",
+        )?;
+
+        // Unknown templateId MUST return 404 Not Found
+        let unknown_tpl = try_call_service(
+            &app,
+            TestRequest::post()
+                .uri("/api/oneclick/deploy")
+                .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+                .set_json(json!({
+                    "templateId": "tpl-does-not-exist",
+                    "domain": "missing.example.com",
+                    "createDb": false
+                }))
+                .to_request(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("POST /api/oneclick/deploy unknown template error: {e}"))?;
+        ensure_eq(
+            &unknown_tpl.status(),
+            &StatusCode::NOT_FOUND,
+            "unknown 1-Click template must return 404",
+        )?;
+
+        // Production WordPress preflight without PHP-FPM/MariaDB MUST return 409 Conflict (never 502)
+        let mut prod_cfg = cfg;
+        prod_cfg.mode = RuntimeMode::Production;
+        let mod_store = ModuleStore::open(&ws.path().join("oneclick-prod.db"))?;
+        let acme = SafePath::under_root(ws.path(), "acme-oc")?;
+        let le_live = SafePath::under_root(ws.path(), "le-oc")?;
+        let empty_exec: Arc<dyn CommandExecutor> =
+            Arc::new(MockExecutor::new(&[], |_, _, _, _| fail_out(1, "missing")));
+        let ws_mgr = WebServerManager::with_components(
+            WebServerStore::open(&ws.path().join("oneclick-ws.db"))?,
+            NginxEngine::new(
+                NginxPaths::for_dirs(
+                    ws.path().join("oc-nginx/avail"),
+                    ws.path().join("oc-nginx/enabled"),
+                    acme.clone(),
+                    le_live.clone(),
+                )?,
+                Arc::clone(&empty_exec),
+            ),
+            FerrousxEngine::new(
+                FerrousxPaths::for_dirs(
+                    ws.path().join("oc-fx/ferrousx.toml"),
+                    ws.path().join("oc-fx/sites"),
+                    acme.clone(),
+                    le_live.clone(),
+                )?,
+                Arc::clone(&empty_exec),
+            ),
+            SslManager::new(
+                SslPaths::for_dirs(
+                    acme,
+                    le_live,
+                    PathBuf::from("/usr/local/bin/ferrous-panel"),
+                    ws.path().join("oc-systemd/renew.service"),
+                    ws.path().join("oc-systemd/renew.timer"),
+                ),
+                Arc::clone(&empty_exec),
+            ),
+            empty_exec,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80),
+        );
+
+        let wp_req = OneClickDeployRequest {
+            template_id: "tpl-wordpress-fpm".to_string(),
+            domain: "wordpress.example.com".to_string(),
+            site_title: Some("WP Test".to_string()),
+            admin_email: None,
+            create_db: true,
+            enable_ssl: false,
+            web_server_engine: None,
+        };
+        let wp_res = oneclick::deploy_oneclick(wp_req, &mod_store, &prod_cfg, &ws_mgr).await;
+        ensure(
+            matches!(wp_res, Err(PanelError::Conflict(_))),
+            &format!(
+                "WordPress 1-Click missing prerequisites must return 409 Conflict, got: {wp_res:?}"
+            ),
+        )?;
 
         Ok(())
     })

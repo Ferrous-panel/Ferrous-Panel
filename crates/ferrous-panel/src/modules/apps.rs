@@ -1196,42 +1196,55 @@ pub async fn deploy_app(
             .executor()
             .is_binary_available(AllowedBinary::Git)
     {
+        let explicit_branch = !req.git_branch.trim().is_empty();
         let (safe_repo, branch) = validate_git_repo_and_branch(trimmed_repo, &req.git_branch)?;
         let dir_empty = std::fs::read_dir(safe_working.as_path())
             .map(|mut rd| rd.next().is_none())
             .unwrap_or(false);
         if dir_empty {
             let dest_str = safe_working.as_path().display().to_string();
-            let clone_out = webserver
-                .executor()
-                .run(
-                    AllowedBinary::Git,
-                    &[
-                        "clone",
-                        "--depth",
-                        "1",
-                        "--branch",
-                        branch,
-                        "--",
-                        safe_repo,
-                        &dest_str,
-                    ],
-                    BUILD_TIMEOUT,
-                )
-                .await?;
+            let clone_out = if explicit_branch {
+                webserver
+                    .executor()
+                    .run(
+                        AllowedBinary::Git,
+                        &[
+                            "clone",
+                            "--depth",
+                            "1",
+                            "--branch",
+                            branch,
+                            "--",
+                            safe_repo,
+                            &dest_str,
+                        ],
+                        BUILD_TIMEOUT,
+                    )
+                    .await?
+            } else {
+                webserver
+                    .executor()
+                    .run(
+                        AllowedBinary::Git,
+                        &["clone", "--depth", "1", "--", safe_repo, &dest_str],
+                        BUILD_TIMEOUT,
+                    )
+                    .await?
+            };
             if clone_out.success {
                 initial_logs.push(format!(
                     "[{}] Cloned repository {} (branch '{}')",
                     Utc::now().to_rfc3339(),
                     safe_repo,
-                    branch
+                    if explicit_branch { branch } else { "default" }
                 ));
             } else {
                 return Err(PanelError::CommandFailed {
                     binary: "git",
                     exit_code: clone_out.exit_code,
                     stderr: format!(
-                        "git clone failed for '{safe_repo}' (branch '{branch}'): {}",
+                        "git clone failed for '{safe_repo}' (branch '{}'): {}",
+                        if explicit_branch { branch } else { "default" },
                         clone_out.stderr.trim()
                     ),
                 });
@@ -1257,7 +1270,121 @@ pub async fn deploy_app(
     let effective_doc_root =
         resolve_effective_doc_root(safe_working.as_path(), &req.run_sub_dir, req.framework);
 
-    // Build and apply web server site configuration FIRST (validates nginx -t / ferrousx-bin --check-config).
+    if is_php_runtime(req.framework) && config.is_production() {
+        let sock = PhpFpmVersion::V83.socket_path();
+        if !Path::new(sock).exists() {
+            if webserver
+                .executor()
+                .is_binary_available(AllowedBinary::PhpFpm83)
+                && webserver
+                    .executor()
+                    .is_binary_available(AllowedBinary::Systemctl)
+            {
+                let _ = webserver
+                    .executor()
+                    .run(
+                        AllowedBinary::Systemctl,
+                        &["enable", "--now", "php8.3-fpm.service"],
+                        SYSTEMD_TIMEOUT,
+                    )
+                    .await;
+            }
+            if !Path::new(sock).exists() {
+                return Err(PanelError::Conflict(format!(
+                    "PHP 8.3-FPM chưa được cài đặt hoặc chưa chạy (thiếu socket '{sock}'). Hãy vào mục 'PHP-FPM & Phần mềm' để cài đặt và khởi chạy PHP 8.3 trước khi triển khai website PHP."
+                )));
+            }
+        }
+    }
+
+    // For reverse-proxy runtimes, start systemd unit BEFORE applying the web server vhost
+    // so post-reload HTTP health verification hits a live upstream instead of returning 502.
+    let mut systemd_unit = String::new();
+    let mut effective_exec_command = req.exec_command.clone();
+    if !is_static_runtime(req.framework) && !is_php_runtime(req.framework) {
+        let (normalized_exec, rewrite_note) =
+            normalize_zero_node_exec_command(req.framework, &req.exec_command, safe_working.as_path());
+        if let Some(note) = rewrite_note {
+            initial_logs.push(format!("[{}] {note}", Utc::now().to_rfc3339()));
+        }
+        let exec_start = validate_exec_start(&normalized_exec)?;
+        effective_exec_command = exec_start.clone();
+        ensure_default_js_envs(req.framework, req.internal_port, &mut clean_envs);
+        let unit = unit_name_for_domain(&domain)?;
+        let unit_file = unit.unit_file_name();
+        let unit_path = config.systemd_unit_dir.join(&unit_file);
+        let unit_content = render_systemd_unit(
+            &app_name,
+            &domain,
+            safe_working.as_path(),
+            &exec_start,
+            req.memory_limit_mb,
+            &clean_envs,
+        );
+        atomic_write_file(&unit_path, unit_content.as_bytes(), 0o644)?;
+
+        let executor = webserver.executor();
+        let reload_res = executor
+            .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
+            .await;
+        let reload_out = match reload_res {
+            Ok(out) => out,
+            Err(err) => {
+                let _ = std::fs::remove_file(&unit_path);
+                return Err(err);
+            }
+        };
+        if !reload_out.success {
+            let _ = std::fs::remove_file(&unit_path);
+            return Err(PanelError::CommandFailed {
+                binary: "systemctl",
+                exit_code: reload_out.exit_code,
+                stderr: reload_out.stderr,
+            });
+        }
+
+        let start_out = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["enable", "--now", &unit_file],
+                SYSTEMD_TIMEOUT,
+            )
+            .await;
+        match start_out {
+            Ok(out) if out.success => {
+                if config.is_production() {
+                    if let Err(err) = verify_unit_active_or_journal(executor.as_ref(), &unit_file).await {
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["disable", "--now", &unit_file], SYSTEMD_TIMEOUT)
+                            .await;
+                        let _ = std::fs::remove_file(&unit_path);
+                        let _ = executor
+                            .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
+                            .await;
+                        return Err(err);
+                    }
+                }
+            }
+            Ok(out) => {
+                let _ = std::fs::remove_file(&unit_path);
+                let _ = executor
+                    .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
+                    .await;
+                return Err(PanelError::CommandFailed {
+                    binary: "systemctl",
+                    exit_code: out.exit_code,
+                    stderr: out.stderr,
+                });
+            }
+            Err(err) => {
+                let _ = std::fs::remove_file(&unit_path);
+                return Err(err);
+            }
+        }
+        systemd_unit = unit_file;
+    }
+
+    // Build and apply web server site configuration (validates nginx -t / ferrousx-bin --check-config).
     // Never write ssl_certificate directives before the real PEM files exist on disk (prevents `nginx -t` failure).
     let cert_ready = webserver
         .ssl
@@ -1278,9 +1405,31 @@ pub async fn deploy_app(
     spec.http3_quic = req.http3_quic;
     spec.websocket_enabled = req.websocket_enabled;
     spec.rate_limit_rps = req.rate_limit_rps;
-    let mut rendered = webserver
+    let mut rendered = match webserver
         .upsert_and_apply_site(&spec, preferred_engine)
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            if !systemd_unit.is_empty() {
+                let unit_path = config.systemd_unit_dir.join(&systemd_unit);
+                let _ = webserver
+                    .executor()
+                    .run(
+                        AllowedBinary::Systemctl,
+                        &["disable", "--now", &systemd_unit],
+                        SYSTEMD_TIMEOUT,
+                    )
+                    .await;
+                let _ = std::fs::remove_file(&unit_path);
+                let _ = webserver
+                    .executor()
+                    .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
+                    .await;
+            }
+            return Err(err);
+        }
+    };
     if req.ssl_enabled && !effective_ssl {
         if webserver
             .executor()
@@ -1325,94 +1474,6 @@ pub async fn deploy_app(
                 Utc::now().to_rfc3339()
             ));
         }
-    }
-
-    let mut systemd_unit = String::new();
-    let mut effective_exec_command = req.exec_command.clone();
-    if !is_static_runtime(req.framework) && !is_php_runtime(req.framework) {
-        let (normalized_exec, rewrite_note) =
-            normalize_zero_node_exec_command(req.framework, &req.exec_command, safe_working.as_path());
-        if let Some(note) = rewrite_note {
-            initial_logs.push(format!("[{}] {note}", Utc::now().to_rfc3339()));
-        }
-        let exec_start = validate_exec_start(&normalized_exec)?;
-        effective_exec_command = exec_start.clone();
-        ensure_default_js_envs(req.framework, req.internal_port, &mut clean_envs);
-        let unit = unit_name_for_domain(&domain)?;
-        let unit_file = unit.unit_file_name();
-        let unit_path = config.systemd_unit_dir.join(&unit_file);
-        let unit_content = render_systemd_unit(
-            &app_name,
-            &domain,
-            safe_working.as_path(),
-            &exec_start,
-            req.memory_limit_mb,
-            &clean_envs,
-        );
-        atomic_write_file(&unit_path, unit_content.as_bytes(), 0o644)?;
-
-        let executor = webserver.executor();
-        let reload_res = executor
-            .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
-            .await;
-        if let Err(err) = reload_res {
-            let _ = std::fs::remove_file(&unit_path);
-            let _ = webserver.remove_and_apply_site(&domain).await;
-            return Err(err);
-        }
-        let reload_out = reload_res?;
-        if !reload_out.success {
-            let _ = std::fs::remove_file(&unit_path);
-            let _ = webserver.remove_and_apply_site(&domain).await;
-            return Err(PanelError::CommandFailed {
-                binary: "systemctl",
-                exit_code: reload_out.exit_code,
-                stderr: reload_out.stderr,
-            });
-        }
-
-        let start_out = executor
-            .run(
-                AllowedBinary::Systemctl,
-                &["enable", "--now", &unit_file],
-                SYSTEMD_TIMEOUT,
-            )
-            .await;
-        match start_out {
-            Ok(out) if out.success => {
-                if config.is_production() {
-                    if let Err(err) = verify_unit_active_or_journal(executor.as_ref(), &unit_file).await {
-                        let _ = executor
-                            .run(AllowedBinary::Systemctl, &["disable", "--now", &unit_file], SYSTEMD_TIMEOUT)
-                            .await;
-                        let _ = std::fs::remove_file(&unit_path);
-                        let _ = executor
-                            .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
-                            .await;
-                        let _ = webserver.remove_and_apply_site(&domain).await;
-                        return Err(err);
-                    }
-                }
-            }
-            Ok(out) => {
-                let _ = std::fs::remove_file(&unit_path);
-                let _ = executor
-                    .run(AllowedBinary::Systemctl, &["daemon-reload"], SYSTEMD_TIMEOUT)
-                    .await;
-                let _ = webserver.remove_and_apply_site(&domain).await;
-                return Err(PanelError::CommandFailed {
-                    binary: "systemctl",
-                    exit_code: out.exit_code,
-                    stderr: out.stderr,
-                });
-            }
-            Err(err) => {
-                let _ = std::fs::remove_file(&unit_path);
-                let _ = webserver.remove_and_apply_site(&domain).await;
-                return Err(err);
-            }
-        }
-        systemd_unit = unit_file;
     }
 
     let id = format!("app-{}", domain.as_str().replace('.', "-"));

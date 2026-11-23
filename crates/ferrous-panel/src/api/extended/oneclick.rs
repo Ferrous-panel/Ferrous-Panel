@@ -16,19 +16,12 @@ pub async fn get_oneclick_templates(state: web::Data<AppState>) -> Result<HttpRe
 pub async fn post_oneclick_deploy(
     req: HttpRequest,
     state: web::Data<AppState>,
-    payload: Option<web::Json<OneClickDeployRequest>>,
+    payload: web::Json<OneClickDeployRequest>,
 ) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
-    let body = payload
-        .map(web::Json::into_inner)
-        .unwrap_or(OneClickDeployRequest {
-            template_id: "tpl-actix-microservice".to_string(),
-            domain: "demo.ferrous-panel.local".to_string(),
-            create_db: false,
-            web_server_engine: None,
-        });
+    let body = payload.into_inner();
     let created = ext::deploy_oneclick(
         body,
         &state.modules,
