@@ -14,6 +14,7 @@ pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllowedBinary {
     Systemctl,
+    SystemdRun,
     Nginx,
     Ferrousx,
     FerrousxCtl,
@@ -80,6 +81,7 @@ impl AllowedBinary {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Systemctl => "systemctl",
+            Self::SystemdRun => "systemd-run",
             Self::Nginx => "nginx",
             Self::Ferrousx => "ferrousx-bin",
             Self::FerrousxCtl => "ferrousx-ctl",
@@ -152,6 +154,7 @@ impl AllowedBinary {
             .unwrap_or(trimmed);
         match file_name {
             "systemctl" => Some(Self::Systemctl),
+            "systemd-run" => Some(Self::SystemdRun),
             "nginx" => Some(Self::Nginx),
             "ferrousx-bin" | "ferrousx" => Some(Self::Ferrousx),
             "ferrousx-ctl" | "fx" => Some(Self::FerrousxCtl),
@@ -219,6 +222,7 @@ impl AllowedBinary {
     const fn candidate_paths(self) -> &'static [&'static str] {
         match self {
             Self::Systemctl => &["/usr/bin/systemctl", "/bin/systemctl"],
+            Self::SystemdRun => &["/usr/bin/systemd-run", "/bin/systemd-run"],
             Self::Nginx => &["/usr/sbin/nginx", "/usr/bin/nginx"],
             Self::Ferrousx => &["/usr/local/bin/ferrousx-bin", "/usr/local/bin/ferrousx"],
             Self::FerrousxCtl => &["/usr/local/bin/ferrousx-ctl", "/usr/local/bin/fx"],

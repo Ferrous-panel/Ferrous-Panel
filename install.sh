@@ -558,17 +558,25 @@ else
   fi
 
   echo -e "${GREEN}[+] Pure-Rust Native Panel UI (crates/ferrous-panel/src/ui) compiles directly into the binary — zero Node.js/npm/Vite required.${NC}"
-  if [ -f "${BUILD_WORKSPACE}/crates/ferrous-panel/src/ui/mod.rs" ]; then
-    touch "${BUILD_WORKSPACE}/crates/ferrous-panel/src/ui/mod.rs"
-  fi
 
-  echo -e "${CYAN}[*] Running: cargo build --release -p ferrous-panel ...${NC}"
+  INSTALL_PROFILE_ARGS="--release"
+  INSTALL_TARGET_DIR="release"
+  if grep -q '^\[profile\.vps\]' "${BUILD_WORKSPACE}/Cargo.toml" 2>/dev/null; then
+    INSTALL_PROFILE_ARGS="--profile vps"
+    INSTALL_TARGET_DIR="vps"
+  fi
+  echo -e "${CYAN}[*] Running: cargo build ${INSTALL_PROFILE_ARGS} -p ferrous-panel ...${NC}"
   (
     cd "${BUILD_WORKSPACE}"
-    cargo build --release -p ferrous-panel
+    cargo build ${INSTALL_PROFILE_ARGS} -p ferrous-panel
   )
 
-  install -m 0755 "${BUILD_WORKSPACE}/target/release/ferrous-panel" "${BIN_PANEL}"
+  install -m 0755 "${BUILD_WORKSPACE}/target/${INSTALL_TARGET_DIR}/ferrous-panel" "${BIN_PANEL}.new"
+  mv -f "${BIN_PANEL}.new" "${BIN_PANEL}"
+  if [ -d "${BUILD_WORKSPACE}/.git" ]; then
+    mkdir -p "${DATA_DIR}"
+    git -C "${BUILD_WORKSPACE}" rev-parse HEAD > "${DATA_DIR}/.installed-commit" 2>/dev/null || true
+  fi
 
   if [ "$WEB_ENGINE" = "ferrousx" ]; then
     echo -e "${CYAN}[*] Syncing latest FerrousX from GitHub (${FERROUSX_REPO}@${FERROUSX_BRANCH}) into ${FERROUSX_SRC_DIR}...${NC}"

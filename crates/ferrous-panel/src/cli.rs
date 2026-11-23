@@ -142,6 +142,25 @@ pub enum FpCommand {
         #[arg(short = 'n', long, default_value_t = 40)]
         lines: u16,
     },
+    /// (17) Fast update or rollback FerrousPanel (incremental VPS profile, prebuilt release, or rollback)
+    #[command(alias = "17", alias = "upgrade")]
+    Update {
+        /// Check for available updates without modifying binaries or restarting
+        #[arg(long, default_value_t = false)]
+        check: bool,
+        /// Download SHA-256 verified prebuilt GitHub Release binary (~3s, skips Cargo build)
+        #[arg(long, default_value_t = false)]
+        prebuilt: bool,
+        /// Force rebuild/reinstall even if already on the latest commit
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Also sync & update FerrousX engine
+        #[arg(long, default_value_t = false)]
+        ferrousx: bool,
+        /// Rollback immediately to the previously installed working binary
+        #[arg(long, default_value_t = false)]
+        rollback: bool,
+    },
     /// (19) View or switch active frontend web server engine (nginx | ferrousx)
     #[command(alias = "19")]
     Webserver {
@@ -1211,6 +1230,105 @@ pub async fn run_fp_command(
                 }
             }
         }
+        FpCommand::Update {
+            check,
+            prebuilt,
+            force,
+            ferrousx,
+            rollback,
+        } => {
+            let src_dir = PathBuf::from(
+                std::env::var("FERROUS_SRC_DIR")
+                    .unwrap_or_else(|_| "/usr/local/src/ferrous-panel".to_string()),
+            );
+            let branch = std::env::var("FERROUS_BRANCH").unwrap_or_else(|_| "main".to_string());
+            let repo = std::env::var("FERROUS_REPO")
+                .unwrap_or_else(|_| "Ferrous-panel/Ferrous-Panel".to_string());
+
+            // Refresh update.sh from upstream before executing so updater fixes take effect immediately.
+            let local_script = src_dir.join("update.sh");
+            let temp_script = PathBuf::from(format!("/tmp/ferrous-update-{}.sh", std::process::id()));
+            let script_to_run = if !rollback && src_dir.join(".git").is_dir() && AllowedBinary::Git.is_available() {
+                let src_str = src_dir.display().to_string();
+                let _ = cmd::run(
+                    AllowedBinary::Git,
+                    &["-C", &src_str, "fetch", "--depth", "1", "--quiet", "origin", &branch],
+                    Duration::from_secs(30),
+                )
+                .await;
+                let refspec = format!("origin/{branch}:update.sh");
+                match cmd::run(
+                    AllowedBinary::Git,
+                    &["-C", &src_str, "show", &refspec],
+                    Duration::from_secs(15),
+                )
+                .await
+                {
+                    Ok(out) if out.success && out.stdout.starts_with("#!/") => {
+                        if std::fs::write(&temp_script, &out.stdout).is_ok() {
+                            temp_script.clone()
+                        } else {
+                            local_script.clone()
+                        }
+                    }
+                    _ => local_script.clone(),
+                }
+            } else if local_script.is_file() {
+                local_script.clone()
+            } else if AllowedBinary::Curl.is_available() {
+                let url = format!("https://raw.githubusercontent.com/{repo}/{branch}/update.sh");
+                let dst_str = temp_script.display().to_string();
+                let dl = cmd::run(
+                    AllowedBinary::Curl,
+                    &["-fsSL", "--connect-timeout", "10", "-o", &dst_str, &url],
+                    Duration::from_secs(30),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to download update.sh: {e}"))?;
+                if !dl.success {
+                    bail!("failed to fetch update.sh from {url}: {}", dl.stderr.trim());
+                }
+                temp_script.clone()
+            } else {
+                bail!("update.sh not found at {} and curl is unavailable", local_script.display());
+            };
+
+            let mut args: Vec<String> = Vec::new();
+            if check {
+                args.push("--check".to_string());
+            }
+            if prebuilt {
+                args.push("--prebuilt".to_string());
+            }
+            if force {
+                args.push("--force".to_string());
+            }
+            if ferrousx {
+                args.push("--ferrousx".to_string());
+            }
+            if rollback {
+                args.push("--rollback".to_string());
+            }
+
+            let status = tokio::process::Command::new("/usr/bin/env")
+                .arg("bash")
+                .arg(&script_to_run)
+                .args(&args)
+                .status()
+                .await
+                .with_context(|| format!("failed to execute {}", script_to_run.display()))?;
+
+            if temp_script.exists() {
+                let _ = std::fs::remove_file(&temp_script);
+            }
+
+            if !status.success() {
+                bail!(
+                    "update.sh exited with status {}",
+                    status.code().map(|c| c.to_string()).unwrap_or_else(|| "signal".to_string())
+                );
+            }
+        }
         FpCommand::Init { engine } => {
             let parsed_engine =
                 EngineKind::parse(&engine).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1262,8 +1380,9 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
     println!("  (5)  Change Admin password       (14) Show panel status & endpoints");
     println!("  (6)  Change Admin username       (15) Check system service health");
     println!("  (7)  Change panel listening port (16) Show panel systemd logs");
-    println!("  (8)  Change security entrance    (19) Show web engine status");
-    println!("  (9)  Clear security entrance '/' (0)  Exit");
+    println!("  (8)  Change security entrance    (17) Update FerrousPanel (fast)");
+    println!("  (9)  Clear security entrance '/' (19) Show web engine status");
+    println!("  (0)  Exit");
     println!("======================================================================");
 
     let choice = prompt_line("Select action [0-19]: ")?;
@@ -1285,6 +1404,13 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
         "14" => FpCommand::Status,
         "15" => FpCommand::Check,
         "16" => FpCommand::Logs { lines: 40 },
+        "17" => FpCommand::Update {
+            check: false,
+            prebuilt: false,
+            force: false,
+            ferrousx: false,
+            rollback: false,
+        },
         "19" => FpCommand::Webserver { engine: None },
         other => {
             return Err(anyhow::anyhow!(

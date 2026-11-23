@@ -377,3 +377,265 @@ pub async fn get_ferrousx_sync_status(
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PanelUpdateStatus {
+    pub current_version: String,
+    pub installed_commit: Option<String>,
+    pub remote_commit: Option<String>,
+    pub branch: String,
+    pub repo: String,
+    pub update_available: bool,
+    pub updater_running: bool,
+    pub updater_unit: String,
+    pub can_trigger_from_ui: bool,
+    pub rollback_available: bool,
+    pub rollback_commit: Option<String>,
+    pub build_profile: String,
+    pub recent_logs: Vec<String>,
+    pub cli_command: String,
+}
+
+fn read_short_file_line(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+pub async fn get_panel_update_status(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    refresh_remote: bool,
+) -> Result<PanelUpdateStatus, PanelError> {
+    let prod = is_production_vps(config);
+    let src_dir = PathBuf::from(
+        std::env::var("FERROUS_SRC_DIR")
+            .unwrap_or_else(|_| "/usr/local/src/ferrous-panel".to_string()),
+    );
+    let branch = std::env::var("FERROUS_BRANCH").unwrap_or_else(|_| "main".to_string());
+    let repo = std::env::var("FERROUS_REPO")
+        .unwrap_or_else(|_| "Ferrous-panel/Ferrous-Panel".to_string());
+
+    let mut installed_commit = read_short_file_line(&config.data_dir.join(".installed-commit"));
+    if installed_commit.is_none()
+        && src_dir.join(".git").is_dir()
+        && executor.is_binary_available(AllowedBinary::Git)
+    {
+        let src_str = src_dir.display().to_string();
+        if let Ok(out) = executor
+            .run(AllowedBinary::Git, &["-C", &src_str, "rev-parse", "HEAD"], CMD_TIMEOUT)
+            .await
+        {
+            if out.success {
+                let s = out.stdout.trim();
+                if !s.is_empty() {
+                    installed_commit = Some(s.to_string());
+                }
+            }
+        }
+    }
+
+    let rollback_dir = config.data_dir.join("rollback");
+    let rollback_bin = rollback_dir.join("ferrous-panel.prev");
+    let rollback_available = rollback_bin.is_file();
+    let rollback_commit = read_short_file_line(&rollback_dir.join("ferrous-panel.prev.commit"));
+
+    let mut remote_commit: Option<String> = None;
+    if refresh_remote && executor.is_binary_available(AllowedBinary::Git) {
+        let remote_url = format!("https://github.com/{repo}.git");
+        let ref_query = format!("refs/heads/{branch}");
+        if let Ok(out) = executor
+            .run(
+                AllowedBinary::Git,
+                &["ls-remote", "--heads", &remote_url, &ref_query],
+                Duration::from_secs(5),
+            )
+            .await
+        {
+            if out.success {
+                if let Some(sha) = out.stdout.split_whitespace().next() {
+                    if sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                        remote_commit = Some(sha.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let updater_unit = "ferrous-panel-updater.service".to_string();
+    let updater_running = if prod && executor.is_binary_available(AllowedBinary::Systemctl) {
+        executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["is-active", &updater_unit],
+                CMD_TIMEOUT,
+            )
+            .await
+            .map(|o| {
+                let s = o.stdout.trim();
+                s == "active" || s == "activating"
+            })
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let recent_logs = if prod && executor.is_binary_available(AllowedBinary::Journalctl) {
+        executor
+            .run(
+                AllowedBinary::Journalctl,
+                &["-u", &updater_unit, "-n", "25", "--no-pager", "-o", "cat"],
+                CMD_TIMEOUT,
+            )
+            .await
+            .ok()
+            .filter(|o| o.success)
+            .map(|o| {
+                o.stdout
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let update_available = match (&installed_commit, &remote_commit) {
+        (Some(local), Some(remote)) => local != remote,
+        _ => false,
+    };
+
+    let can_trigger_from_ui = prod && executor.is_binary_available(AllowedBinary::SystemdRun);
+
+    Ok(PanelUpdateStatus {
+        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        installed_commit,
+        remote_commit,
+        branch,
+        repo,
+        update_available,
+        updater_running,
+        updater_unit,
+        can_trigger_from_ui,
+        rollback_available,
+        rollback_commit,
+        build_profile: "vps (thin-LTO incremental)".to_string(),
+        recent_logs,
+        cli_command: "sudo fp update".to_string(),
+    })
+}
+
+pub async fn trigger_panel_update(
+    config: &Config,
+    executor: &dyn CommandExecutor,
+    mode: &str,
+    include_ferrousx: bool,
+    force: bool,
+) -> Result<String, PanelError> {
+    let normalized = mode.trim().to_ascii_lowercase();
+    if !matches!(normalized.as_str(), "source" | "prebuilt" | "rollback") {
+        return Err(PanelError::Validation(
+            "mode phải là 'source', 'prebuilt', hoặc 'rollback'".to_string(),
+        ));
+    }
+
+    if !is_production_vps(config) {
+        return Err(PanelError::Conflict(
+            "Tự động cập nhật chỉ khả dụng trên VPS production (hãy chạy `sudo fp update` trên máy chủ)."
+                .to_string(),
+        ));
+    }
+    if !executor.is_binary_available(AllowedBinary::SystemdRun) {
+        return Err(PanelError::Conflict(
+            "Thiếu binary `systemd-run` để chạy tiến trình cập nhật độc lập; hãy chạy `sudo fp update` qua SSH."
+                .to_string(),
+        ));
+    }
+
+    if normalized == "rollback" {
+        let rollback_bin = config.data_dir.join("rollback").join("ferrous-panel.prev");
+        if !rollback_bin.is_file() {
+            return Err(PanelError::Conflict(
+                "Chưa có bản sao lưu binary trước đó tại /var/lib/ferrous-panel/rollback/ferrous-panel.prev để rollback."
+                    .to_string(),
+            ));
+        }
+    }
+
+    if executor.is_binary_available(AllowedBinary::Systemctl) {
+        let busy = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["is-active", "ferrous-panel-updater.service"],
+                CMD_TIMEOUT,
+            )
+            .await
+            .map(|o| {
+                let s = o.stdout.trim();
+                s == "active" || s == "activating"
+            })
+            .unwrap_or(false);
+        if busy {
+            return Err(PanelError::Conflict(
+                "Một tiến trình cập nhật FerrousPanel đang chạy (ferrous-panel-updater.service). Vui lòng chờ hoàn tất."
+                    .to_string(),
+            ));
+        }
+    }
+
+    let mut args: Vec<&str> = vec![
+        "--unit=ferrous-panel-updater",
+        "--collect",
+        "--property=Type=oneshot",
+        "--property=StandardOutput=journal",
+        "--property=StandardError=journal",
+        "--",
+        "/usr/local/bin/ferrous-panel",
+        "fp",
+        "update",
+    ];
+    match normalized.as_str() {
+        "prebuilt" => args.push("--prebuilt"),
+        "rollback" => args.push("--rollback"),
+        _ => {}
+    }
+    if include_ferrousx && normalized != "rollback" {
+        args.push("--ferrousx");
+    }
+    if force && normalized != "rollback" {
+        args.push("--force");
+    }
+
+    let out = executor
+        .run(AllowedBinary::SystemdRun, &args, CMD_TIMEOUT)
+        .await?;
+    if !out.success {
+        return Err(PanelError::CommandFailed {
+            binary: "systemd-run",
+            exit_code: out.exit_code,
+            stderr: if out.stderr.trim().is_empty() {
+                out.stdout
+            } else {
+                out.stderr
+            },
+        });
+    }
+
+    let label = match normalized.as_str() {
+        "prebuilt" => "cập nhật nhanh (Prebuilt SHA-256)",
+        "rollback" => "rollback về phiên bản ổn định trước đó",
+        _ => "cập nhật tối ưu từ mã nguồn (profile vps)",
+    };
+    Ok(format!(
+        "Đã khởi chạy tiến trình {label} trong unit độc lập ferrous-panel-updater.service."
+    ))
+}
+
+

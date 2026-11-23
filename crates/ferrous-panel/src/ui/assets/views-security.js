@@ -600,24 +600,64 @@ export async function renderSsh(container) {
 // 12. BACKGROUND JOBS & PANEL ADMIN SETTINGS
 // ============================================================================
 export async function renderSettingsJobs(container) {
-  const [admin, jobs] = await Promise.all([
+  const [admin, jobs, upd] = await Promise.all([
     api('GET', '/api/panel-admin'),
     api('GET', '/api/jobs?limit=30').catch(() => []),
+    api('GET', '/api/system/update-status').catch(() => null),
   ]);
 
   const origPort = Number(admin.panelPort || 8443);
+  const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : '—');
+  const updRunning = Boolean(upd?.updaterRunning);
+  const canUiUpd = Boolean(upd?.canTriggerFromUi);
+  const hasRollback = Boolean(upd?.rollbackAvailable);
+  const updDisabled = canUiUpd && !updRunning ? '' : 'disabled';
+  const rbDisabled = canUiUpd && hasRollback && !updRunning ? '' : 'disabled';
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Tác vụ nền & Cài đặt FerrousPanel</h1>
-        <p class="page-desc">Theo dõi hàng đợi tác vụ nền thuần Rust và thay đổi cổng panel (mặc định 8443; cổng 80/443 dành riêng cho website).</p>
+        <p class="page-desc">Cập nhật nhanh (profile vps / prebuilt SHA-256), rollback tức thì, tác vụ nền thuần Rust và cấu hình cổng panel.</p>
       </div>
       <div class="row">
         <button type="button" class="btn" id="set-restart-panel-btn">Khởi động lại FerrousPanel</button>
         <button type="button" class="btn btn-danger" id="set-logout-btn">Đăng xuất ngay</button>
       </div>
     </div>
+
+    <section class="surface">
+      <div class="surface-head">
+        <div>
+          <h2 class="surface-title">Cập nhật & Rollback FerrousPanel</h2>
+          <div class="meta-line">
+            <span>Phiên bản: <strong class="mono">v${esc(upd?.currentVersion || '2.5.0')}</strong></span>
+            <span>·</span>
+            <span>Commit hiện tại: <strong class="mono" id="upd-local-sha">${esc(shortSha(upd?.installedCommit))}</strong></span>
+            <span>·</span>
+            <span>Bản mới nhất (${esc(upd?.branch || 'main')}): <strong class="mono" id="upd-remote-sha">${esc(shortSha(upd?.remoteCommit))}</strong></span>
+            <span>·</span>
+            <span id="upd-badge" class="${updRunning ? 'st-warn' : upd?.updateAvailable ? 'st-warn' : 'st-ok'}">
+              ${updRunning ? 'Đang cập nhật…' : upd?.updateAvailable ? 'Có bản cập nhật mới' : 'Đã đồng bộ'}
+            </span>
+          </div>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-sm" id="upd-check-btn">Kiểm tra bản mới</button>
+          <button type="button" class="btn btn-sm btn-primary" id="upd-source-btn" ${updDisabled}>Cập nhật (Tối ưu VPS)</button>
+          <button type="button" class="btn btn-sm" id="upd-prebuilt-btn" ${updDisabled}>Cập nhật nhanh (Prebuilt)</button>
+          <button type="button" class="btn btn-sm btn-danger" id="upd-rollback-btn" ${rbDisabled} title="${hasRollback ? `Khôi phục bản trước (${shortSha(upd?.rollbackCommit)})` : 'Chưa có bản sao lưu trước đó'}">Rollback bản trước</button>
+        </div>
+      </div>
+      <div class="meta-line" style="margin-bottom:8px">
+        <span>Build profile: <strong class="mono">${esc(upd?.buildProfile || 'vps (thin-LTO incremental)')}</strong></span>
+        <span>·</span>
+        <span>Lệnh CLI nhanh: <code class="mono">${esc(upd?.cliCommand || 'sudo fp update')}</code> · <code class="mono">sudo fp update --prebuilt</code> · <code class="mono">sudo fp update --rollback</code></span>
+      </div>
+      ${upd?.recentLogs?.length ? `
+        <pre class="code-box mono" id="upd-log-box" style="max-height:180px;overflow:auto;margin-top:8px">${esc(upd.recentLogs.join('\n'))}</pre>
+      ` : '<pre class="code-box mono" id="upd-log-box" style="max-height:180px;overflow:auto;margin-top:8px;display:none"></pre>'}
+    </section>
 
     <section class="surface">
       <div class="surface-head"><h2 class="surface-title">Cấu hình bảng điều khiển & Tài khoản quản trị</h2></div>
@@ -676,6 +716,106 @@ export async function renderSettingsJobs(container) {
       </div>
     </section>
   `;
+
+  const applyUpdateStatusDom = (st) => {
+    if (!st) return;
+    const localEl = document.getElementById('upd-local-sha');
+    const remoteEl = document.getElementById('upd-remote-sha');
+    const badgeEl = document.getElementById('upd-badge');
+    const logBox = document.getElementById('upd-log-box');
+    if (localEl) localEl.textContent = shortSha(st.installedCommit);
+    if (remoteEl) remoteEl.textContent = shortSha(st.remoteCommit);
+    if (badgeEl) {
+      badgeEl.className = st.updaterRunning ? 'st-warn' : st.updateAvailable ? 'st-warn' : 'st-ok';
+      badgeEl.textContent = st.updaterRunning
+        ? 'Đang cập nhật…'
+        : st.updateAvailable
+          ? 'Có bản cập nhật mới'
+          : 'Đã mới nhất';
+    }
+    if (logBox && Array.isArray(st.recentLogs) && st.recentLogs.length) {
+      logBox.style.display = 'block';
+      logBox.textContent = st.recentLogs.join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+  };
+
+  const pollUpdaterUntilReady = async () => {
+    const deadline = Date.now() + 180000;
+    let sawRestart = false;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        const st = await api('GET', '/api/system/update-status');
+        applyUpdateStatusDom(st);
+        if (!st.updaterRunning) {
+          if (sawRestart) {
+            toast('Cập nhật FerrousPanel hoàn tất — đang tải lại giao diện mới.');
+            window.location.reload();
+            return;
+          }
+          toast('Tiến trình cập nhật đã hoàn tất.');
+          await renderSettingsJobs(container);
+          return;
+        }
+      } catch (_) {
+        sawRestart = true;
+      }
+    }
+    toast('Tiến trình cập nhật đang chạy nền; kiểm tra log bằng `journalctl -u ferrous-panel-updater -f`.', 'warn');
+  };
+
+  const checkUpdBtn = document.getElementById('upd-check-btn');
+  checkUpdBtn?.addEventListener('click', () => withBusy(checkUpdBtn, async () => {
+    try {
+      const st = await api('GET', '/api/system/update-status?refresh=1');
+      applyUpdateStatusDom(st);
+      if (st.updateAvailable) {
+        toast(`Có bản cập nhật mới: ${shortSha(st.remoteCommit)} (hiện tại ${shortSha(st.installedCommit)}).`);
+      } else if (st.remoteCommit) {
+        toast(`FerrousPanel đang ở bản mới nhất (${shortSha(st.remoteCommit)}).`);
+      } else {
+        toast('Không truy vấn được commit từ GitHub (kiểm tra kết nối mạng VPS).', 'err');
+      }
+    } catch (err) { toast(err.message, 'err'); }
+  }));
+
+  const launchUpdate = (btn, mode, title, desc, danger = false) => {
+    btn?.addEventListener('click', () => {
+      confirmAction(
+        title,
+        desc,
+        () => withBusy(btn, async () => {
+          try {
+            const res = await api('POST', '/api/system/update', { mode });
+            toast(res.message || 'Đã khởi chạy tiến trình cập nhật.');
+            await pollUpdaterUntilReady();
+          } catch (err) { toast(err.message, 'err'); }
+        }),
+        danger,
+      );
+    });
+  };
+
+  launchUpdate(
+    document.getElementById('upd-source-btn'),
+    'source',
+    'Cập nhật FerrousPanel từ mã nguồn (Profile VPS)',
+    'Chạy cập nhật tối ưu (bỏ qua nếu đã mới nhất, biên dịch thin-LTO tăng dần, tự động rollback nếu /api/health lỗi).',
+  );
+  launchUpdate(
+    document.getElementById('upd-prebuilt-btn'),
+    'prebuilt',
+    'Cập nhật nhanh bằng bản Prebuilt (SHA-256)',
+    'Tải binary dựng sẵn từ GitHub Release (xác thực bắt buộc SHA-256) và thay thế nguyên tử trong vài giây.',
+  );
+  launchUpdate(
+    document.getElementById('upd-rollback-btn'),
+    'rollback',
+    'Rollback về phiên bản ổn định trước đó',
+    'Khôi phục ngay binary đã sao lưu trước lần cập nhật gần nhất và khởi động lại ferrous-panel.service.',
+    true,
+  );
 
   document.getElementById('set-logout-btn')?.addEventListener('click', handleLogout);
   const restartPanelBtn = document.getElementById('set-restart-panel-btn');

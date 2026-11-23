@@ -1171,3 +1171,156 @@ fn ferrousx_restart_rolls_back_to_nginx_when_ferrousx_fails_to_stay_active() -> 
         Ok(())
     })
 }
+
+// ============================================================================
+// Speed & Update Optimization: UI ETag 304/Cache-Busting, fp update, Detached Updater
+// ============================================================================
+
+#[test]
+fn native_ui_assets_return_304_on_matching_etag_and_immutable_on_versioned_query() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("ui-etag")?;
+        let wwwroot = ws.path().join("wwwroot");
+        std::fs::create_dir_all(&wwwroot)?;
+        let cfg = Config::for_test(ws.path().to_path_buf(), wwwroot);
+        let (state, _) = AppState::init(cfg)?;
+        let shared = actix_web::web::Data::new(state);
+        let app = init_service(App::new().configure(|c| configure_app(c, shared.clone()))).await;
+
+        let tag = ferrous_panel::ui::ui_bundle_version_tag();
+        let css_uri = format!("/ui/panel.css?v={tag}");
+
+        let first = try_call_service(&app, TestRequest::get().uri(&css_uri).to_request())
+            .await
+            .map_err(|e| anyhow::anyhow!("GET panel.css error: {e}"))?;
+        ensure_eq(&first.status(), &StatusCode::OK, "first GET /ui/panel.css status")?;
+        let cc = first
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ensure(
+            cc.contains("immutable"),
+            &format!("versioned UI asset must return immutable Cache-Control, got: {cc}"),
+        )?;
+        let etag = first
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| anyhow::anyhow!("missing ETag header on /ui/panel.css"))?
+            .to_string();
+
+        let second = try_call_service(
+            &app,
+            TestRequest::get()
+                .uri(&css_uri)
+                .insert_header((header::IF_NONE_MATCH, etag.as_str()))
+                .to_request(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("conditional GET panel.css error: {e}"))?;
+        ensure_eq(
+            &second.status(),
+            &StatusCode::NOT_MODIFIED,
+            "matching If-None-Match must return 304 Not Modified",
+        )?;
+
+        Ok(())
+    })
+}
+
+#[test]
+fn fp_cli_update_subcommand_and_detached_updater_enforce_guards() -> Result<()> {
+    use clap::Parser;
+    use ferrous_panel::cli::{FpCli, FpCommand};
+    use ferrous_panel::modules::extended::diagnostics::{
+        get_panel_update_status, trigger_panel_update,
+    };
+
+    let parsed_prebuilt = FpCli::try_parse_from(["fp", "update", "--prebuilt", "--force"])?;
+    ensure(
+        matches!(
+            parsed_prebuilt.command,
+            Some(FpCommand::Update {
+                check: false,
+                prebuilt: true,
+                force: true,
+                ferrousx: false,
+                rollback: false,
+            })
+        ),
+        "fp update --prebuilt --force must parse cleanly",
+    )?;
+    let parsed_alias = FpCli::try_parse_from(["fp", "17", "--rollback"])?;
+    ensure(
+        matches!(
+            parsed_alias.command,
+            Some(FpCommand::Update { rollback: true, .. })
+        ),
+        "fp 17 --rollback must parse cleanly",
+    )?;
+
+    run_async(async {
+        let ws = TempWorkspace::new("panel-update")?;
+        let wwwroot = ws.path().join("wwwroot");
+        std::fs::create_dir_all(&wwwroot)?;
+        let mut cfg = Config::for_test(ws.path().to_path_buf(), wwwroot);
+        cfg.mode = RuntimeMode::Production;
+
+        std::fs::write(ws.path().join(".installed-commit"), "1111111111111111111111111111111111111111\n")?;
+
+        let exec = MockExecutor::new(
+            &[
+                AllowedBinary::Git,
+                AllowedBinary::Systemctl,
+                AllowedBinary::SystemdRun,
+                AllowedBinary::Journalctl,
+            ],
+            |bin, args, _, _| match bin {
+                AllowedBinary::Git if args.first().map(String::as_str) == Some("ls-remote") => {
+                    ok_out("2222222222222222222222222222222222222222\trefs/heads/main\n")
+                }
+                AllowedBinary::Systemctl => ok_out("inactive\n"),
+                AllowedBinary::SystemdRun => ok_out("Running as unit: ferrous-panel-updater.service\n"),
+                AllowedBinary::Journalctl => ok_out(""),
+                _ => ok_out(""),
+            },
+        );
+
+        let status = get_panel_update_status(&cfg, &exec, true).await?;
+        ensure(status.update_available, "update_available must be true when remote != local commit")?;
+        ensure(status.can_trigger_from_ui, "can_trigger_from_ui must be true when systemd-run is available")?;
+        ensure(!status.rollback_available, "rollback_available must be false without .prev backup")?;
+
+        // Invalid mode => 400 Validation
+        let bad_mode = trigger_panel_update(&cfg, &exec, "evil;rm -rf /", false, false).await;
+        ensure(
+            matches!(bad_mode, Err(PanelError::Validation(_))),
+            "invalid update mode must return Validation error",
+        )?;
+
+        // Rollback without backup => 409 Conflict
+        let no_rb = trigger_panel_update(&cfg, &exec, "rollback", false, false).await;
+        ensure(
+            matches!(no_rb, Err(PanelError::Conflict(_))),
+            "rollback without ferrous-panel.prev backup must return Conflict",
+        )?;
+
+        // Prebuilt trigger invokes detached systemd-run unit
+        let started = trigger_panel_update(&cfg, &exec, "prebuilt", false, true).await?;
+        ensure(started.contains("ferrous-panel-updater.service"), "must report detached updater unit")?;
+        let calls = exec.recorded();
+        ensure(
+            calls.iter().any(|c| {
+                c.binary == "systemd-run"
+                    && c.args.iter().any(|a| a == "--unit=ferrous-panel-updater")
+                    && c.args.iter().any(|a| a == "--prebuilt")
+                    && c.args.iter().any(|a| a == "--force")
+            }),
+            "trigger_panel_update must invoke detached systemd-run with allowlisted flags",
+        )?;
+
+        Ok(())
+    })
+}
+

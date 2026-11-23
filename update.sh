@@ -41,6 +41,10 @@ FERROUSX_SRC_DIR="/usr/local/src/ferrousx"
 BIN_PANEL="/usr/local/bin/ferrous-panel"
 BIN_FERROUSX="/usr/local/bin/ferrousx-bin"
 BIN_FERROUSX_CTL="/usr/local/bin/ferrousx-ctl"
+DATA_DIR="/var/lib/ferrous-panel"
+ROLLBACK_DIR="${DATA_DIR}/rollback"
+PANEL_COMMIT_FILE="${DATA_DIR}/.installed-commit"
+FERROUSX_COMMIT_FILE="${DATA_DIR}/.installed-ferrousx-commit"
 FERROUSX_ENV_FILE="/etc/ferrousx/ferrousx.env"
 FERROUSX_ADMIN_TOKEN_FILE="/etc/ferrousx/admin.token"
 
@@ -49,15 +53,28 @@ FORCE_FERROUSX=false
 FORCE_NGINX=false
 SYNC_JS_TOOLCHAIN=true
 INSECURE_SKIP_VERIFY=false
+CHECK_ONLY=false
+PREBUILT_ONLY=false
+SOURCE_ONLY=false
+FULL_LTO=false
+FORCE_REBUILD=false
+DO_ROLLBACK=false
 
 usage() {
   cat <<'EOF_HELP'
-FerrousPanel, Nginx & FerrousX 1-Command Updater
+FerrousPanel, Nginx & FerrousX 1-Command Updater (Fast Incremental + Atomic Rollback)
 
 Usage:
+  sudo fp update [OPTIONS]
   sudo bash update.sh [OPTIONS] [RELEASE_TAG]
 
 Options:
+  --check                      Check local vs upstream commit/version without modifying anything (~1s)
+  --prebuilt                   Fast update (~3s): download SHA-256 verified GitHub Release binary
+  --source                     Compile from source using fast incremental [profile.vps] (thin-LTO)
+  --full-lto                   Use full fat-LTO [profile.release] instead of fast [profile.vps]
+  --force                      Force rebuild/reinstall even if already on the latest commit
+  --rollback                   Instantly restore previous working binary & verify /api/health
   --nginx                      Ensure Nginx is installed, synced, validated (nginx -t) & reloaded
   --nginx-only                 Validate & sync ONLY Nginx (do not rebuild ferrous-panel)
   --ferrousx                   Sync & rebuild latest FerrousX from github.com/Ferrous-panel/FerrousX
@@ -68,13 +85,39 @@ Options:
   --engine <nginx|ferrousx>    Target web engine to update & validate
   --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
-  --version <TAG|latest>       GitHub Release tag for prebuilt fallback (default: latest)
+  --version <TAG|latest>       GitHub Release tag for prebuilt binary (default: latest)
   -h, --help                   Show this help message
 EOF_HELP
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --check)
+      CHECK_ONLY=true
+      SYNC_JS_TOOLCHAIN=false
+      shift
+      ;;
+    --prebuilt|--prebuilt-binary)
+      PREBUILT_ONLY=true
+      shift
+      ;;
+    --source)
+      SOURCE_ONLY=true
+      shift
+      ;;
+    --full-lto)
+      FULL_LTO=true
+      shift
+      ;;
+    --force)
+      FORCE_REBUILD=true
+      shift
+      ;;
+    --rollback)
+      DO_ROLLBACK=true
+      SYNC_JS_TOOLCHAIN=false
+      shift
+      ;;
     --nginx|--with-nginx)
       FORCE_NGINX=true
       shift
@@ -144,6 +187,19 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Prevent overlapping concurrent updates from corrupting git/cargo/binaries
+if [ "$CHECK_ONLY" = false ] && command -v flock >/dev/null 2>&1; then
+  mkdir -p /run
+  exec 9>/run/ferrous-update.lock
+  if ! flock -n 9; then
+    echo -e "${RED}[ERROR] Another FerrousPanel update is already running (/run/ferrous-update.lock).${NC}" >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "${DATA_DIR}" "${ROLLBACK_DIR}"
+UPDATE_START_TS="$(date +%s)"
 
 export RUSTUP_HOME="${RUSTUP_HOME:-/root/.rustup}"
 export CARGO_HOME="${CARGO_HOME:-/root/.cargo}"
@@ -247,7 +303,160 @@ ensure_rust_toolchain() {
   fi
 }
 
-ensure_rust_toolchain
+ensure_swap_for_build() {
+  local ram_mb swap_mb
+  ram_mb="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+  swap_mb="$(awk '/SwapTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+  if [ "${ram_mb}" -gt 0 ] && [ "${ram_mb}" -lt 2500 ] && [ "${swap_mb}" -lt 512 ] && [ ! -f /swapfile ]; then
+    echo -e "${YELLOW}[!] Low RAM detected (${ram_mb} MB, no swap) — provisioning 2 GB /swapfile to prevent OOM during build...${NC}"
+    if fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none; then
+      chmod 600 /swapfile
+      mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile >/dev/null 2>&1 || rm -f /swapfile
+    fi
+  fi
+}
+
+configure_fast_cargo_env() {
+  local ram_mb cpus jobs
+  ram_mb="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 2048)"
+  cpus="$(nproc 2>/dev/null || echo 2)"
+  if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+    if [ "${ram_mb}" -lt 1500 ]; then
+      jobs=1
+    elif [ "${ram_mb}" -lt 2800 ]; then
+      jobs=$(( cpus > 2 ? 2 : cpus ))
+    else
+      jobs="${cpus}"
+    fi
+    export CARGO_BUILD_JOBS="${jobs}"
+  fi
+  export CARGO_INCREMENTAL=1
+  if [ -z "${RUSTFLAGS:-}" ]; then
+    if command -v mold >/dev/null 2>&1; then
+      export RUSTFLAGS="-C link-arg=-fuse-ld=mold"
+    elif command -v lld >/dev/null 2>&1 || command -v ld.lld >/dev/null 2>&1; then
+      export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+    fi
+  fi
+}
+
+atomic_install_binary() {
+  local src_bin="$1"
+  local dst_bin="$2"
+  local backup_name="$3"
+  local label="$4"
+
+  if [ ! -x "${src_bin}" ]; then
+    echo -e "${RED}[ERROR] Candidate binary for ${label} is missing or not executable: ${src_bin}${NC}" >&2
+    exit 1
+  fi
+  if ! "${src_bin}" --version >/dev/null 2>&1; then
+    echo -e "${RED}[ERROR] Pre-flight check failed: candidate ${label} binary could not execute '--version'. Aborting without touching running service.${NC}" >&2
+    exit 1
+  fi
+
+  if [ -x "${dst_bin}" ]; then
+    cp -f "${dst_bin}" "${ROLLBACK_DIR}/${backup_name}"
+    chmod 0755 "${ROLLBACK_DIR}/${backup_name}"
+  fi
+  install -m 0755 "${src_bin}" "${dst_bin}.new"
+  mv -f "${dst_bin}.new" "${dst_bin}"
+}
+
+probe_panel_health() {
+  local host="$1"
+  local port="$2"
+  local attempts="${3:-25}"
+  for _ in $(seq 1 "${attempts}"); do
+    if curl -fsS --max-time 2 "http://${host}:${port}/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.2
+  done
+  return 1
+}
+
+read_panel_env_key() {
+  local key="$1"
+  local default_val="${2:-}"
+  if [ -f /etc/ferrous-panel/panel.env ]; then
+    local val
+    val="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+    if [ -n "${val}" ]; then
+      echo "${val}"
+      return 0
+    fi
+  fi
+  echo "${default_val}"
+}
+
+perform_panel_rollback() {
+  local prev_bin="${ROLLBACK_DIR}/ferrous-panel.prev"
+  if [ ! -x "${prev_bin}" ]; then
+    echo -e "${RED}[ERROR] No rollback binary found at ${prev_bin}.${NC}" >&2
+    exit 1
+  fi
+  echo -e "${YELLOW}[!] Rolling back ${BIN_PANEL} to previous working binary...${NC}"
+  install -m 0755 "${prev_bin}" "${BIN_PANEL}.new"
+  mv -f "${BIN_PANEL}.new" "${BIN_PANEL}"
+  if [ -f "${ROLLBACK_DIR}/ferrous-panel.prev.commit" ]; then
+    cp -f "${ROLLBACK_DIR}/ferrous-panel.prev.commit" "${PANEL_COMMIT_FILE}"
+  fi
+  systemctl restart ferrous-panel.service 2>/dev/null || true
+
+  local port bind host
+  port="$(read_panel_env_key FERROUS_PORT 8443)"
+  bind="$(read_panel_env_key FERROUS_BIND 127.0.0.1)"
+  host="${bind}"
+  if [ "${host}" = "0.0.0.0" ] || [ "${host}" = "::" ]; then
+    host="127.0.0.1"
+  fi
+  if probe_panel_health "${host}" "${port}" 25; then
+    echo -e "${GREEN}[+] Rollback succeeded: ferrous-panel.service is healthy on ${bind}:${port} ($(${BIN_PANEL} --version 2>/dev/null || echo restored)).${NC}"
+  else
+    echo -e "${RED}[ERROR] Rollback binary restarted but /api/health did not respond on ${host}:${port}. Check 'sudo fp logs'.${NC}" >&2
+    exit 1
+  fi
+}
+
+if [ "$DO_ROLLBACK" = true ]; then
+  perform_panel_rollback
+  if [ -x "${ROLLBACK_DIR}/ferrousx-bin.prev" ] && [ -x "${BIN_FERROUSX}" ]; then
+    echo -e "${YELLOW}[!] Also restoring previous ferrousx-bin backup...${NC}"
+    install -m 0755 "${ROLLBACK_DIR}/ferrousx-bin.prev" "${BIN_FERROUSX}.new"
+    mv -f "${BIN_FERROUSX}.new" "${BIN_FERROUSX}"
+    if systemctl is-active --quiet ferrousx.service 2>/dev/null; then
+      systemctl restart ferrousx.service || true
+    fi
+  fi
+  exit 0
+fi
+
+if [ "$CHECK_ONLY" = true ]; then
+  LOCAL_VER="$("${BIN_PANEL}" --version 2>/dev/null || echo 'not-installed')"
+  LOCAL_SHA="$(cat "${PANEL_COMMIT_FILE}" 2>/dev/null || git -C "${SRC_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')"
+  REMOTE_SHA=""
+  if command -v git >/dev/null 2>&1; then
+    REMOTE_SHA="$(git ls-remote --heads "https://github.com/${REPO_SLUG}.git" "refs/heads/${GIT_BRANCH}" 2>/dev/null | awk '{print $1}' | head -n 1 || true)"
+  fi
+  echo -e "${CYAN}FerrousPanel Update Check (${REPO_SLUG}@${GIT_BRANCH})${NC}"
+  echo -e "  Installed Version : ${BOLD}${LOCAL_VER}${NC}"
+  echo -e "  Installed Commit  : ${BOLD}${LOCAL_SHA:0:12}${NC}"
+  echo -e "  Upstream Commit   : ${BOLD}${REMOTE_SHA:0:12}${NC}"
+  echo -e "  Rollback Backup   : $([ -x "${ROLLBACK_DIR}/ferrous-panel.prev" ] && echo 'available' || echo 'none')"
+  if [ -n "${REMOTE_SHA}" ] && [ "${LOCAL_SHA}" = "${REMOTE_SHA}" ]; then
+    echo -e "${GREEN}[+] Already up to date.${NC}"
+  elif [ -n "${REMOTE_SHA}" ]; then
+    echo -e "${YELLOW}[!] New update available! Run 'sudo fp update' (fast incremental) or 'sudo fp update --prebuilt'.${NC}"
+  else
+    echo -e "${YELLOW}[!] Could not reach GitHub to check remote commit.${NC}"
+  fi
+  exit 0
+fi
+
+if [ "$PREBUILT_ONLY" = false ]; then
+  ensure_rust_toolchain
+fi
 
 detect_local_ip() {
   local ip=""
@@ -259,9 +468,15 @@ detect_local_ip() {
 }
 
 detect_public_ip() {
+  local cached=""
+  cached="$(read_panel_env_key FERROUS_PUBLIC_IP "")"
+  if [[ "$cached" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] && [ "$cached" != "127.0.0.1" ]; then
+    echo "$cached"
+    return 0
+  fi
   local ip=""
   for url in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipv4.icanhazip.com"; do
-    ip="$(curl -4 -fsS --connect-timeout 2 --max-time 3 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
+    ip="$(curl -4 -fsS --connect-timeout 2 --max-time 2 "$url" 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
       echo "$ip"
       return 0
@@ -392,20 +607,33 @@ EOF_FX_SVC
 }
 
 update_ferrousx_from_github() {
-  echo -e "${BLUE}${BOLD}[*] Updating FerrousX from GitHub (${FERROUSX_REPO}@${FERROUSX_BRANCH})...${NC}"
+  echo -e "${BLUE}${BOLD}[*] Checking FerrousX updates (${FERROUSX_REPO}@${FERROUSX_BRANCH})...${NC}"
   local fx_installed=false
+  local fx_skipped=false
+  local fx_target_sha=""
 
-  if command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+  if [ "$PREBUILT_ONLY" = false ] && command -v cargo >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
     mkdir -p "$(dirname "${FERROUSX_SRC_DIR}")"
     if (
       if [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
-        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 origin "${FERROUSX_BRANCH}" &&
-        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}"
+        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 --quiet origin "${FERROUSX_BRANCH}"
       else
         rm -rf "${FERROUSX_SRC_DIR}" &&
         git clone --depth 1 --branch "${FERROUSX_BRANCH}" "https://github.com/${FERROUSX_REPO}.git" "${FERROUSX_SRC_DIR}"
       fi
     ); then
+      fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
+      local fx_prev_sha
+      fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
+      if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_target_sha}" ] && [ "${fx_prev_sha}" = "${fx_target_sha}" ]; then
+        echo -e "${GREEN}[+] FerrousX already up to date (${fx_target_sha:0:8}) — skipped rebuild.${NC}"
+        fx_installed=true
+        fx_skipped=true
+      else
+        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}" >/dev/null 2>&1 || true
+      fi
+    fi
+    if [ "$fx_skipped" = false ] && [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
       local fx_commit
       fx_commit="$(git -C "${FERROUSX_SRC_DIR}" rev-parse --short HEAD 2>/dev/null || echo 'main')"
       if [ -f "${FERROUSX_SRC_DIR}/Cargo.toml" ] && grep -q '^rust-version = ' "${FERROUSX_SRC_DIR}/Cargo.toml"; then
@@ -534,13 +762,17 @@ update_ferrousx_from_github() {
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
+      ensure_swap_for_build
+      configure_fast_cargo_env
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
-          install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+          atomic_install_binary "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}" "ferrousx-bin.prev" "ferrousx-bin"
           fx_installed=true
+          [ -n "${fx_target_sha}" ] && printf '%s\n' "${fx_target_sha}" > "${FERROUSX_COMMIT_FILE}"
         fi
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" ]; then
-          install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}"
+          install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}.new"
+          mv -f "${BIN_FERROUSX_CTL}.new" "${BIN_FERROUSX_CTL}"
           ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
         fi
         echo -e "${GREEN}[+] Installed upstream FerrousX (${fx_commit}) -> ${BIN_FERROUSX}${NC}"
@@ -548,42 +780,70 @@ update_ferrousx_from_github() {
     fi
   fi
 
-  if [ "$fx_installed" = false ] && [ -d "${SRC_DIR}/crates/ferrousx" ] && command -v cargo >/dev/null 2>&1; then
+  if [ "$fx_installed" = false ] && [ "$PREBUILT_ONLY" = false ] && [ -d "${SRC_DIR}/crates/ferrousx" ] && command -v cargo >/dev/null 2>&1; then
     echo -e "${YELLOW}[!] Upstream FerrousX build unavailable; building embedded workspace crate (-p ferrousx)...${NC}"
+    ensure_swap_for_build
+    configure_fast_cargo_env
+    local fx_prof_args="--release"
+    local fx_target_sub="release"
+    if [ "$FULL_LTO" = false ] && grep -q '^\[profile\.vps\]' "${SRC_DIR}/Cargo.toml" 2>/dev/null; then
+      fx_prof_args="--profile vps"
+      fx_target_sub="vps"
+    fi
     (
       cd "${SRC_DIR}"
-      cargo build --release -p ferrousx
+      cargo build ${fx_prof_args} -p ferrousx
     )
-    if [ -x "${SRC_DIR}/target/release/ferrousx-bin" ]; then
-      install -m 0755 "${SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}"
+    if [ -x "${SRC_DIR}/target/${fx_target_sub}/ferrousx-bin" ]; then
+      atomic_install_binary "${SRC_DIR}/target/${fx_target_sub}/ferrousx-bin" "${BIN_FERROUSX}" "ferrousx-bin.prev" "ferrousx-bin"
       fx_installed=true
     fi
-    if [ -x "${SRC_DIR}/target/release/ferrousx-ctl" ]; then
-      install -m 0755 "${SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}"
+    if [ -x "${SRC_DIR}/target/${fx_target_sub}/ferrousx-ctl" ]; then
+      install -m 0755 "${SRC_DIR}/target/${fx_target_sub}/ferrousx-ctl" "${BIN_FERROUSX_CTL}.new"
+      mv -f "${BIN_FERROUSX_CTL}.new" "${BIN_FERROUSX_CTL}"
       ln -sf "${BIN_FERROUSX_CTL}" /usr/local/bin/fx
     fi
   fi
 
   if [ "$fx_installed" = false ]; then
     echo -e "${CYAN}[*] Downloading prebuilt ferrousx-bin release (${RELEASE_TAG}, ${ARCH})...${NC}"
-    download_verified_release_asset "ferrousx-bin-linux-${ARCH}" "${BIN_FERROUSX}"
+    local tmp_fx="${TMP_DIR}/ferrousx-bin-candidate"
+    download_verified_release_asset "ferrousx-bin-linux-${ARCH}" "${tmp_fx}"
+    atomic_install_binary "${tmp_fx}" "${BIN_FERROUSX}" "ferrousx-bin.prev" "ferrousx-bin"
   fi
 
   ensure_ferrousx_runtime_files
 
   if [ -x "${BIN_FERROUSX}" ]; then
-    "${BIN_FERROUSX}" --check-config --config /etc/ferrousx/ferrousx.toml || true
+    if ! "${BIN_FERROUSX}" --check-config --config /etc/ferrousx/ferrousx.toml; then
+      echo -e "${RED}[ERROR] Updated ferrousx-bin failed --check-config; rolling back to previous ferrousx-bin.${NC}" >&2
+      if [ -x "${ROLLBACK_DIR}/ferrousx-bin.prev" ]; then
+        install -m 0755 "${ROLLBACK_DIR}/ferrousx-bin.prev" "${BIN_FERROUSX}.new"
+        mv -f "${BIN_FERROUSX}.new" "${BIN_FERROUSX}"
+      fi
+      return 1
+    fi
   fi
 
-  if systemctl is-active --quiet ferrousx.service 2>/dev/null; then
+  if [ "$fx_skipped" = false ] && systemctl is-active --quiet ferrousx.service 2>/dev/null; then
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "Status: active"; then
       ufw allow 443/udp comment 'HTTP3-QUIC' >/dev/null 2>&1 || true
     fi
-    systemctl restart ferrousx.service
+    if ! systemctl restart ferrousx.service || ! systemctl is-active --quiet ferrousx.service; then
+      echo -e "${RED}[ERROR] ferrousx.service failed to restart with new binary; rolling back...${NC}" >&2
+      if [ -x "${ROLLBACK_DIR}/ferrousx-bin.prev" ]; then
+        install -m 0755 "${ROLLBACK_DIR}/ferrousx-bin.prev" "${BIN_FERROUSX}.new"
+        mv -f "${BIN_FERROUSX}.new" "${BIN_FERROUSX}"
+        systemctl restart ferrousx.service || true
+      fi
+      return 1
+    fi
     if [ -x "${BIN_FERROUSX_CTL}" ]; then
       "${BIN_FERROUSX_CTL}" sync >/dev/null 2>&1 || true
     fi
     echo -e "${GREEN}[+] Restarted ferrousx.service with updated binary & ferrousx.env.${NC}"
+  elif [ "$fx_skipped" = true ]; then
+    :
   else
     echo -e "${CYAN}[*] ferrousx.service is installed (inactive — switch active engine via 'sudo fp webserver ferrousx').${NC}"
   fi
@@ -648,31 +908,76 @@ install_zero_node_js_css_toolchain() {
 
 ensure_native_rust_ui() {
   local work_dir="$1"
+  local ui_changed="${2:-true}"
   if [ ! -f "${work_dir}/crates/ferrous-panel/src/ui/mod.rs" ]; then
     echo -e "${RED}[ERROR] Pure-Rust Native UI module (${work_dir}/crates/ferrous-panel/src/ui/mod.rs) is missing.${NC}" >&2
     return 1
   fi
   echo -e "${GREEN}[+] Pure-Rust Native Panel UI compiles straight into ferrous-panel binary (zero Node.js / npm / Vite).${NC}"
-  touch "${work_dir}/crates/ferrous-panel/src/ui/mod.rs"
+  if [ "${ui_changed}" = true ]; then
+    touch "${work_dir}/crates/ferrous-panel/src/ui/mod.rs"
+  fi
 }
 
+PANEL_BINARY_UPDATED=false
 if [ "$UPDATE_PANEL" = true ]; then
-  if [ -d "${SRC_DIR}/.git" ] && command -v cargo >/dev/null 2>&1; then
-    echo -e "${BLUE}${BOLD}[*] Pulling latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH}) & rebuilding Pure-Rust binary with Cargo...${NC}"
-    git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
-    git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+  if [ "$PREBUILT_ONLY" = false ] && [ -d "${SRC_DIR}/.git" ] && command -v cargo >/dev/null 2>&1; then
+    echo -e "${BLUE}${BOLD}[*] Fetching latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH})...${NC}"
+    OLD_COMMIT="$(git -C "${SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
+    INSTALLED_COMMIT="$(cat "${PANEL_COMMIT_FILE}" 2>/dev/null || echo '')"
+    git -C "${SRC_DIR}" fetch --depth 1 --quiet origin "${GIT_BRANCH}"
+    TARGET_COMMIT="$(git -C "${SRC_DIR}" rev-parse "origin/${GIT_BRANCH}" 2>/dev/null || echo '')"
 
-    ensure_native_rust_ui "${SRC_DIR}"
+    if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_PANEL}" ] && [ -n "${TARGET_COMMIT}" ] \
+       && [ "${OLD_COMMIT}" = "${TARGET_COMMIT}" ] && [ "${INSTALLED_COMMIT}" = "${TARGET_COMMIT}" ]; then
+      echo -e "${GREEN}[+] FerrousPanel is already up to date (${TARGET_COMMIT:0:8}) — skipped rebuild (use --force to recompile).${NC}"
+    else
+      UI_CHANGED=true
+      if [ -n "${OLD_COMMIT}" ] && [ -n "${TARGET_COMMIT}" ] && [ "${OLD_COMMIT}" != "${TARGET_COMMIT}" ]; then
+        if git -C "${SRC_DIR}" diff --quiet "${OLD_COMMIT}" "${TARGET_COMMIT}" -- crates/ferrous-panel/src/ui/assets 2>/dev/null; then
+          UI_CHANGED=false
+        fi
+      fi
+      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+      ensure_native_rust_ui "${SRC_DIR}" "${UI_CHANGED}"
+      ensure_swap_for_build
+      configure_fast_cargo_env
 
-    (
-      cd "${SRC_DIR}"
-      cargo build --release -p ferrous-panel
-    )
+      BUILD_PROFILE_ARGS="--release"
+      BUILD_TARGET_SUB="release"
+      if [ "$FULL_LTO" = false ] && grep -q '^\[profile\.vps\]' "${SRC_DIR}/Cargo.toml" 2>/dev/null; then
+        BUILD_PROFILE_ARGS="--profile vps"
+        BUILD_TARGET_SUB="vps"
+      fi
 
-    install -m 0755 "${SRC_DIR}/target/release/ferrous-panel" "${BIN_PANEL}"
+      echo -e "${CYAN}[*] Compiling ferrous-panel (${TARGET_COMMIT:0:8}, profile=${BUILD_TARGET_SUB}, jobs=${CARGO_BUILD_JOBS:-auto})...${NC}"
+      (
+        cd "${SRC_DIR}"
+        cargo build ${BUILD_PROFILE_ARGS} -p ferrous-panel
+      )
+
+      if [ -f "${PANEL_COMMIT_FILE}" ]; then
+        cp -f "${PANEL_COMMIT_FILE}" "${ROLLBACK_DIR}/ferrous-panel.prev.commit"
+      elif [ -n "${OLD_COMMIT}" ]; then
+        printf '%s\n' "${OLD_COMMIT}" > "${ROLLBACK_DIR}/ferrous-panel.prev.commit"
+      fi
+      atomic_install_binary "${SRC_DIR}/target/${BUILD_TARGET_SUB}/ferrous-panel" "${BIN_PANEL}" "ferrous-panel.prev" "ferrous-panel"
+      [ -n "${TARGET_COMMIT}" ] && printf '%s\n' "${TARGET_COMMIT}" > "${PANEL_COMMIT_FILE}"
+      PANEL_BINARY_UPDATED=true
+    fi
+  elif [ "$SOURCE_ONLY" = true ]; then
+    echo -e "${RED}[ERROR] --source requested, but ${SRC_DIR}/.git or cargo is unavailable.${NC}" >&2
+    exit 1
   else
-    echo -e "${CYAN}[*] Downloading updated FerrousPanel release (${RELEASE_TAG}, ${ARCH})...${NC}"
-    download_verified_release_asset "ferrous-panel-linux-${ARCH}" "${BIN_PANEL}"
+    echo -e "${CYAN}[*] Downloading verified prebuilt FerrousPanel release (${RELEASE_TAG}, ${ARCH})...${NC}"
+    TMP_PANEL_BIN="${TMP_DIR}/ferrous-panel-candidate"
+    download_verified_release_asset "ferrous-panel-linux-${ARCH}" "${TMP_PANEL_BIN}"
+    if [ -f "${PANEL_COMMIT_FILE}" ]; then
+      cp -f "${PANEL_COMMIT_FILE}" "${ROLLBACK_DIR}/ferrous-panel.prev.commit"
+    fi
+    atomic_install_binary "${TMP_PANEL_BIN}" "${BIN_PANEL}" "ferrous-panel.prev" "ferrous-panel"
+    printf 'release-%s\n' "${RELEASE_TAG}" > "${PANEL_COMMIT_FILE}"
+    PANEL_BINARY_UPDATED=true
   fi
 
   if [ -f /etc/ferrous-panel/panel.env ]; then
@@ -786,29 +1091,32 @@ EOF_SVC
   ln -sf "${BIN_PANEL}" /usr/local/bin/fp
   ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
   setup_phpmyadmin_proxy
-  systemctl restart ferrous-panel.service 2>/dev/null || true
 
   PROBE_HOST="${ACTIVE_PANEL_BIND}"
   if [ "${PROBE_HOST}" = "0.0.0.0" ] || [ "${PROBE_HOST}" = "::" ]; then
     PROBE_HOST="127.0.0.1"
   fi
-  PANEL_READY=false
-  for _ in $(seq 1 25); do
-    if curl -fsS "http://${PROBE_HOST}:${ACTIVE_PANEL_PORT}/api/health" >/dev/null 2>&1; then
-      PANEL_READY=true
-      break
-    fi
-    sleep 0.2
-  done
-  if [ "$PANEL_READY" = true ]; then
-    echo -e "${GREEN}[+] ferrous-panel.service is live on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (ports 80/443 reserved exclusively for websites).${NC}"
-    echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-    if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
-      echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-      echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
+
+  if [ "$PANEL_BINARY_UPDATED" = true ] || ! systemctl is-active --quiet ferrous-panel.service 2>/dev/null; then
+    systemctl restart ferrous-panel.service 2>/dev/null || true
+    if probe_panel_health "${PROBE_HOST}" "${ACTIVE_PANEL_PORT}" 25; then
+      echo -e "${GREEN}[+] ferrous-panel.service is live on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (ports 80/443 reserved exclusively for websites).${NC}"
+      echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+      if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
+        echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+        echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
+      fi
+    else
+      echo -e "${RED}[ERROR] ferrous-panel.service failed /api/health on ${PROBE_HOST}:${ACTIVE_PANEL_PORT} after update!${NC}" >&2
+      journalctl -u ferrous-panel.service -n 20 --no-pager >&2 || true
+      if [ "$PANEL_BINARY_UPDATED" = true ] && [ -x "${ROLLBACK_DIR}/ferrous-panel.prev" ]; then
+        perform_panel_rollback
+        echo -e "${RED}[ERROR] Update aborted & automatically rolled back to previous working binary.${NC}" >&2
+      fi
+      exit 1
     fi
   else
-    echo -e "${YELLOW}[!] Warning: ferrous-panel.service did not answer /api/health on ${PROBE_HOST}:${ACTIVE_PANEL_PORT}; check 'sudo fp logs'.${NC}"
+    echo -e "${GREEN}[+] ferrous-panel.service already active on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (zero restart needed).${NC}"
   fi
 fi
 
@@ -938,7 +1246,8 @@ if [ "$FORCE_NGINX" = true ] || systemctl is-active --quiet nginx.service 2>/dev
   update_nginx_engine
 fi
 
-echo -e "${GREEN}${BOLD}Update completed cleanly. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
+UPDATE_ELAPSED="$(( $(date +%s) - UPDATE_START_TS ))"
+echo -e "${GREEN}${BOLD}Update completed cleanly in ${UPDATE_ELAPSED}s. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
 if [ -x /usr/local/bin/bun ] || [ -x /usr/local/bin/tailwindcss ]; then
   echo -e "${CYAN}Zero-Node.js JS/CSS Toolchain: bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'missing') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'missing') (Node.js NOT required).${NC}"
 fi

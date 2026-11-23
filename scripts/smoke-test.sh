@@ -589,6 +589,23 @@ else
   fi
 fi
 
+# ==============================================================================
+# (15) Speed & Update: UI ETag 304 Not Modified + /api/system/update-status
+# ==============================================================================
+info_msg "Check (15): Verifying UI ETag 304 Not Modified caching and /api/system/update-status..."
+if [ -z "${AUTH_TOKEN}" ]; then
+  fail_item "15" "Cannot check update-status without AUTH_TOKEN"
+else
+  CSS_ETAG="$(curl -sSI "${PANEL_URL}/ui/panel.css" | awk -F': ' 'tolower($1)=="etag" {print $2}' | tr -d '\r\n' || true)"
+  CSS_304="$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: ${CSS_ETAG}" "${PANEL_URL}/ui/panel.css" || echo "000")"
+  UPD_JSON="$(curl -sS -H "Authorization: Bearer ${AUTH_TOKEN}" "${PANEL_URL}/api/system/update-status" || true)"
+  if [ -n "${CSS_ETAG}" ] && [ "${CSS_304}" = "304" ] && echo "${UPD_JSON}" | grep -q '"currentVersion"'; then
+    pass_item "15" "UI ETag returned HTTP 304 Not Modified and /api/system/update-status returned real version metadata"
+  else
+    fail_item "15" "Expected ETag 304 and update-status JSON, got etag='${CSS_ETAG}' code=${CSS_304}"
+  fi
+fi
+
 echo -e "${BOLD}==============================================================================${NC}"
 echo -e "${BOLD}  SUMMARY: PASS=${PASS_COUNT}  FAIL=${FAIL_COUNT}  SKIP=${SKIP_COUNT}${NC}"
 echo -e "${BOLD}==============================================================================${NC}"

@@ -175,10 +175,18 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
 
 fn register_extended_routes(cfg: &mut web::ServiceConfig) {
     cfg
-        // Diagnostics & FerrousX Sync
+        // Diagnostics, Self-Update & FerrousX Sync
         .route(
             "/system/diagnostics",
             web::get().to(extended::get_system_diagnostics),
+        )
+        .route(
+            "/system/update-status",
+            web::get().to(extended::get_system_update_status),
+        )
+        .route(
+            "/system/update",
+            web::post().to(extended::post_system_update),
         )
         .route(
             "/ferrousx/sync-status",

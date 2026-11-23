@@ -107,3 +107,86 @@ pub async fn post_ferrousx_ipc_command(
     Ok(HttpResponse::Ok().json(resp))
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateStatusQuery {
+    #[serde(default)]
+    pub refresh: Option<String>,
+}
+
+/// `GET /api/system/update-status` — real installed vs remote commit, rollback state, and updater logs.
+pub async fn get_system_update_status(
+    state: web::Data<AppState>,
+    query: web::Query<UpdateStatusQuery>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let refresh = query
+        .refresh
+        .as_deref()
+        .map(|v| matches!(v, "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let status = ext::get_panel_update_status(
+        &state.config,
+        state.webserver.executor().as_ref(),
+        refresh,
+    )
+    .await?;
+    Ok(HttpResponse::Ok().json(status))
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerUpdatePayload {
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub include_ferrousx: bool,
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/system/update` — launches detached `ferrous-panel-updater.service` via `systemd-run`.
+pub async fn post_system_update(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    payload: web::Json<TriggerUpdatePayload>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let body = payload.into_inner();
+    let mode = if body.mode.trim().is_empty() {
+        "source".to_string()
+    } else {
+        body.mode.trim().to_string()
+    };
+
+    let message = ext::trigger_panel_update(
+        &state.config,
+        state.webserver.executor().as_ref(),
+        &mode,
+        body.include_ferrousx,
+        body.force,
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "system.update",
+        &format!(
+            "mode={mode} ferrousx={} force={}",
+            body.include_ferrousx, body.force
+        ),
+    )?;
+    Ok(HttpResponse::Accepted().json(serde_json::json!({
+        "status": "started",
+        "mode": mode,
+        "unit": "ferrous-panel-updater.service",
+        "message": message,
+    })))
+}
+
+

@@ -148,6 +148,7 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
     let mut server = HttpServer::new(move || {
         let app_state = shared_state.clone();
         App::new()
+            .wrap(actix_web::middleware::Compress::default())
             .wrap(from_fn(security_headers_middleware))
             .configure(move |cfg| configure_app(cfg, app_state))
     })

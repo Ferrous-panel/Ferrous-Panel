@@ -61,3 +61,12 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Fast incremental VPS build profile used by install.sh & update.sh:
+# 3-5x faster compilation and ~60% lower peak RAM than fat-LTO release while keeping opt-level=3 & strip.
+[profile.vps]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+
