@@ -131,10 +131,9 @@ fn default_php_versions(prod: bool) -> Vec<PhpVersionInstance> {
     let mut list = Vec::with_capacity(specs.len());
     for (ver, full, test_installed) in specs {
         let fpm_bin = format!("/usr/sbin/php-fpm{ver}");
-        let cli_bin = format!("/usr/bin/php{ver}");
         let sock_exists = Path::new(&format!("/run/php/php{ver}-fpm.sock")).exists();
         let installed = if prod {
-            Path::new(&fpm_bin).is_file() || Path::new(&cli_bin).is_file() || sock_exists
+            Path::new(&fpm_bin).is_file() || sock_exists
         } else {
             test_installed || sock_exists
         };
@@ -215,8 +214,8 @@ pub async fn list_php_versions(
         let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
         for inst in &mut list {
             let fpm_bin = format!("/usr/sbin/php-fpm{}", inst.version);
-            let cli_bin = format!("/usr/bin/php{}", inst.version);
-            let installed = Path::new(&fpm_bin).is_file() || Path::new(&cli_bin).is_file();
+            let sock_exists = Path::new(&inst.fpm_socket).exists();
+            let installed = Path::new(&fpm_bin).is_file() || sock_exists;
             inst.installed = installed;
             if installed && has_systemctl {
                 let unit = format!("php{}-fpm.service", inst.version);
@@ -271,6 +270,15 @@ pub async fn php_action(
                         "thiếu binary apt-get để cài PHP {version}; hãy cài thủ công: sudo apt install -y php{version}-fpm php{version}-cli"
                     )));
                 }
+                let _ = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["update", "-qq"],
+                        &[("DEBIAN_FRONTEND", "noninteractive")],
+                        None,
+                        APT_TIMEOUT,
+                    )
+                    .await;
                 let pkg_fpm = format!("php{version}-fpm");
                 let pkg_cli = format!("php{version}-cli");
                 let pkg_common = format!("php{version}-common");
@@ -307,6 +315,7 @@ pub async fn php_action(
                         "đã cài gói php{version}-fpm nhưng thiếu systemctl để bật dịch vụ"
                     )));
                 }
+                let _ = std::fs::create_dir_all("/run/php");
                 let en = executor
                     .run(AllowedBinary::Systemctl, &["enable", "--now", &unit], CMD_TIMEOUT)
                     .await?;
@@ -319,6 +328,21 @@ pub async fn php_action(
                     return Err(PanelError::Conflict(format!(
                         "dịch vụ {unit} chưa ở trạng thái active sau khi cài đặt: {}",
                         active.stdout.trim()
+                    )));
+                }
+                let sock_path = Path::new(&inst.fpm_socket);
+                let mut sock_ready = sock_path.exists();
+                for _ in 0..10 {
+                    if sock_ready {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    sock_ready = sock_path.exists();
+                }
+                if !sock_ready {
+                    return Err(PanelError::Conflict(format!(
+                        "dịch vụ {unit} đã active nhưng vẫn thiếu socket '{}'. Kiểm tra /etc/php/{version}/fpm/pool.d/www.conf.",
+                        inst.fpm_socket
                     )));
                 }
             }
@@ -380,6 +404,7 @@ pub async fn php_action(
                         require_command_ok(fpm_bin.label(), check)?;
                     }
                 }
+                let _ = std::fs::create_dir_all("/run/php");
                 let res = executor
                     .run(AllowedBinary::Systemctl, &[action, &unit], CMD_TIMEOUT)
                     .await?;
@@ -392,6 +417,21 @@ pub async fn php_action(
                     return Err(PanelError::Conflict(format!(
                         "kiểm chứng sau '{action}' thất bại: {unit} đang ở trạng thái '{}'",
                         verify.stdout.trim()
+                    )));
+                }
+                let sock_path = Path::new(&inst.fpm_socket);
+                let mut sock_ready = sock_path.exists();
+                for _ in 0..10 {
+                    if sock_ready {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    sock_ready = sock_path.exists();
+                }
+                if !sock_ready {
+                    return Err(PanelError::Conflict(format!(
+                        "{unit} đã active sau '{action}' nhưng thiếu socket '{}'",
+                        inst.fpm_socket
                     )));
                 }
             }
@@ -743,11 +783,29 @@ pub async fn switch_site_php_version(
         };
         if is_production_vps(config) {
             let sock = fpm_ver.socket_path();
-            if !Path::new(sock).exists() {
-                return Err(PanelError::Conflict(format!(
-                    "socket PHP-FPM '{sock}' chưa tồn tại — hãy cài và khởi chạy php{}-fpm trước khi chuyển site",
-                    fpm_ver.version_str()
-                )));
+            if !fpm_ver.socket_exists() {
+                if webserver.executor().is_binary_available(fpm_ver.binary())
+                    && webserver
+                        .executor()
+                        .is_binary_available(AllowedBinary::Systemctl)
+                {
+                    let _ = std::fs::create_dir_all("/run/php");
+                    let _ = webserver
+                        .executor()
+                        .run(
+                            AllowedBinary::Systemctl,
+                            &["enable", "--now", fpm_ver.systemd_unit()],
+                            CMD_TIMEOUT,
+                        )
+                        .await;
+                    let _ = fpm_ver.wait_for_socket().await;
+                }
+                if !fpm_ver.socket_exists() {
+                    return Err(PanelError::Conflict(format!(
+                        "socket PHP-FPM '{sock}' chưa tồn tại — hãy cài và khởi chạy php{}-fpm trong mục 'PHP-FPM & Phần mềm' trước khi chuyển site",
+                        fpm_ver.version_str()
+                    )));
+                }
             }
         }
         let domain = Domain::parse(&app.domain)?;

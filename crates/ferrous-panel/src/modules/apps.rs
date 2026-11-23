@@ -153,6 +153,7 @@ fn normalize_zero_node_exec_command(
             let bin_str = detected_bin.display().to_string();
             let first_token = trimmed.split_whitespace().next().unwrap_or("");
             let needs_override = trimmed.is_empty()
+                || first_token == "/usr/bin/env"
                 || (!first_token.is_empty() && !Path::new(first_token).is_file());
             if needs_override {
                 return (
@@ -1011,12 +1012,33 @@ fn dir_size_mb(root: &Path) -> f64 {
     ((total_bytes as f64 / (1024.0 * 1024.0)) * 100.0).round() / 100.0
 }
 
+fn php_fpm_from_tag(tag: Option<PhpVersionTag>) -> PhpFpmVersion {
+    match tag {
+        Some(PhpVersionTag::V84) => PhpFpmVersion::V84,
+        Some(PhpVersionTag::V82) => PhpFpmVersion::V82,
+        Some(PhpVersionTag::V81) => PhpFpmVersion::V81,
+        Some(PhpVersionTag::V74) => PhpFpmVersion::V74,
+        Some(PhpVersionTag::V83) | Some(PhpVersionTag::None) | None => PhpFpmVersion::V83,
+    }
+}
+
+fn php_tag_from_fpm(ver: PhpFpmVersion) -> PhpVersionTag {
+    match ver {
+        PhpFpmVersion::V84 => PhpVersionTag::V84,
+        PhpFpmVersion::V83 => PhpVersionTag::V83,
+        PhpFpmVersion::V82 => PhpVersionTag::V82,
+        PhpFpmVersion::V81 => PhpVersionTag::V81,
+        PhpFpmVersion::V74 => PhpVersionTag::V74,
+    }
+}
+
 fn build_site_spec_for_app(
     domain: Domain,
     aliases: Vec<Domain>,
     working_path: &Path,
     wwwroot: &Path,
     framework: WebsiteRuntimeType,
+    php_version: PhpFpmVersion,
     internal_port: u16,
     ssl_enabled: bool,
     force_https: bool,
@@ -1033,7 +1055,7 @@ fn build_site_spec_for_app(
         }
     } else if is_php_runtime(framework) {
         SiteMode::PhpFpm {
-            php_version: PhpFpmVersion::V83,
+            php_version,
             index_file: SafeFilename::parse("index.php")?,
         }
     } else {
@@ -1085,7 +1107,7 @@ pub async fn enrich_app(
     webserver: &WebServerManager,
 ) -> ManagedApp {
     let unit_to_query = if is_php_runtime(app.framework) {
-        "php8.3-fpm.service".to_string()
+        php_fpm_from_tag(app.php_version).systemd_unit().to_string()
     } else {
         app.systemd_unit.clone()
     };
@@ -1270,32 +1292,11 @@ pub async fn deploy_app(
     let effective_doc_root =
         resolve_effective_doc_root(safe_working.as_path(), &req.run_sub_dir, req.framework);
 
-    if is_php_runtime(req.framework) && config.is_production() {
-        let sock = PhpFpmVersion::V83.socket_path();
-        if !Path::new(sock).exists() {
-            if webserver
-                .executor()
-                .is_binary_available(AllowedBinary::PhpFpm83)
-                && webserver
-                    .executor()
-                    .is_binary_available(AllowedBinary::Systemctl)
-            {
-                let _ = webserver
-                    .executor()
-                    .run(
-                        AllowedBinary::Systemctl,
-                        &["enable", "--now", "php8.3-fpm.service"],
-                        SYSTEMD_TIMEOUT,
-                    )
-                    .await;
-            }
-            if !Path::new(sock).exists() {
-                return Err(PanelError::Conflict(format!(
-                    "PHP 8.3-FPM chưa được cài đặt hoặc chưa chạy (thiếu socket '{sock}'). Hãy vào mục 'PHP-FPM & Phần mềm' để cài đặt và khởi chạy PHP 8.3 trước khi triển khai website PHP."
-                )));
-            }
-        }
-    }
+    let resolved_php_fpm = if is_php_runtime(req.framework) && config.is_production() {
+        PhpFpmVersion::resolve_active_or_start(webserver.executor().as_ref()).await?
+    } else {
+        PhpFpmVersion::V83
+    };
 
     // For reverse-proxy runtimes, start systemd unit BEFORE applying the web server vhost
     // so post-reload HTTP health verification hits a live upstream instead of returning 502.
@@ -1398,6 +1399,7 @@ pub async fn deploy_app(
         &effective_doc_root,
         &config.wwwroot,
         req.framework,
+        resolved_php_fpm,
         req.internal_port,
         effective_ssl,
         false,
@@ -1568,7 +1570,7 @@ pub async fn deploy_app(
         url_rewrite_preset: default_rewrite_preset(req.framework),
         url_rewrite_rules: rendered.content,
         php_version: if is_php_runtime(req.framework) {
-            Some(PhpVersionTag::V83)
+            Some(php_tag_from_fpm(resolved_php_fpm))
         } else {
             None
         },
@@ -1637,6 +1639,7 @@ pub async fn app_action(
                     &effective_root,
                     &config.wwwroot,
                     app.framework,
+                    php_fpm_from_tag(app.php_version),
                     app.internal_port,
                     app.ssl_enabled,
                     app.force_https,
@@ -1825,6 +1828,7 @@ pub async fn git_deploy_app(
                 &effective_root,
                 &config.wwwroot,
                 app.framework,
+                php_fpm_from_tag(app.php_version),
                 app.internal_port,
                 app.ssl_enabled,
                 app.force_https,
@@ -2042,6 +2046,7 @@ pub async fn update_site_settings(
         &effective_doc_root,
         &config.wwwroot,
         app.framework,
+        php_fpm_from_tag(app.php_version),
         app.internal_port,
         next_ssl,
         next_force,
@@ -2121,6 +2126,7 @@ pub async fn renew_ssl(
             &effective_doc_root,
             &config.wwwroot,
             app.framework,
+            php_fpm_from_tag(app.php_version),
             app.internal_port,
             true,
             app.force_https,

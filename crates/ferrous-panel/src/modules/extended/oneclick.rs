@@ -133,13 +133,13 @@ pub fn list_oneclick_templates() -> Vec<OneClickTemplate> {
             category: "Modern JS Frameworks".to_string(),
             framework: WebsiteRuntimeType::NextJs15,
             version: "15.2 (Bun Native · No Node.js)".to_string(),
-            description: "React 19 Server Components built and executed directly with single-binary Bun + FerrousX reverse proxy (zero Node.js/npm required on VPS).".to_string(),
+            description: "React 19 / Next.js SSR starter executed directly with single-binary Bun + FerrousX reverse proxy (zero Node.js/npm required on VPS).".to_string(),
             default_port: 3001,
             requires_db: "PostgreSQL 17".to_string(),
             build_command: "bun install && bun run build".to_string(),
             exec_command_template: "/usr/local/bin/bun --bun run start".to_string(),
             popular_score: "Zero-Node.js SSR".to_string(),
-            git_repo_url: Some("https://github.com/vercel/next.js.git".to_string()),
+            git_repo_url: None,
         },
         OneClickTemplate {
             id: "tpl-astro-5".to_string(),
@@ -160,28 +160,28 @@ pub fn list_oneclick_templates() -> Vec<OneClickTemplate> {
             name: "Actix-Web 4 Rust API".to_string(),
             category: "Rust Backend".to_string(),
             framework: WebsiteRuntimeType::ActixWebRust,
-            version: "4.9.0 (Rust 1.85)".to_string(),
-            description: "High-throughput native Rust REST microservice with systemd cgroups v2 supervision.".to_string(),
+            version: "4.9.0 (Rust Native)".to_string(),
+            description: "High-throughput native Rust REST microservice compiled locally with Cargo and supervised by systemd cgroups v2.".to_string(),
             default_port: 8081,
             requires_db: "PostgreSQL 17".to_string(),
             build_command: "cargo build --release".to_string(),
             exec_command_template: "/usr/bin/env".to_string(),
-            popular_score: "99.8% Uptime · 320k req/s".to_string(),
-            git_repo_url: Some("https://github.com/actix/examples.git".to_string()),
+            popular_score: "99.8% Uptime · Native Rust".to_string(),
+            git_repo_url: None,
         },
         OneClickTemplate {
             id: "tpl-axum-realtime".to_string(),
             name: "Axum 0.8 + Tokio WebSocket".to_string(),
             category: "Rust Backend".to_string(),
             framework: WebsiteRuntimeType::AxumRust,
-            version: "0.8.1 (Tokio 1.43)".to_string(),
-            description: "Ergonomic modular Tokio/Tower service with native WebSocket and HTTP/2 multiplexing.".to_string(),
+            version: "0.8.1 (Rust Native)".to_string(),
+            description: "Ergonomic modular Rust HTTP service compiled locally with Cargo and proxied via FerrousX / Nginx.".to_string(),
             default_port: 8082,
             requires_db: "PostgreSQL 17".to_string(),
             build_command: "cargo build --release".to_string(),
             exec_command_template: "/usr/bin/env".to_string(),
             popular_score: "Ultra Low p99 (0.28ms)".to_string(),
-            git_repo_url: Some("https://github.com/tokio-rs/axum.git".to_string()),
+            git_repo_url: None,
         },
         OneClickTemplate {
             id: "tpl-wordpress-fpm".to_string(),
@@ -309,6 +309,185 @@ async fn download_and_extract_wordpress(
     Ok(())
 }
 
+fn any_path_exists(paths: &[&str]) -> bool {
+    paths.iter().any(|p| Path::new(p).exists())
+}
+
+async fn ensure_db_service_ready(
+    executor: &dyn CommandExecutor,
+    requires_db: &str,
+) -> Result<(), PanelError> {
+    let lower_db = requires_db.to_ascii_lowercase();
+    let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
+
+    if lower_db.contains("mariadb") || lower_db.contains("mysql") {
+        if !executor.is_binary_available(AllowedBinary::Mysql) {
+            return Err(PanelError::Conflict(
+                "MariaDB/MySQL chưa được cài đặt trên máy chủ. Hãy cài MariaDB trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
+                    .to_string(),
+            ));
+        }
+        const MYSQL_SOCKETS: &[&str] = &[
+            "/run/mysqld/mysqld.sock",
+            "/var/run/mysqld/mysqld.sock",
+            "/tmp/mysql.sock",
+        ];
+        if !any_path_exists(MYSQL_SOCKETS) && has_systemctl {
+            for unit in ["mariadb.service", "mysql.service"] {
+                let _ = executor
+                    .run(AllowedBinary::Systemctl, &["enable", "--now", unit], CMD_TIMEOUT)
+                    .await;
+                for _ in 0..10 {
+                    if any_path_exists(MYSQL_SOCKETS) {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        if !any_path_exists(MYSQL_SOCKETS) {
+            return Err(PanelError::Conflict(
+                "Dịch vụ MariaDB/MySQL chưa chạy (thiếu socket '/run/mysqld/mysqld.sock'). Hãy bật MariaDB trong mục 'PHP-FPM & Phần mềm' (hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu')."
+                    .to_string(),
+            ));
+        }
+    } else if lower_db.contains("postgres") {
+        if !executor.is_binary_available(AllowedBinary::Psql) {
+            return Err(PanelError::Conflict(
+                "PostgreSQL chưa được cài đặt trên máy chủ. Hãy cài PostgreSQL trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'."
+                    .to_string(),
+            ));
+        }
+        const PG_SOCKETS: &[&str] = &[
+            "/var/run/postgresql/.s.PGSQL.5432",
+            "/run/postgresql/.s.PGSQL.5432",
+            "/tmp/.s.PGSQL.5432",
+        ];
+        if !any_path_exists(PG_SOCKETS) && has_systemctl {
+            let _ = executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["enable", "--now", "postgresql.service"],
+                    CMD_TIMEOUT,
+                )
+                .await;
+            for _ in 0..10 {
+                if any_path_exists(PG_SOCKETS) {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+        if !any_path_exists(PG_SOCKETS) {
+            return Err(PanelError::Conflict(
+                "Dịch vụ PostgreSQL chưa chạy (thiếu socket '/var/run/postgresql/.s.PGSQL.5432'). Hãy bật PostgreSQL trong mục 'PHP-FPM & Phần mềm' (hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu')."
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scaffold_bun_ssr_starter(
+    site_dir: &Path,
+    domain: &str,
+    tpl_name: &str,
+    entry_rel: &str,
+    default_port: u16,
+) -> Result<(), PanelError> {
+    let entry_path = site_dir.join(entry_rel);
+    if let Some(parent) = entry_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if !entry_path.exists() {
+        let server_js = format!(
+            "const port = Number(process.env.PORT || {default_port});\n\
+             const host = process.env.HOST || '127.0.0.1';\n\
+             Bun.serve({{\n\
+               hostname: host,\n\
+               port,\n\
+               fetch(req) {{\n\
+                 const url = new URL(req.url);\n\
+                 if (url.pathname === '/health') {{\n\
+                   return Response.json({{ ok: true, domain: {dom_json}, runtime: 'bun-zero-node' }});\n\
+                 }}\n\
+                 return new Response(\n\
+                   `<!doctype html><html lang=\"vi\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{dom} — {tpl}</title></head><body style=\"font-family:system-ui;background:#0b0f17;color:#f1f5f9;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px\"><main style=\"max-width:560px;background:#111827;border:1px solid #1e293b;border-radius:14px;padding:28px\"><h1 style=\"margin-top:0\">{dom}</h1><p>{tpl} đang chạy trực tiếp bằng Bun (Zero-Node.js) trên cổng ${{port}}.</p></main></body></html>`,\n\
+                   {{ headers: {{ 'content-type': 'text/html; charset=utf-8' }} }}\n\
+                 );\n\
+               }},\n\
+             }});\n\
+             console.log('FerrousPanel Bun SSR listening on http://' + host + ':' + port);\n",
+            dom = domain,
+            dom_json = serde_json::to_string(domain).unwrap_or_else(|_| "\"localhost\"".to_string()),
+            tpl = tpl_name,
+        );
+        atomic_write_file(&entry_path, server_js.as_bytes(), 0o644)?;
+    }
+    let pkg_json_path = site_dir.join("package.json");
+    if !pkg_json_path.exists() {
+        let pkg_json = format!(
+            "{{\n  \"name\": \"ferrous-ssr-app\",\n  \"private\": true,\n  \"scripts\": {{\n    \"start\": \"bun {entry_rel}\"\n  }}\n}}\n"
+        );
+        atomic_write_file(&pkg_json_path, pkg_json.as_bytes(), 0o644)?;
+    }
+    Ok(())
+}
+
+fn scaffold_rust_http_starter(
+    site_dir: &Path,
+    domain: &str,
+    tpl_name: &str,
+    default_port: u16,
+) -> Result<(), PanelError> {
+    let cargo_toml_path = site_dir.join("Cargo.toml");
+    let main_rs_path = site_dir.join("src").join("main.rs");
+    if !cargo_toml_path.exists() {
+        let bin_name = "ferrous_service";
+        let cargo_toml = format!(
+            "[package]\nname = \"{bin_name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[profile.release]\nopt-level = 2\n"
+        );
+        atomic_write_file(&cargo_toml_path, cargo_toml.as_bytes(), 0o644)?;
+    }
+    if !main_rs_path.exists() {
+        std::fs::create_dir_all(site_dir.join("src"))?;
+        let main_rs = format!(
+            "use std::io::{{Read, Write}};\n\
+             use std::net::TcpListener;\n\
+             \n\
+             fn main() {{\n\
+                 let port = std::env::var(\"PORT\").unwrap_or_else(|_| \"{default_port}\".to_string());\n\
+                 let host = std::env::var(\"HOST\").unwrap_or_else(|_| \"127.0.0.1\".to_string());\n\
+                 let addr = format!(\"{{host}}:{{port}}\");\n\
+                 let listener = match TcpListener::bind(&addr) {{\n\
+                     Ok(l) => l,\n\
+                     Err(err) => {{\n\
+                         eprintln!(\"bind {{addr}} failed: {{err}}\");\n\
+                         std::process::exit(1);\n\
+                     }}\n\
+                 }};\n\
+                 println!(\"Rust service listening on http://{{addr}}\");\n\
+                 for stream in listener.incoming().flatten() {{\n\
+                     let mut s = stream;\n\
+                     let mut buf = [0u8; 1024];\n\
+                     let _ = s.read(&mut buf);\n\
+                     let body = \"{{\\\"ok\\\":true,\\\"domain\\\":\\\"{dom}\\\",\\\"template\\\":\\\"{tpl}\\\"}}\";\n\
+                     let resp = format!(\n\
+                         \"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: {{}}\\r\\nConnection: close\\r\\n\\r\\n{{}}\",\n\
+                         body.len(),\n\
+                         body\n\
+                     );\n\
+                     let _ = s.write_all(resp.as_bytes());\n\
+                 }}\n\
+             }}\n",
+            dom = domain,
+            tpl = tpl_name.replace('"', ""),
+        );
+        atomic_write_file(&main_rs_path, main_rs.as_bytes(), 0o644)?;
+    }
+    Ok(())
+}
+
 pub async fn deploy_oneclick(
     req: OneClickDeployRequest,
     store: &ModuleStore,
@@ -338,50 +517,46 @@ pub async fn deploy_oneclick(
     };
 
     let is_wordpress = tpl.id == "tpl-wordpress-fpm";
+    let is_laravel = tpl.id == "tpl-laravel-11";
     let is_php = matches!(
         effective_framework,
         WebsiteRuntimeType::Php83Fpm | WebsiteRuntimeType::PhpSymfony7
     );
+    let is_bun_ssr = matches!(
+        effective_framework,
+        WebsiteRuntimeType::NextJs15 | WebsiteRuntimeType::Astro5
+    );
+    let is_rust = matches!(
+        effective_framework,
+        WebsiteRuntimeType::ActixWebRust | WebsiteRuntimeType::AxumRust
+    );
 
     // Pre-flight checks in production BEFORE downloading files so failures are instant & clear (HTTP 409)
     if prod && is_php {
-        let sock = PhpFpmVersion::V83.socket_path();
-        if !Path::new(sock).exists() {
-            if executor.is_binary_available(AllowedBinary::PhpFpm83)
-                && executor.is_binary_available(AllowedBinary::Systemctl)
-            {
-                let _ = executor
-                    .run(
-                        AllowedBinary::Systemctl,
-                        &["enable", "--now", "php8.3-fpm.service"],
-                        CMD_TIMEOUT,
-                    )
-                    .await;
-            }
-            if !Path::new(sock).exists() {
-                return Err(PanelError::Conflict(format!(
-                    "PHP 8.3-FPM chưa được cài đặt hoặc chưa chạy (thiếu socket '{sock}'). Hãy vào mục 'PHP-FPM & Phần mềm' để cài đặt và bật PHP 8.3 trước khi triển khai {}.",
-                    tpl.name
-                )));
-            }
-        }
+        let _ = PhpFpmVersion::resolve_active_or_start(executor).await?;
+    }
+    if prod && is_bun_ssr && !executor.is_binary_available(AllowedBinary::Bun) {
+        return Err(PanelError::Conflict(format!(
+            "Thiếu runtime Bun (/usr/local/bin/bun) để triển khai {}. Hãy vào mục 'PHP-FPM & Phần mềm' để cài 'Bun JS/TS All-in-One Runtime' trước.",
+            tpl.name
+        )));
+    }
+    if prod && is_rust && !executor.is_binary_available(AllowedBinary::Cargo) {
+        return Err(PanelError::Conflict(format!(
+            "Thiếu công cụ Cargo/Rust trên máy chủ để biên dịch {}. Hãy cài Rust toolchain (rustup) trước khi triển khai mẫu Rust.",
+            tpl.name
+        )));
+    }
+    if prod && tpl.git_repo_url.is_some() && !executor.is_binary_available(AllowedBinary::Git) {
+        return Err(PanelError::Conflict(format!(
+            "Thiếu công cụ 'git' trên máy chủ để clone mã nguồn cho {} (gợi ý: sudo apt-get install -y git).",
+            tpl.name
+        )));
     }
 
     let wants_db = req.create_db && tpl.requires_db != "None";
     if prod && wants_db {
-        let lower_db = tpl.requires_db.to_ascii_lowercase();
-        if (lower_db.contains("mariadb") || lower_db.contains("mysql"))
-            && !executor.is_binary_available(AllowedBinary::Mysql)
-        {
-            return Err(PanelError::Conflict(
-                "MariaDB/MySQL chưa được cài đặt trên máy chủ. Hãy cài MariaDB trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'.".to_string(),
-            ));
-        }
-        if lower_db.contains("postgres") && !executor.is_binary_available(AllowedBinary::Psql) {
-            return Err(PanelError::Conflict(
-                "PostgreSQL chưa được cài đặt trên máy chủ. Hãy cài PostgreSQL trong mục 'PHP-FPM & Phần mềm' hoặc bỏ chọn 'Tự động tạo cơ sở dữ liệu'.".to_string(),
-            ));
-        }
+        ensure_db_service_ready(executor, &tpl.requires_db).await?;
     }
 
     let site_dir = SafePath::under_root(&config.wwwroot, domain.as_str())?;
@@ -409,6 +584,29 @@ pub async fn deploy_oneclick(
             );
             atomic_write_file(&index_html, html.as_bytes(), 0o644)?;
         }
+    } else if tpl.id == "tpl-nextjs-15" {
+        scaffold_bun_ssr_starter(
+            site_dir.as_path(),
+            domain.as_str(),
+            &tpl.name,
+            "server.mjs",
+            tpl.default_port,
+        )?;
+    } else if tpl.id == "tpl-astro-5" {
+        scaffold_bun_ssr_starter(
+            site_dir.as_path(),
+            domain.as_str(),
+            &tpl.name,
+            "dist/server/entry.mjs",
+            tpl.default_port,
+        )?;
+    } else if is_rust {
+        scaffold_rust_http_starter(
+            site_dir.as_path(),
+            domain.as_str(),
+            &tpl.name,
+            tpl.default_port,
+        )?;
     } else if tpl.git_repo_url.is_none() {
         let index_html = site_dir.as_path().join("index.html");
         if !index_html.exists() {
@@ -448,7 +646,11 @@ pub async fn deploy_oneclick(
         aliases: Vec::new(),
         internal_port: tpl.default_port.max(1024),
         working_dir: site_dir.as_path().display().to_string(),
-        run_sub_dir: "/".to_string(),
+        run_sub_dir: if is_laravel {
+            "/public".to_string()
+        } else {
+            "/".to_string()
+        },
         exec_command: if tpl.exec_command_template.is_empty() {
             "/usr/bin/env".to_string()
         } else {

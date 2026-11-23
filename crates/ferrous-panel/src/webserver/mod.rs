@@ -290,6 +290,15 @@ pub enum PhpFpmVersion {
 }
 
 impl PhpFpmVersion {
+    /// Preferred resolution order when auto-selecting an available PHP-FPM runtime.
+    pub const PREFERRED_ORDER: [Self; 5] = [
+        Self::V83,
+        Self::V84,
+        Self::V82,
+        Self::V81,
+        Self::V74,
+    ];
+
     #[must_use]
     pub const fn version_str(self) -> &'static str {
         match self {
@@ -309,6 +318,92 @@ impl PhpFpmVersion {
             Self::V82 => "/run/php/php8.2-fpm.sock",
             Self::V83 => "/run/php/php8.3-fpm.sock",
             Self::V84 => "/run/php/php8.4-fpm.sock",
+        }
+    }
+
+    #[must_use]
+    pub const fn binary(self) -> AllowedBinary {
+        match self {
+            Self::V74 => AllowedBinary::PhpFpm74,
+            Self::V81 => AllowedBinary::PhpFpm81,
+            Self::V82 => AllowedBinary::PhpFpm82,
+            Self::V83 => AllowedBinary::PhpFpm83,
+            Self::V84 => AllowedBinary::PhpFpm84,
+        }
+    }
+
+    #[must_use]
+    pub const fn systemd_unit(self) -> &'static str {
+        match self {
+            Self::V74 => "php7.4-fpm.service",
+            Self::V81 => "php8.1-fpm.service",
+            Self::V82 => "php8.2-fpm.service",
+            Self::V83 => "php8.3-fpm.service",
+            Self::V84 => "php8.4-fpm.service",
+        }
+    }
+
+    #[must_use]
+    pub fn socket_exists(self) -> bool {
+        Path::new(self.socket_path()).exists()
+    }
+
+    /// Polls briefly (up to ~2.5s) for PHP-FPM to bind its Unix socket after start/reload.
+    pub async fn wait_for_socket(self) -> bool {
+        for attempt in 0..10 {
+            if self.socket_exists() {
+                return true;
+            }
+            if attempt < 9 {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        }
+        self.socket_exists()
+    }
+
+    /// Resolves any active PHP-FPM runtime (preferring 8.3 -> 8.4 -> 8.2 -> 8.1 -> 7.4).
+    /// If a PHP-FPM binary is installed but stopped, enables & starts it and waits for the socket.
+    pub async fn resolve_active_or_start(
+        executor: &dyn CommandExecutor,
+    ) -> Result<Self, PanelError> {
+        for ver in Self::PREFERRED_ORDER {
+            if ver.socket_exists() {
+                return Ok(ver);
+            }
+        }
+
+        let has_systemctl = executor.is_binary_available(AllowedBinary::Systemctl);
+        let mut installed_versions: Vec<&'static str> = Vec::new();
+        for ver in Self::PREFERRED_ORDER {
+            if executor.is_binary_available(ver.binary()) {
+                installed_versions.push(ver.version_str());
+                if has_systemctl {
+                    let _ = std::fs::create_dir_all("/run/php");
+                    let _ = executor
+                        .run(
+                            AllowedBinary::Systemctl,
+                            &["enable", "--now", ver.systemd_unit()],
+                            Duration::from_secs(20),
+                        )
+                        .await;
+                    if ver.wait_for_socket().await {
+                        return Ok(ver);
+                    }
+                }
+            }
+        }
+
+        if installed_versions.is_empty() {
+            Err(PanelError::Conflict(
+                "Chưa có phiên bản PHP-FPM nào được cài đặt trên máy chủ (đã kiểm tra PHP 8.3 / 8.4 / 8.2 / 8.1 / 7.4). Hãy vào mục 'PHP-FPM & Phần mềm' để cài PHP 8.3 (hoặc chạy: sudo apt-get update && sudo apt-get install -y php8.3-fpm php8.3-mysql) trước khi triển khai website PHP."
+                    .to_string(),
+            ))
+        } else {
+            Err(PanelError::Conflict(format!(
+                "Đã phát hiện PHP-FPM ({}) nhưng không thể tạo Unix socket trong '/run/php/' sau khi khởi động dịch vụ. Hãy kiểm tra trong mục 'PHP-FPM & Phần mềm' hoặc chạy `systemctl status php{}-fpm`.",
+                installed_versions.join(", "),
+                installed_versions[0]
+            )))
         }
     }
 }

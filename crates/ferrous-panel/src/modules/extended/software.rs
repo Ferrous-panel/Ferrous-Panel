@@ -12,6 +12,37 @@ struct PackageSystemMeta {
     is_cli_tool: bool,
 }
 
+fn detect_postgresql_config_path() -> &'static str {
+    for candidate in [
+        "/etc/postgresql/17/main/postgresql.conf",
+        "/etc/postgresql/16/main/postgresql.conf",
+        "/etc/postgresql/15/main/postgresql.conf",
+        "/etc/postgresql/14/main/postgresql.conf",
+        "/etc/postgresql/13/main/postgresql.conf",
+    ] {
+        if Path::new(candidate).is_file() {
+            return candidate;
+        }
+    }
+    "/etc/postgresql/16/main/postgresql.conf"
+}
+
+fn detect_mariadb_unit() -> &'static str {
+    if Path::new("/lib/systemd/system/mariadb.service").is_file()
+        || Path::new("/usr/lib/systemd/system/mariadb.service").is_file()
+        || Path::new("/etc/systemd/system/mariadb.service").is_file()
+    {
+        "mariadb.service"
+    } else if Path::new("/lib/systemd/system/mysql.service").is_file()
+        || Path::new("/usr/lib/systemd/system/mysql.service").is_file()
+        || Path::new("/etc/systemd/system/mysql.service").is_file()
+    {
+        "mysql.service"
+    } else {
+        "mariadb.service"
+    }
+}
+
 fn package_system_meta(id: &str) -> Option<PackageSystemMeta> {
     match id {
         "pkg-ferrousx" => Some(PackageSystemMeta {
@@ -53,12 +84,12 @@ fn package_system_meta(id: &str) -> Option<PackageSystemMeta> {
             binary: AllowedBinary::Psql,
             systemd_unit: "postgresql.service",
             apt_package: Some("postgresql"),
-            real_config_path: "/etc/postgresql/16/main/postgresql.conf",
+            real_config_path: detect_postgresql_config_path(),
             is_cli_tool: false,
         }),
         "pkg-mariadb" => Some(PackageSystemMeta {
             binary: AllowedBinary::Mysql,
-            systemd_unit: "mariadb.service",
+            systemd_unit: detect_mariadb_unit(),
             apt_package: Some("mariadb-server"),
             real_config_path: "/etc/mysql/mariadb.conf.d/50-server.cnf",
             is_cli_tool: false,
@@ -486,6 +517,7 @@ pub async fn list_software_packages(
                 } else if !pkg.installed {
                     pkg.status = "not_installed".to_string();
                 }
+                pkg.config_path = meta.real_config_path.to_string();
                 if let Ok(live_conf) = std::fs::read_to_string(meta.real_config_path) {
                     if !live_conf.trim().is_empty() && live_conf.len() <= 64 * 1024 {
                         pkg.config_content = live_conf;
@@ -748,6 +780,15 @@ pub async fn software_package_action(
                                     "thiếu apt-get để cài '{apt_pkg}' (gợi ý: sudo apt install -y {apt_pkg})"
                                 )));
                             }
+                            let _ = executor
+                                .run_with_env(
+                                    AllowedBinary::AptGet,
+                                    &["update", "-qq"],
+                                    &[("DEBIAN_FRONTEND", "noninteractive")],
+                                    None,
+                                    APT_TIMEOUT,
+                                )
+                                .await;
                             let res = executor
                                 .run_with_env(
                                     AllowedBinary::AptGet,
@@ -766,7 +807,10 @@ pub async fn software_package_action(
                             }
                         }
                         if !m.systemd_unit.is_empty() {
-                            validate_and_activate_service(id, m, "enable-now", executor).await?;
+                            // Re-resolve metadata after apt install (e.g. mariadb.service vs mysql.service).
+                            let refreshed = package_system_meta(id);
+                            let active_meta = refreshed.as_ref().unwrap_or(m);
+                            validate_and_activate_service(id, active_meta, "enable-now", executor).await?;
                         }
                     }
                 }
