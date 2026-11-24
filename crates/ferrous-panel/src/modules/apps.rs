@@ -1583,6 +1583,7 @@ pub async fn deploy_app(
         logs: initial_logs,
         systemd_unit,
         nginx_vhost: rendered.config_path.display().to_string(),
+        setup_summary: None,
     };
 
     store.upsert_app(&app)?;

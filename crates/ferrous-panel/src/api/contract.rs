@@ -259,6 +259,25 @@ pub struct ManagedApp {
     pub logs: Vec<String>,
     pub systemd_unit: String,
     pub nginx_vhost: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_summary: Option<OneClickSetupSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OneClickSetupSummary {
+    pub site_url: String,
+    pub admin_url: String,
+    pub admin_user: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_password: Option<String>,
+    pub admin_email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_user: Option<String>,
+    pub auto_installed: bool,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +438,10 @@ pub struct OneClickDeployRequest {
     pub site_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admin_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_password: Option<String>,
     #[serde(default)]
     pub enable_ssl: bool,
     #[serde(default = "default_true")]
