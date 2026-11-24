@@ -49,6 +49,8 @@ pub struct InstallLetsEncryptRequest {
     pub auto_install_certbot: bool,
     #[serde(default)]
     pub force_renewal: bool,
+    #[serde(default)]
+    pub skip_dns_check: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +472,7 @@ pub async fn install_app_ssl_letsencrypt(
         body.force_https,
         body.auto_install_certbot,
         body.force_renewal,
+        body.skip_dns_check,
         &state.modules,
         &state.config,
         &state.webserver,

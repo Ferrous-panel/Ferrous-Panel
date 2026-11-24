@@ -1685,20 +1685,18 @@ impl WebServerManager {
                         let _ = self.nginx.reload().await;
                         return Err(err);
                     }
-                    // Verify site responds over HTTP from this host; rollback on 5xx or connection error
-                    // when nginx is active on real port 80 (skip probe error if probe_addr is not listening in unit tests).
+                    // Probe HTTP reachability as a non-fatal diagnostic: do NOT rollback a validated vhost/SSL config
+                    // just because an upstream backend app or PHP-FPM script temporarily returns 5xx.
                     if let Ok(code) = self
                         .probe_site_with_retry(&spec.domain, Duration::from_secs(2))
                         .await
                     {
                         if code >= 500 {
-                            let _ = link_snap.restore();
-                            let _ = avail_snap.restore();
-                            let _ = self.nginx.reload().await;
-                            return Err(PanelError::Conflict(format!(
-                                "nginx returned HTTP {code} for {} after reload (upstream/PHP-FPM not ready); previous vhost restored",
-                                spec.domain.as_str()
-                            )));
+                            tracing::warn!(
+                                domain = %spec.domain.as_str(),
+                                status = code,
+                                "nginx reloaded validated vhost, but upstream app returned HTTP 5xx"
+                            );
                         }
                     }
                 } else if self.nginx.is_installed()
@@ -1732,12 +1730,11 @@ impl WebServerManager {
                         .await
                     {
                         if code >= 500 {
-                            let _ = site_snap.restore();
-                            let _ = self.ferrousx.reload().await;
-                            return Err(PanelError::Conflict(format!(
-                                "FerrousX returned HTTP {code} for {} after reload (upstream/PHP-FPM not ready); previous vhost restored",
-                                spec.domain.as_str()
-                            )));
+                            tracing::warn!(
+                                domain = %spec.domain.as_str(),
+                                status = code,
+                                "FerrousX reloaded validated vhost, but upstream app returned HTTP 5xx"
+                            );
                         }
                     }
                 } else if self.ferrousx.is_installed()

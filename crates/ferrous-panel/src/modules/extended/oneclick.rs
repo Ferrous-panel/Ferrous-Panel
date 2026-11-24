@@ -262,6 +262,11 @@ async fn download_and_extract_wordpress(
                 "55",
                 "--proto",
                 "=https",
+                "--tlsv1.2",
+                "--retry",
+                "3",
+                "--retry-delay",
+                "2",
                 "-o",
                 &archive_str,
                 "https://wordpress.org/latest.tar.gz",
@@ -279,6 +284,12 @@ async fn download_and_extract_wordpress(
                 dl.stderr.trim()
             ),
         });
+    }
+    if std::fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(PanelError::BadGateway(
+            "Gói tải về WordPress rỗng (0 byte) từ wordpress.org.".to_string(),
+        ));
     }
 
     let dest_str = site_dir.display().to_string();
@@ -625,6 +636,11 @@ async fn download_and_extract_external_archive(
                 "60",
                 "--proto",
                 "=https",
+                "--tlsv1.2",
+                "--retry",
+                "3",
+                "--retry-delay",
+                "2",
                 "--max-filesize",
                 "209715200",
                 "-o",
@@ -641,6 +657,12 @@ async fn download_and_extract_external_archive(
             exit_code: dl.exit_code,
             stderr: format!("Không thể tải gói tài nguyên từ {url}: {}", dl.stderr.trim()),
         });
+    }
+    if std::fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        let _ = std::fs::remove_file(&archive_path);
+        return Err(PanelError::BadGateway(format!(
+            "Gói tài nguyên tải từ {url} rỗng (0 byte)."
+        )));
     }
 
     let dest_str = site_dir.display().to_string();

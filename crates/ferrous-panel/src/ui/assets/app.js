@@ -16,7 +16,23 @@ export const state = {
   telemetryHistory: [],
   refreshTimer: null,
   capabilities: null,
+  renderSeq: 0,
+  viewAbortController: null,
 };
+
+export function isActiveRender(seq, expectedRoute = null) {
+  if (seq !== state.renderSeq) return false;
+  if (expectedRoute && state.route !== expectedRoute) return false;
+  return true;
+}
+
+export function clearRefreshTimer() {
+  if (state.refreshTimer) {
+    clearTimeout(state.refreshTimer);
+    clearInterval(state.refreshTimer);
+    state.refreshTimer = null;
+  }
+}
 
 function readBootConfig() {
   try {
@@ -317,62 +333,160 @@ export async function openJobDrawer(jobId) {
   }
 }
 
-export async function api(method, path, body = undefined, { rawBody = false, contentType = 'application/json', responseType = 'json' } = {}) {
-  const headers = {};
-  if (state.token) {
-    headers['Authorization'] = `Bearer ${state.token}`;
-  }
-  const init = {
-    method,
-    credentials: 'same-origin',
-    headers,
-  };
-  if (body !== undefined) {
-    if (rawBody) {
-      headers['Content-Type'] = contentType;
-      init.body = body;
-    } else {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
+export async function api(
+  method,
+  path,
+  body = undefined,
+  {
+    rawBody = false,
+    contentType = 'application/json',
+    responseType = 'json',
+    timeoutMs = 35000,
+    signal = null,
+    keepAlive = false,
+    retries = undefined,
+  } = {},
+) {
+  const upperMethod = String(method || 'GET').toUpperCase();
+  const maxRetries = typeof retries === 'number'
+    ? retries
+    : (upperMethod === 'GET' && !path.includes('/poll') ? 1 : 0);
+
+  let attempt = 0;
+  while (true) {
+    const headers = {
+      'Accept': responseType === 'blob' ? '*/*' : 'application/json',
+      'X-Requested-With': 'FerrousPanel-UI',
+    };
+    if (state.token) {
+      headers['Authorization'] = `Bearer ${state.token}`;
+      headers['X-FP-Session'] = state.token;
     }
-  }
 
-  const resp = await fetch(path, init);
-  if (resp.status === 401 && path !== '/api/auth/login') {
-    state.user = null;
-    state.token = '';
-    sessionStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(TOKEN_KEY);
-    renderLogin('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-    throw new Error('Unauthorized');
-  }
+    const reqCtrl = new AbortController();
+    let timedOut = false;
+    const viewSignal = (!keepAlive && upperMethod === 'GET' && !signal)
+      ? state.viewAbortController?.signal || null
+      : null;
 
-  const respContentType = resp.headers.get('content-type') || '';
+    const onExternalAbort = () => reqCtrl.abort('cancelled');
+    if (signal) {
+      if (signal.aborted) {
+        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+        abortErr.isAbort = true;
+        throw abortErr;
+      }
+      signal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+    if (viewSignal) {
+      if (viewSignal.aborted) {
+        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+        abortErr.isAbort = true;
+        throw abortErr;
+      }
+      viewSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
 
-  if (responseType === 'blob') {
+    const effectiveTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 35000;
+    const timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      reqCtrl.abort('timeout');
+    }, effectiveTimeout);
+
+    const init = {
+      method: upperMethod,
+      credentials: 'same-origin',
+      headers,
+      signal: reqCtrl.signal,
+    };
+    if (body !== undefined) {
+      if (rawBody) {
+        headers['Content-Type'] = contentType;
+        init.body = body;
+      } else {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
+      }
+    }
+
+    let resp;
+    try {
+      resp = await fetch(path, init);
+    } catch (fetchErr) {
+      clearTimeout(timeoutHandle);
+      if (signal) signal.removeEventListener('abort', onExternalAbort);
+      if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
+
+      if (timedOut) {
+        const err = new Error(`Quá thời gian chờ phản hồi từ máy chủ (${Math.round(effectiveTimeout / 1000)}s).`);
+        err.isTimeout = true;
+        throw err;
+      }
+      if (reqCtrl.signal.aborted || fetchErr?.name === 'AbortError') {
+        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+        abortErr.isAbort = true;
+        throw abortErr;
+      }
+      if (attempt < maxRetries) {
+        attempt += 1;
+        await new Promise((r) => setTimeout(r, 350 * attempt));
+        continue;
+      }
+      throw new Error(`Lỗi kết nối mạng tới máy chủ: ${fetchErr?.message || 'NetworkError'}`);
+    } finally {
+      clearTimeout(timeoutHandle);
+      if (signal) signal.removeEventListener('abort', onExternalAbort);
+      if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
+    }
+
+    if (resp.status === 401 && path !== '/api/auth/login') {
+      clearRefreshTimer();
+      state.renderSeq += 1;
+      if (state.viewAbortController) {
+        state.viewAbortController.abort('unauthorized');
+        state.viewAbortController = null;
+      }
+      state.user = null;
+      state.token = '';
+      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
+      renderLogin('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+      throw new Error('Unauthorized');
+    }
+
+    if (attempt < maxRetries && [502, 503, 504].includes(resp.status)) {
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, 450 * attempt));
+      continue;
+    }
+
+    const respContentType = resp.headers.get('content-type') || '';
+
+    if (responseType === 'blob') {
+      if (!resp.ok) {
+        const txt = await resp.text();
+        const err = new Error(formatHttpError(resp.status, respContentType, txt, null));
+        err.status = resp.status;
+        throw err;
+      }
+      return resp.blob();
+    }
+
+    const text = await resp.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (_) {
+      data = text;
+    }
     if (!resp.ok) {
-      const txt = await resp.text();
-      const err = new Error(formatHttpError(resp.status, respContentType, txt, null));
+      const msg = formatHttpError(resp.status, respContentType, text, data);
+      const err = new Error(msg);
       err.status = resp.status;
       throw err;
     }
-    return resp.blob();
+    return data;
   }
-
-  const text = await resp.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch (_) {
-    data = text;
-  }
-  if (!resp.ok) {
-    const msg = formatHttpError(resp.status, respContentType, text, data);
-    const err = new Error(msg);
-    err.status = resp.status;
-    throw err;
-  }
-  return data;
 }
 
 function applyTheme(theme) {
@@ -523,63 +637,71 @@ export function openQuickJump() {
 }
 
 export async function renderCurrentView(forceCaps = false) {
-  if (state.refreshTimer) {
-    clearInterval(state.refreshTimer);
-    state.refreshTimer = null;
+  clearRefreshTimer();
+  if (state.viewAbortController) {
+    state.viewAbortController.abort('route-change');
   }
+  state.viewAbortController = new AbortController();
+  const seq = ++state.renderSeq;
+  const routeAtStart = state.route;
+
   const container = document.getElementById('view-container');
   if (!container) return;
   renderSkeleton(container);
 
   try {
     await loadCapabilities(forceCaps);
-    switch (state.route) {
+    if (!isActiveRender(seq, routeAtStart)) return;
+
+    switch (routeAtStart) {
       case 'overview':
-        await renderOverview(container);
+        await renderOverview(container, seq);
         break;
       case 'apps':
-        await renderApps(container);
+        await renderApps(container, seq);
         break;
       case 'files':
-        await renderFiles(container);
+        await renderFiles(container, seq);
         break;
       case 'databases':
-        await renderDatabases(container);
+        await renderDatabases(container, seq);
         break;
       case 'webserver':
-        await renderWebserver(container);
+        await renderWebserver(container, seq);
         break;
       case 'software':
-        await renderPhpSoftware(container);
+        await renderPhpSoftware(container, seq);
         break;
       case 'cpanel':
-        await renderCpanel(container);
+        await renderCpanel(container, seq);
         break;
       case 'mail':
-        await renderMail(container);
+        await renderMail(container, seq);
         break;
       case 'edge':
-        await renderEdgePolyglot(container);
+        await renderEdgePolyglot(container, seq);
         break;
       case 'sysops':
-        await renderSysops(container);
+        await renderSysops(container, seq);
         break;
       case 'security':
-        await renderSecurity(container);
+        await renderSecurity(container, seq);
         break;
       case 'optimizer':
-        await renderOptimizer(container);
+        await renderOptimizer(container, seq);
         break;
       case 'ssh':
-        await renderSsh(container);
+        await renderSsh(container, seq);
         break;
       case 'settings':
-        await renderSettingsJobs(container);
+        await renderSettingsJobs(container, seq);
         break;
       default:
-        await renderOverview(container);
+        await renderOverview(container, seq);
     }
   } catch (err) {
+    if (!isActiveRender(seq, routeAtStart)) return;
+    if (err?.isAbort) return;
     if (err.message !== 'Unauthorized') {
       container.innerHTML = `
         <div class="surface">
@@ -593,8 +715,14 @@ export async function renderCurrentView(forceCaps = false) {
 }
 
 export async function handleLogout() {
+  clearRefreshTimer();
+  state.renderSeq += 1;
+  if (state.viewAbortController) {
+    state.viewAbortController.abort('logout');
+    state.viewAbortController = null;
+  }
   try {
-    await api('POST', '/api/auth/logout', { token: state.token || null });
+    await api('POST', '/api/auth/logout', { token: state.token || null }, { keepAlive: true, timeoutMs: 8000 });
   } catch (_) {
     // clear local session regardless
   }
@@ -603,10 +731,6 @@ export async function handleLogout() {
   state.capabilities = null;
   sessionStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(TOKEN_KEY);
-  if (state.refreshTimer) {
-    clearInterval(state.refreshTimer);
-    state.refreshTimer = null;
-  }
   toast('Đã đăng xuất khỏi FerrousPanel.');
   renderLogin();
 }

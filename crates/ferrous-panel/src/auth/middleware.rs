@@ -113,15 +113,24 @@ fn strip_default_port(authority: &str) -> &str {
 }
 
 fn origin_matches_host(req: &ServiceRequest) -> bool {
-    let Some(host_raw) = req
+    let host_raw = req
         .headers()
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
-        .filter(|h| !h.is_empty())
-    else {
+        .filter(|h| !h.is_empty());
+
+    let forwarded_host = req
+        .headers()
+        .get("X-Forwarded-Host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| raw.split(',').next())
+        .map(str::trim)
+        .filter(|h| !h.is_empty());
+
+    if host_raw.is_none() && forwarded_host.is_none() {
         return true;
-    };
+    }
 
     let candidate_url = req
         .headers()
@@ -151,8 +160,13 @@ fn origin_matches_host(req: &ServiceRequest) -> bool {
         return false;
     };
 
-    origin_authority.eq_ignore_ascii_case(host_raw)
-        || strip_default_port(origin_authority).eq_ignore_ascii_case(strip_default_port(host_raw))
+    let matches_target = |target: &str| {
+        origin_authority.eq_ignore_ascii_case(target)
+            || strip_default_port(origin_authority)
+                .eq_ignore_ascii_case(strip_default_port(target))
+    };
+
+    host_raw.is_some_and(matches_target) || forwarded_host.is_some_and(matches_target)
 }
 
 fn extract_token_with_source(req: &ServiceRequest) -> Option<(String, TokenSource)> {

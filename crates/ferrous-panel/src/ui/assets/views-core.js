@@ -2,7 +2,7 @@
 import {
   api, esc, fmtBytes, fmtTime, fmtUptime, statusClass,
   toast, openModal, closeModal, confirmAction, openJobDrawer, navigate, state,
-  capBannerHtml, capDisabledAttr, withBusy,
+  capBannerHtml, capDisabledAttr, withBusy, isActiveRender, clearRefreshTimer,
 } from './app.js';
 
 function sparklineSvg(values, color = 'var(--accent)') {
@@ -24,7 +24,7 @@ function sparklineSvg(values, color = 'var(--accent)') {
 // ============================================================================
 // 1. OVERVIEW / TELEMETRY + CAPABILITY MATRIX
 // ============================================================================
-export async function renderOverview(container) {
+export async function renderOverview(container, renderSeq = state.renderSeq) {
   const [tel, ws, apps, dbs, jobs] = await Promise.all([
     api('GET', '/api/telemetry'),
     api('GET', '/api/webserver').catch(() => null),
@@ -32,6 +32,9 @@ export async function renderOverview(container) {
     api('GET', '/api/databases').catch(() => []),
     api('GET', '/api/jobs?limit=8').catch(() => []),
   ]);
+
+  // Abort render immediately if user has already navigated away from Home
+  if (!isActiveRender(renderSeq, 'overview')) return;
 
   const cpuPct = Number(tel.cpuUsagePercent || 0);
   const memPct = Number(tel.memoryPercent || 0);
@@ -174,17 +177,32 @@ export async function renderOverview(container) {
     btn.addEventListener('click', () => openJobDrawer(btn.dataset.viewJob));
   });
 
-  if (state.refreshTimer) clearInterval(state.refreshTimer);
-  state.refreshTimer = setInterval(async () => {
-    if (state.route !== 'overview') return;
+  clearRefreshTimer();
+  state.refreshTimer = setTimeout(async () => {
+    if (!isActiveRender(renderSeq, 'overview')) return;
     const modalOpen = Boolean(document.getElementById('modal-root')?.innerHTML);
-    if (modalOpen) return;
+    if (modalOpen) {
+      // Re-arm timer without clobbering modal
+      if (isActiveRender(renderSeq, 'overview')) {
+        state.refreshTimer = setTimeout(() => {
+          if (isActiveRender(renderSeq, 'overview')) renderOverview(container, renderSeq).catch(() => {});
+        }, 15000);
+      }
+      return;
+    }
     const y = window.scrollY;
     try {
-      await renderOverview(container);
-      window.scrollTo(0, y);
+      await renderOverview(container, renderSeq);
+      if (isActiveRender(renderSeq, 'overview')) {
+        window.scrollTo(0, y);
+      }
     } catch (_) {
-      // silent background poll
+      // silent background poll; re-arm only if still on overview
+      if (isActiveRender(renderSeq, 'overview')) {
+        state.refreshTimer = setTimeout(() => {
+          if (isActiveRender(renderSeq, 'overview')) renderOverview(container, renderSeq).catch(() => {});
+        }, 15000);
+      }
     }
   }, 15000);
 }
@@ -207,11 +225,12 @@ const RUNTIMES = [
   'Go / Fiber',
 ];
 
-export async function renderApps(container) {
+export async function renderApps(container, renderSeq = state.renderSeq) {
   const [apps, templates] = await Promise.all([
     api('GET', '/api/apps'),
     api('GET', '/api/oneclick/templates').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'apps')) return;
 
   let searchTerm = '';
   let activeTab = 'sites';
@@ -508,7 +527,7 @@ export async function renderApps(container) {
                     createDb: requiresDb ? fd.get('createDb') === 'on' : false,
                     autoInstallDeps,
                     sourceUrl: sourceUrl || undefined,
-                  });
+                  }, { timeoutMs: 240000, keepAlive: true });
                   closeModal();
                   toast(`Đã triển khai 1-Click ${btn.dataset.ocName} cho ${domain}.`);
                   await renderApps(container);
@@ -596,8 +615,8 @@ function openSslManagerModal(app, container) {
           missing: 'Chưa cài',
         }[cert.status] || cert.status || 'missing';
         const certStateCls = cert.status === 'valid'
-          ? 'status-ok'
-          : (cert.status === 'expiring_soon' ? 'status-warn' : (cert.status === 'expired' ? 'status-err' : 'muted'));
+          ? 'st-ok'
+          : (cert.status === 'expiring_soon' ? 'st-warn' : (cert.status === 'expired' ? 'st-err' : 'st-muted'));
 
         body.innerHTML = `
           <div id="ssl-feedback"></div>
@@ -606,7 +625,7 @@ function openSslManagerModal(app, container) {
             <div class="kv-item">
               <span class="kv-label">Trạng thái HTTPS (${esc(info.webServerEngine || 'nginx')})</span>
               <span class="kv-value">
-                <strong class="${info.sslEnabled ? 'status-ok' : 'muted'}">${info.sslEnabled ? 'HTTPS Đang bật' : 'Chỉ HTTP (80)'}</strong>
+                <strong class="${info.sslEnabled ? 'st-ok' : 'st-muted'}">${info.sslEnabled ? 'HTTPS Đang bật' : 'Chỉ HTTP (80)'}</strong>
                 ${info.sslEnabled ? ` · <span class="mono">${info.forceHttps ? 'Force 301' : 'HTTP+HTTPS'}</span>` : ''}
               </span>
             </div>
@@ -626,7 +645,7 @@ function openSslManagerModal(app, container) {
             <div class="kv-item">
               <span class="kv-label">Tự động gia hạn (systemd)</span>
               <span class="kv-value mono">
-                <span class="${timer.active ? 'status-ok' : 'muted'}">${timer.active ? 'Đang chạy' : 'Chưa bật'}</span>
+                <span class="${timer.active ? 'st-ok' : 'st-muted'}">${timer.active ? 'Đang chạy' : 'Chưa bật'}</span>
                 ${timer.nextRun ? ` · ${esc(timer.nextRun)}` : ''}
               </span>
             </div>
@@ -641,8 +660,8 @@ function openSslManagerModal(app, container) {
                     <td class="mono"><strong>${esc(d.domain)}</strong></td>
                     <td class="mono">${d.ips && d.ips.length ? esc(d.ips.join(', ')) : '—'}</td>
                     <td>${d.resolved
-                      ? '<span class="status-ok">Sẵn sàng cấp Let\'s Encrypt</span>'
-                      : `<span class="status-err">${esc(d.warning || 'Chưa phân giải DNS')}</span>`}</td>
+                      ? '<span class="st-ok">Sẵn sàng cấp Let\'s Encrypt</span>'
+                      : `<span class="st-err">${esc(d.warning || 'Chưa phân giải DNS')}</span>`}</td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -677,7 +696,7 @@ function openSslManagerModal(app, container) {
                   <input class="input mono" name="aliases" value="${esc((info.aliases || []).join(', '))}" placeholder="www.${esc(info.domain)}" />
                 </div>
               </div>
-              <div class="row" style="margin:8px 0 12px;gap:14px">
+              <div class="row" style="margin:8px 0 12px;gap:14px;flex-wrap:wrap">
                 <label class="checkbox-row">
                   <input type="checkbox" name="forceHttps" ${info.sslEnabled ? (info.forceHttps ? 'checked' : '') : 'checked'} />
                   <span>Ép chuyển hướng HTTP → HTTPS (301)</span>
@@ -690,9 +709,13 @@ function openSslManagerModal(app, container) {
                   <input type="checkbox" name="forceRenewal" />
                   <span>Ép cấp lại ngay (--force-renewal)</span>
                 </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="skipDnsCheck" />
+                  <span>Bỏ qua DNS Preflight nội bộ (dùng khi sau Cloudflare / Split-DNS)</span>
+                </label>
               </div>
               <p class="page-desc" style="margin-bottom:12px">
-                Xác thực thực qua webroot <code class="mono">${esc(info.acmeWebroot || '/www/acme')}/.well-known/acme-challenge/</code> trên cổng 80, tự động bật <code>ferrous-certbot-renew.timer</code> và tải lại ${esc(info.webServerEngine || 'nginx')}.
+                Tự động chuẩn bị vhost HTTP cổng 80, tự kiểm tra truy cập <code class="mono">${esc(info.acmeWebroot || '/www/acme')}/.well-known/acme-challenge/</code>, mở UFW 443/tcp, bật <code>ferrous-certbot-renew.timer</code> và tải lại ${esc(info.webServerEngine || 'nginx')}.
               </p>
               <div class="row" style="justify-content:flex-end">
                 <button type="submit" class="btn btn-primary" id="ssl-le-submit">Cấp / Gia hạn Let's Encrypt</button>
@@ -847,7 +870,8 @@ function openSslManagerModal(app, container) {
                 forceHttps: fd.get('forceHttps') === 'on',
                 autoInstallCertbot: fd.get('autoInstallCertbot') === 'on',
                 forceRenewal: fd.get('forceRenewal') === 'on',
-              });
+                skipDnsCheck: fd.get('skipDnsCheck') === 'on',
+              }, { timeoutMs: 210000, keepAlive: true });
               showOk(`Đã cấp & kích hoạt SSL Let's Encrypt thật cho ${info.domain}.`);
               paint();
               await renderApps(container);
@@ -867,7 +891,7 @@ function openSslManagerModal(app, container) {
                 fullchainPem: String(fd.get('fullchainPem') || ''),
                 privateKeyPem: String(fd.get('privateKeyPem') || ''),
                 forceHttps: fd.get('forceHttps') === 'on',
-              });
+              }, { timeoutMs: 60000, keepAlive: true });
               showOk(`Đã xác minh khớp cặp khóa & cài chứng chỉ SSL cho ${info.domain}.`);
               paint();
               await renderApps(container);
@@ -886,7 +910,7 @@ function openSslManagerModal(app, container) {
               info = await api('POST', `/api/apps/${encodeURIComponent(app.id)}/ssl/self-signed`, {
                 validityDays: Number(fd.get('validityDays') || 365),
                 forceHttps: fd.get('forceHttps') === 'on',
-              });
+              }, { timeoutMs: 60000, keepAlive: true });
               showOk(`Đã tạo & áp dụng chứng chỉ Self-Signed cho ${info.domain}.`);
               paint();
               await renderApps(container);

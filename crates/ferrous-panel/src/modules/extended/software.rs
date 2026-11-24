@@ -212,7 +212,23 @@ pub(super) async fn install_zero_node_cli_package(
             let dl = executor
                 .run(
                     AllowedBinary::Curl,
-                    &["-fsSL", "--retry", "3", "-o", &zip_str, &url],
+                    &[
+                        "-fsSL",
+                        "--proto",
+                        "=https",
+                        "--tlsv1.2",
+                        "--connect-timeout",
+                        "15",
+                        "--max-time",
+                        "180",
+                        "--retry",
+                        "3",
+                        "--retry-delay",
+                        "2",
+                        "-o",
+                        &zip_str,
+                        &url,
+                    ],
                     APT_TIMEOUT,
                 )
                 .await?;
@@ -222,6 +238,11 @@ pub(super) async fn install_zero_node_cli_package(
                     exit_code: dl.exit_code,
                     stderr: dl.stderr,
                 });
+            }
+            if std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0) == 0 {
+                return Err(PanelError::BadGateway(
+                    "Tệp tải về Bun rỗng (0 byte) từ GitHub Releases.".to_string(),
+                ));
             }
             let tmp_str = tmp_dir.display().to_string();
             let uz = executor
@@ -265,7 +286,23 @@ pub(super) async fn install_zero_node_cli_package(
             let dl = executor
                 .run(
                     AllowedBinary::Curl,
-                    &["-fsSL", "--retry", "3", "-o", &dl_str, &url],
+                    &[
+                        "-fsSL",
+                        "--proto",
+                        "=https",
+                        "--tlsv1.2",
+                        "--connect-timeout",
+                        "15",
+                        "--max-time",
+                        "180",
+                        "--retry",
+                        "3",
+                        "--retry-delay",
+                        "2",
+                        "-o",
+                        &dl_str,
+                        &url,
+                    ],
                     APT_TIMEOUT,
                 )
                 .await?;
@@ -275,6 +312,11 @@ pub(super) async fn install_zero_node_cli_package(
                     exit_code: dl.exit_code,
                     stderr: dl.stderr,
                 });
+            }
+            if std::fs::metadata(&dl_path).map(|m| m.len()).unwrap_or(0) == 0 {
+                return Err(PanelError::BadGateway(
+                    "Tệp tải về Tailwind CSS rỗng (0 byte) từ GitHub Releases.".to_string(),
+                ));
             }
             let inst = executor
                 .run(
@@ -310,7 +352,23 @@ pub(super) async fn install_zero_node_cli_package(
             let dl = executor
                 .run(
                     AllowedBinary::Curl,
-                    &["-fsSL", "--retry", "3", "-o", &zip_str, &url],
+                    &[
+                        "-fsSL",
+                        "--proto",
+                        "=https",
+                        "--tlsv1.2",
+                        "--connect-timeout",
+                        "15",
+                        "--max-time",
+                        "180",
+                        "--retry",
+                        "3",
+                        "--retry-delay",
+                        "2",
+                        "-o",
+                        &zip_str,
+                        &url,
+                    ],
                     APT_TIMEOUT,
                 )
                 .await?;
@@ -320,6 +378,11 @@ pub(super) async fn install_zero_node_cli_package(
                     exit_code: dl.exit_code,
                     stderr: dl.stderr,
                 });
+            }
+            if std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0) == 0 {
+                return Err(PanelError::BadGateway(
+                    "Tệp tải về Deno rỗng (0 byte) từ GitHub Releases.".to_string(),
+                ));
             }
             let tmp_str = tmp_dir.display().to_string();
             let uz = executor
@@ -361,6 +424,19 @@ pub(super) async fn install_zero_node_cli_package(
                     AllowedBinary::Curl,
                     &[
                         "-fsSL",
+                        "--proto",
+                        "=https",
+                        "--tlsv1.2",
+                        "--connect-timeout",
+                        "12",
+                        "--max-time",
+                        "25",
+                        "--retry",
+                        "2",
+                        "--retry-delay",
+                        "1",
+                        "-H",
+                        "Accept: application/vnd.github+json",
                         "-H",
                         "User-Agent: FerrousPanel/2.5",
                         "https://api.github.com/repos/bytecodealliance/wasmtime/releases/latest",
@@ -402,7 +478,23 @@ pub(super) async fn install_zero_node_cli_package(
             let dl = executor
                 .run(
                     AllowedBinary::Curl,
-                    &["-fsSL", "--retry", "3", "-o", &tar_str, &download_url],
+                    &[
+                        "-fsSL",
+                        "--proto",
+                        "=https",
+                        "--tlsv1.2",
+                        "--connect-timeout",
+                        "15",
+                        "--max-time",
+                        "180",
+                        "--retry",
+                        "3",
+                        "--retry-delay",
+                        "2",
+                        "-o",
+                        &tar_str,
+                        &download_url,
+                    ],
                     APT_TIMEOUT,
                 )
                 .await?;
@@ -412,6 +504,11 @@ pub(super) async fn install_zero_node_cli_package(
                     exit_code: dl.exit_code,
                     stderr: dl.stderr,
                 });
+            }
+            if std::fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0) == 0 {
+                return Err(PanelError::BadGateway(
+                    "Tệp tải về Wasmtime rỗng (0 byte) từ GitHub Releases.".to_string(),
+                ));
             }
             let tmp_str = tmp_dir.display().to_string();
             let ex = executor

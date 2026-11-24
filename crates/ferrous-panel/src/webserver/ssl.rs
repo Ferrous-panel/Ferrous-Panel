@@ -5,11 +5,13 @@ use crate::system::validate::Domain;
 use crate::webserver::{atomic_write_file, AcmeEmail, BoxFuture, CommandExecutor};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CMD_TIMEOUT: Duration = Duration::from_secs(30);
 const CERTBOT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -136,7 +138,21 @@ impl SslManager {
         Ok((fullchain, privkey))
     }
 
+    /// Ensures `/www/acme/.well-known/acme-challenge` exists with world-traversable `0755` permissions
+    /// so both `www-data` (Nginx) and `ferrousx` can serve HTTP-01 challenge tokens.
+    pub fn ensure_acme_webroot_permissions(&self) -> Result<PathBuf, PanelError> {
+        let root = self.paths.acme_webroot.as_path();
+        let well_known = root.join(".well-known");
+        let challenge_dir = well_known.join("acme-challenge");
+        std::fs::create_dir_all(&challenge_dir)?;
+        for dir in [root, well_known.as_path(), challenge_dir.as_path()] {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+        }
+        Ok(challenge_dir)
+    }
+
     /// Reads real certificate status, issuer, subject, and expiration directly from disk via `openssl x509`.
+    /// Degrades gracefully to `Missing` if the certificate file is corrupt/unreadable so the SSL Manager UI stays usable.
     pub fn read_cert_status<'a>(
         &'a self,
         domain: &'a Domain,
@@ -145,23 +161,24 @@ impl SslManager {
             let (cert_path, key_path) = self.site_cert_paths(domain)?;
             let cert_str = cert_path.display().to_string();
             let key_str = key_path.display().to_string();
+            let missing_status = || SiteSslStatus {
+                domain: domain.clone(),
+                present: false,
+                status: SslCertState::Missing,
+                cert_path: cert_str.clone(),
+                key_path: key_str.clone(),
+                issuer: None,
+                subject: None,
+                not_before: None,
+                not_after: None,
+                days_remaining: None,
+                provider: None,
+                san_domains: Vec::new(),
+                sha256_fingerprint: None,
+            };
 
             if !cert_path.is_file() || !key_path.is_file() {
-                return Ok(SiteSslStatus {
-                    domain: domain.clone(),
-                    present: false,
-                    status: SslCertState::Missing,
-                    cert_path: cert_str,
-                    key_path: key_str,
-                    issuer: None,
-                    subject: None,
-                    not_before: None,
-                    not_after: None,
-                    days_remaining: None,
-                    provider: None,
-                    san_domains: Vec::new(),
-                    sha256_fingerprint: None,
-                });
+                return Ok(missing_status());
             }
 
             if !self.executor.is_binary_available(AllowedBinary::OpenSsl) {
@@ -211,18 +228,70 @@ impl SslManager {
             };
 
             if !out.success {
-                return Err(PanelError::CommandFailed {
-                    binary: AllowedBinary::OpenSsl.label(),
-                    exit_code: out.exit_code,
-                    stderr: out.stderr,
-                });
+                tracing::warn!(
+                    domain = %domain.as_str(),
+                    cert = %cert_str,
+                    stderr = %out.stderr.trim(),
+                    "corrupt or unreadable SSL certificate on disk; treating as missing"
+                );
+                return Ok(missing_status());
             }
 
-            parse_openssl_x509_output(domain, &cert_str, &key_str, &out.stdout, Utc::now())
+            match parse_openssl_x509_output(domain, &cert_str, &key_str, &out.stdout, Utc::now()) {
+                Ok(parsed) => Ok(parsed),
+                Err(err) => {
+                    tracing::warn!(
+                        domain = %domain.as_str(),
+                        cert = %cert_str,
+                        error = %err,
+                        "failed to parse openssl x509 metadata; treating as missing"
+                    );
+                    Ok(missing_status())
+                }
+            }
         })
     }
 
+    async fn resolve_public_dns_via_dig(&self, name: &str) -> Vec<String> {
+        if !self.executor.is_binary_available(AllowedBinary::Dig) {
+            return Vec::new();
+        }
+        let mut ips = Vec::new();
+        for resolver in ["@1.1.1.1", "@8.8.8.8"] {
+            for rtype in ["A", "AAAA"] {
+                if let Ok(out) = self
+                    .executor
+                    .run(
+                        AllowedBinary::Dig,
+                        &[resolver, "+short", "+time=3", "+tries=1", name, rtype],
+                        Duration::from_secs(4),
+                    )
+                    .await
+                {
+                    if out.success {
+                        for line in out.stdout.lines() {
+                            let candidate = line.trim();
+                            if let Ok(ip) = candidate.parse::<IpAddr>() {
+                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                    let s = ip.to_string();
+                                    if !ips.contains(&s) {
+                                        ips.push(s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if !ips.is_empty() {
+                break;
+            }
+        }
+        ips
+    }
+
     /// Checks live DNS A/AAAA resolution for the primary domain and aliases.
+    /// Falls back to public DNS (`dig @1.1.1.1 / @8.8.8.8`) if `/etc/hosts` resolves the host to loopback.
     pub fn check_dns_preflight<'a>(
         &'a self,
         domain: &'a Domain,
@@ -240,7 +309,7 @@ impl SslManager {
                 let name = host.as_str().to_string();
                 match tokio::time::timeout(
                     Duration::from_secs(4),
-                    tokio::net::lookup_host((name.clone(), 80u16)),
+                    tokio::net::lookup_host((name.as_str(), 80u16)),
                 )
                 .await
                 {
@@ -257,7 +326,28 @@ impl SslManager {
                                 ips.push(s);
                             }
                         }
-                        if ips.is_empty() {
+                        if !ips.is_empty() && !all_local {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: true,
+                                ips,
+                                warning: None,
+                            });
+                            continue;
+                        }
+                        let public_ips = self.resolve_public_dns_via_dig(&name).await;
+                        if !public_ips.is_empty() {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: true,
+                                ips: public_ips,
+                                warning: if all_local && !ips.is_empty() {
+                                    Some("DNS công cộng hợp lệ (1.1.1.1/8.8.8.8); /etc/hosts cục bộ đang trỏ loopback.".to_string())
+                                } else {
+                                    None
+                                },
+                            });
+                        } else if ips.is_empty() {
                             results.push(SslDnsPreflight {
                                 domain: name,
                                 resolved: false,
@@ -266,7 +356,7 @@ impl SslManager {
                                     "Chưa có bản ghi DNS A/AAAA trỏ về máy chủ.".to_string(),
                                 ),
                             });
-                        } else if all_local {
+                        } else {
                             results.push(SslDnsPreflight {
                                 domain: name,
                                 resolved: false,
@@ -275,34 +365,142 @@ impl SslManager {
                                     "Tên miền đang trỏ về IP loopback/nội bộ; Let's Encrypt yêu cầu IP công cộng.".to_string(),
                                 ),
                             });
-                        } else {
-                            results.push(SslDnsPreflight {
-                                domain: name,
-                                resolved: true,
-                                ips,
-                                warning: None,
-                            });
                         }
                     }
                     Ok(Err(err)) => {
-                        results.push(SslDnsPreflight {
-                            domain: name,
-                            resolved: false,
-                            ips: Vec::new(),
-                            warning: Some(format!("Không phân giải được DNS: {err}")),
-                        });
+                        let public_ips = self.resolve_public_dns_via_dig(&name).await;
+                        if !public_ips.is_empty() {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: true,
+                                ips: public_ips,
+                                warning: None,
+                            });
+                        } else {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: false,
+                                ips: Vec::new(),
+                                warning: Some(format!("Không phân giải được DNS: {err}")),
+                            });
+                        }
                     }
                     Err(_) => {
-                        results.push(SslDnsPreflight {
-                            domain: name,
-                            resolved: false,
-                            ips: Vec::new(),
-                            warning: Some("Quá thời gian kiểm tra DNS (4s).".to_string()),
-                        });
+                        let public_ips = self.resolve_public_dns_via_dig(&name).await;
+                        if !public_ips.is_empty() {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: true,
+                                ips: public_ips,
+                                warning: None,
+                            });
+                        } else {
+                            results.push(SslDnsPreflight {
+                                domain: name,
+                                resolved: false,
+                                ips: Vec::new(),
+                                warning: Some("Quá thời gian kiểm tra DNS (4s).".to_string()),
+                            });
+                        }
                     }
-                };
+                }
             }
             results
+        })
+    }
+
+    /// Performs a real local HTTP-01 self-test against `probe_addr` to verify that the active web server
+    /// serves `/.well-known/acme-challenge/<token>` from `acme_webroot` with HTTP 200 before calling Certbot.
+    pub fn verify_acme_http01_reachable<'a>(
+        &'a self,
+        domain: &'a Domain,
+        probe_addr: SocketAddr,
+    ) -> BoxFuture<'a, Result<(), PanelError>> {
+        Box::pin(async move {
+            let challenge_dir = self.ensure_acme_webroot_permissions()?;
+            let seq = SSL_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let token_name = format!("ferrous-acme-check-{}-{seq}-{ts}", std::process::id());
+            let token_body = format!("ferrous-acme-ok-{seq}-{ts}");
+            let token_path = challenge_dir.join(&token_name);
+            atomic_write_file(&token_path, token_body.as_bytes(), 0o644)?;
+            let _cleanup = TempFileGuard(token_path);
+
+            let host_hdr = domain.as_str().to_string();
+            let req_path = format!("/.well-known/acme-challenge/{token_name}");
+            let expected_body = token_body.clone();
+            let webroot_str = self.paths.acme_webroot.as_path().display().to_string();
+
+            tokio::task::spawn_blocking(move || {
+                let mut stream = TcpStream::connect_timeout(&probe_addr, Duration::from_secs(4))
+                    .map_err(|err| {
+                        PanelError::Conflict(format!(
+                            "Không thể kết nối HTTP cổng {} để xác minh ACME challenge cho '{host_hdr}': {err}. Hãy đảm bảo Nginx hoặc FerrousX đang chạy và mở cổng 80.",
+                            probe_addr.port()
+                        ))
+                    })?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(4)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(4)));
+                let req = format!(
+                    "GET {req_path} HTTP/1.1\r\nHost: {host_hdr}\r\nUser-Agent: FerrousPanel-ACME-Check/1.0\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(req.as_bytes()).map_err(|err| {
+                    PanelError::Conflict(format!(
+                        "Gửi yêu cầu kiểm tra ACME HTTP-01 tới {probe_addr} thất bại: {err}"
+                    ))
+                })?;
+
+                let mut buf = [0u8; 4096];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total += n;
+                            if total == buf.len() {
+                                break;
+                            }
+                        }
+                        Err(e)
+                            if e.kind() == std::io::ErrorKind::WouldBlock
+                                || e.kind() == std::io::ErrorKind::TimedOut =>
+                        {
+                            break;
+                        }
+                        Err(err) => {
+                            return Err(PanelError::Conflict(format!(
+                                "Đọc phản hồi kiểm tra ACME HTTP-01 thất bại: {err}"
+                            )));
+                        }
+                    }
+                }
+
+                let raw = String::from_utf8_lossy(&buf[..total]);
+                let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_ref(), ""));
+                let status_line = head.lines().next().unwrap_or("");
+                let status_code = status_line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(0);
+
+                if status_code == 200 && body.trim().contains(expected_body.as_str()) {
+                    return Ok(());
+                }
+                if (300..400).contains(&status_code) {
+                    return Err(PanelError::Conflict(format!(
+                        "Đường dẫn ACME HTTP-01 ({req_path}) cho '{host_hdr}' đang bị chuyển hướng HTTP {status_code} thay vì trả trực tiếp tệp từ {webroot_str}. Hãy kiểm tra lại vhost cổng 80."
+                    )));
+                }
+                Err(PanelError::Conflict(format!(
+                    "Kiểm tra ACME HTTP-01 cục bộ cho '{host_hdr}' thất bại (HTTP {status_code}). Máy chủ web tại {probe_addr} không phục vụ đúng thư mục {webroot_str}/.well-known/acme-challenge/ — vui lòng kiểm tra lại cấu hình vhost."
+                )))
+            })
+            .await
+            .map_err(|_| PanelError::Internal("ACME HTTP-01 self-check task cancelled".to_string()))?
         })
     }
 
@@ -427,15 +625,10 @@ impl SslManager {
         aliases: &'a [Domain],
         email: Option<&'a AcmeEmail>,
     ) -> BoxFuture<'a, Result<SiteSslStatus, PanelError>> {
-        self.issue_or_renew_letsencrypt(domain, aliases, email, false, false)
+        self.issue_or_renew_letsencrypt_with_options(domain, aliases, email, false, false, false)
     }
 
-    /// Full production Let's Encrypt issuance/expansion/renewal flow (aaPanel/CloudPanel style):
-    /// 1. Optionally installs `certbot` via `apt-get` if absent.
-    /// 2. Runs DNS preflight check for primary domain + SAN aliases.
-    /// 3. Cleans non-certbot (self-signed/custom) regular files in `live/<domain>` so certbot never creates `<domain>-0001`.
-    /// 4. Runs `certbot certonly --webroot --cert-name <domain> --expand ...` with 120s timeout.
-    /// 5. Ensures the twice-daily `ferrous-certbot-renew.timer` systemd unit is enabled.
+    /// Full production Let's Encrypt issuance/expansion/renewal flow (aaPanel/CloudPanel style).
     pub fn issue_or_renew_letsencrypt<'a>(
         &'a self,
         domain: &'a Domain,
@@ -444,57 +637,86 @@ impl SslManager {
         auto_install_certbot: bool,
         force_renewal: bool,
     ) -> BoxFuture<'a, Result<SiteSslStatus, PanelError>> {
+        self.issue_or_renew_letsencrypt_with_options(
+            domain,
+            aliases,
+            email,
+            auto_install_certbot,
+            force_renewal,
+            false,
+        )
+    }
+
+    /// Full production Let's Encrypt issuance/expansion/renewal flow with optional DNS preflight bypass
+    /// and automatic rollback of prior non-certbot (self-signed/custom) certificates on Certbot failure.
+    pub fn issue_or_renew_letsencrypt_with_options<'a>(
+        &'a self,
+        domain: &'a Domain,
+        aliases: &'a [Domain],
+        email: Option<&'a AcmeEmail>,
+        auto_install_certbot: bool,
+        force_renewal: bool,
+        skip_dns_check: bool,
+    ) -> BoxFuture<'a, Result<SiteSslStatus, PanelError>> {
         Box::pin(async move {
             self.ensure_certbot_installed(auto_install_certbot).await?;
 
             // Pre-check DNS A/AAAA resolution for primary domain and aliases before burning Let's Encrypt rate limit.
-            let preflight = self.check_dns_preflight(domain, aliases).await;
-            for item in &preflight {
-                if !item.resolved {
-                    return Err(PanelError::Conflict(format!(
-                        "Kiểm tra DNS thất bại cho '{}': {}. Hãy trỏ bản ghi A/AAAA về IP máy chủ (và nếu dùng Cloudflare hãy tắt tạm proxy hoặc mở cổng 80) trước khi cấp Let's Encrypt.",
-                        item.domain,
-                        item.warning.as_deref().unwrap_or("chưa phân giải được")
-                    )));
+            if !skip_dns_check {
+                let preflight = self.check_dns_preflight(domain, aliases).await;
+                for item in &preflight {
+                    if !item.resolved {
+                        return Err(PanelError::Conflict(format!(
+                            "Kiểm tra DNS thất bại cho '{}': {}. Hãy trỏ bản ghi A/AAAA về IP máy chủ (hoặc đánh dấu 'Bỏ qua DNS Preflight' nếu dùng Split-DNS / Cloudflare) trước khi cấp Let's Encrypt.",
+                            item.domain,
+                            item.warning.as_deref().unwrap_or("chưa phân giải được")
+                        )));
+                    }
                 }
             }
 
-            let challenge_dir = self
-                .paths
-                .acme_webroot
-                .as_path()
-                .join(".well-known")
-                .join("acme-challenge");
-            std::fs::create_dir_all(&challenge_dir)?;
+            let _ = self.ensure_acme_webroot_permissions()?;
 
             // If live/<domain>/fullchain.pem exists as a non-symlink regular file (self-signed or custom PEM),
-            // snapshot and temporarily remove the non-certbot files so certbot writes directly to live/<domain>
-            // instead of <domain>-0001; if certbot fails, restore the snapshot so the active vhost never breaks.
+            // back it up first and remove it so certbot writes directly to live/<domain> instead of <domain>-0001.
+            // If Certbot fails for any reason, restore the backed-up certificate so HTTPS is never broken.
             let (cert_path, key_path) = self.site_cert_paths(domain)?;
             let is_non_certbot_cert = cert_path
                 .symlink_metadata()
                 .map(|m| m.file_type().is_file())
                 .unwrap_or(false);
-            let backup_non_certbot = if is_non_certbot_cert {
-                let prev_cert = std::fs::read(&cert_path).ok();
-                let prev_key = std::fs::read(&key_path).ok();
+            let mut backup_cert_bytes: Option<Vec<u8>> = None;
+            let mut backup_key_bytes: Option<Vec<u8>> = None;
+            if is_non_certbot_cert {
+                backup_cert_bytes = std::fs::read(&cert_path).ok();
+                backup_key_bytes = std::fs::read(&key_path).ok();
                 let _ = std::fs::remove_file(&cert_path);
                 let _ = std::fs::remove_file(&key_path);
                 if let Some(parent) = cert_path.parent() {
                     let _ = std::fs::remove_dir(parent);
                 }
-                prev_cert.zip(prev_key)
-            } else {
-                None
-            };
-            let restore_backup = |bkp: &Option<(Vec<u8>, Vec<u8>)>| {
-                if let Some((c_bytes, k_bytes)) = bkp {
-                    let _ = atomic_write_file(&cert_path, c_bytes, 0o644);
-                    let _ = atomic_write_file(&key_path, k_bytes, 0o600);
+            }
+
+            let restore_backup = || {
+                if let (Some(ref c), Some(ref k)) = (&backup_cert_bytes, &backup_key_bytes) {
+                    let _ = atomic_write_file(&cert_path, c, 0o644);
+                    let _ = atomic_write_file(&key_path, k, 0o600);
                 }
             };
 
-            let mut owned_args = self.build_certbot_args(domain, aliases, email)?;
+            let mut owned_args = match self.build_certbot_args(domain, aliases, email) {
+                Ok(args) => args,
+                Err(err) => {
+                    restore_backup();
+                    return Err(err);
+                }
+            };
+            // Avoid failing Certbot when reload_hook_path binary does not exist on disk (e.g. non-standard install path).
+            if !self.paths.reload_hook_path.exists() {
+                if let Some(pos) = owned_args.iter().position(|a| a == "--deploy-hook") {
+                    owned_args.drain(pos..=(pos + 1).min(owned_args.len() - 1));
+                }
+            }
             owned_args.push("--cert-name".to_string());
             owned_args.push(domain.as_str().to_string());
             owned_args.push("--expand".to_string());
@@ -512,13 +734,13 @@ impl SslManager {
             {
                 Ok(out) => out,
                 Err(err) => {
-                    restore_backup(&backup_non_certbot);
+                    restore_backup();
                     return Err(err);
                 }
             };
 
             if !out.success {
-                restore_backup(&backup_non_certbot);
+                restore_backup();
                 let reason = if !out.stderr.trim().is_empty() {
                     out.stderr.trim().to_string()
                 } else if !out.stdout.trim().is_empty() {
@@ -674,13 +896,9 @@ impl SslManager {
             let days_str = days.to_string();
 
             let mut san_entries = vec![format!("DNS:{}", domain.as_str())];
-            if !domain.as_str().starts_with("www.") {
-                san_entries.push(format!("DNS:www.{}", domain.as_str()));
-            }
             for alias in aliases {
-                let entry = format!("DNS:{}", alias.as_str());
-                if !san_entries.contains(&entry) {
-                    san_entries.push(entry);
+                if alias.as_str() != domain.as_str() {
+                    san_entries.push(format!("DNS:{}", alias.as_str()));
                 }
             }
             let san_ext = format!("subjectAltName={}", san_entries.join(","));
@@ -720,12 +938,6 @@ impl SslManager {
                         "-subj",
                         &subj,
                         "-addext",
-                        "basicConstraints=critical,CA:FALSE",
-                        "-addext",
-                        "keyUsage=critical,digitalSignature,keyEncipherment",
-                        "-addext",
-                        "extendedKeyUsage=serverAuth",
-                        "-addext",
                         &san_ext,
                     ],
                     CMD_TIMEOUT,
@@ -763,7 +975,7 @@ impl SslManager {
         Ok(removed)
     }
 
-    /// Runs `certbot renew --non-interactive --deploy-hook "<hook> --reload-webserver"`.
+    /// Runs `certbot renew --non-interactive` (with `--deploy-hook` when the reload hook binary exists).
     pub fn renew_all(&self) -> BoxFuture<'_, Result<(), PanelError>> {
         Box::pin(async move {
             if !self.executor.is_binary_available(AllowedBinary::Certbot) {
@@ -775,19 +987,25 @@ impl SslManager {
             if hook_cmd.contains('\0') {
                 return Err(PanelError::Forbidden("invalid deploy-hook path".to_string()));
             }
+            let mut args = vec!["renew".to_string(), "--non-interactive".to_string()];
+            if self.paths.reload_hook_path.exists() {
+                args.push("--deploy-hook".to_string());
+                args.push(hook_cmd);
+            }
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
             let out = self
                 .executor
-                .run(
-                    AllowedBinary::Certbot,
-                    &["renew", "--non-interactive", "--deploy-hook", &hook_cmd],
-                    CMD_TIMEOUT,
-                )
+                .run(AllowedBinary::Certbot, &arg_refs, CERTBOT_TIMEOUT)
                 .await?;
             if !out.success {
                 return Err(PanelError::CommandFailed {
                     binary: AllowedBinary::Certbot.label(),
                     exit_code: out.exit_code,
-                    stderr: out.stderr,
+                    stderr: if !out.stderr.trim().is_empty() {
+                        out.stderr
+                    } else {
+                        out.stdout
+                    },
                 });
             }
             Ok(())
@@ -899,10 +1117,10 @@ WantedBy=timers.target\n"
                                 "LoadState" => load_state = val.to_string(),
                                 "UnitFileState" => unit_file_state = val.to_string(),
                                 "ActiveState" => active_state = val.to_string(),
-                                "NextElapseUSecRealtime"
-                                    if !val.is_empty() && val != "n/a" =>
-                                {
-                                    next_run = Some(val.to_string());
+                                "NextElapseUSecRealtime" => {
+                                    if !val.is_empty() && val != "n/a" {
+                                        next_run = Some(val.to_string());
+                                    }
                                 }
                                 _ => {}
                             }
@@ -935,6 +1153,14 @@ struct TempDirGuard(PathBuf);
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
     }
 }
 
