@@ -309,7 +309,7 @@ impl SslManager {
                 let name = host.as_str().to_string();
                 match tokio::time::timeout(
                     Duration::from_secs(4),
-                    tokio::net::lookup_host((name.as_str(), 80u16)),
+                    tokio::net::lookup_host((host.as_str(), 80u16)),
                 )
                 .await
                 {
@@ -403,7 +403,7 @@ impl SslManager {
                             });
                         }
                     }
-                }
+                };
             }
             results
         })
