@@ -1111,6 +1111,13 @@ pub async fn switch_site_php_version(
             })
             .collect();
 
+        let cert_ready = webserver
+            .ssl
+            .site_cert_paths(&domain)
+            .map(|(cert, key)| cert.is_file() && key.is_file())
+            .unwrap_or(false);
+        let safe_ssl = app.ssl_enabled && cert_ready;
+        app.ssl_enabled = safe_ssl;
         let spec = crate::webserver::SiteSpec {
             domain,
             aliases,
@@ -1119,9 +1126,9 @@ pub async fn switch_site_php_version(
                 php_version: fpm_ver,
                 index_file: SafeFilename::parse("index.php")?,
             },
-            ssl_enabled: app.ssl_enabled,
-            redirect_https: app.ssl_enabled && app.force_https,
-            http3_quic: app.http3_quic,
+            ssl_enabled: safe_ssl,
+            redirect_https: safe_ssl && app.force_https,
+            http3_quic: safe_ssl && app.http3_quic,
             websocket_enabled: app.websocket_enabled,
             rate_limit_rps: app.rate_limit_rps,
             redirects,

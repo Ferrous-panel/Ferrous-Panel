@@ -772,6 +772,10 @@ update_ferrousx_from_github() {
         ' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs" ] && grep -q 'Some(load_certified_key(&clean_cert, &clean_key)?)' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; then
+        echo -e "${CYAN}[*] Applying compatibility patch: graceful HTTP fallback when SSL cert file is missing in upstream ferrousx-core/src/config.rs...${NC}"
+        sed -i 's/Some(load_certified_key(&clean_cert, &clean_key)?)/if clean_cert.is_file() \&\& clean_key.is_file() { Some(load_certified_key(\&clean_cert, \&clean_key)?) } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); None }/' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"
+      fi
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
       ensure_swap_for_build
       configure_fast_cargo_env
@@ -824,6 +828,27 @@ update_ferrousx_from_github() {
   fi
 
   ensure_ferrousx_runtime_files
+
+  # Sanitize any stale /etc/ferrousx/sites/*.toml that has ssl.enabled = true pointing to a missing cert_path
+  if [ -d /etc/ferrousx/sites ]; then
+    for site_toml in /etc/ferrousx/sites/*.toml; do
+      [ -f "$site_toml" ] || continue
+      local cert_val
+      cert_val="$(grep -E '^[[:space:]]*cert_path[[:space:]]*=' "$site_toml" 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d '[:space:]\"'\''' || true)"
+      if [ -n "$cert_val" ] && [ ! -f "$cert_val" ]; then
+        if grep -Eq '^[[:space:]]*(enabled|redirect_https)[[:space:]]*=[[:space:]]*true' "$site_toml" 2>/dev/null; then
+          echo -e "${YELLOW}[!] SSL certificate missing (${cert_val}) in ${site_toml}; downgrading site to HTTP-only so FerrousX can start cleanly...${NC}"
+          awk '
+            /^\[ssl\]/ { in_ssl=1; print; next }
+            /^\[/ { in_ssl=0 }
+            in_ssl && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true/ { print "enabled = false"; next }
+            in_ssl && /^[[:space:]]*redirect_https[[:space:]]*=[[:space:]]*true/ { print "redirect_https = false"; next }
+            { print }
+          ' "$site_toml" > "${site_toml}.tmp" && chmod 0644 "${site_toml}.tmp" && mv -f "${site_toml}.tmp" "$site_toml"
+        fi
+      fi
+    done
+  fi
 
   if [ -x "${BIN_FERROUSX}" ]; then
     if ! "${BIN_FERROUSX}" --check-config --config /etc/ferrousx/ferrousx.toml; then

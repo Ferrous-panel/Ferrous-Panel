@@ -1874,8 +1874,25 @@ impl WebServerManager {
             )));
         }
 
-        let sites = self.store.list_sites()?;
-        for site in &sites {
+        let mut sites = self.store.list_sites()?;
+        for site in &mut sites {
+            if site.ssl_enabled {
+                let cert_ready = self
+                    .ssl
+                    .site_cert_paths(&site.domain)
+                    .map(|(cert, key)| cert.is_file() && key.is_file())
+                    .unwrap_or(false);
+                if !cert_ready {
+                    tracing::warn!(
+                        domain = %site.domain.as_str(),
+                        "SSL certificate missing on disk during switch_engine; downgrading site to HTTP-only"
+                    );
+                    site.ssl_enabled = false;
+                    site.redirect_https = false;
+                    site.http3_quic = false;
+                    let _ = self.store.upsert_site(site);
+                }
+            }
             site.validate_supported()?;
         }
 

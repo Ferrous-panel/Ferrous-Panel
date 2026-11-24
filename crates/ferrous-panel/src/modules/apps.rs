@@ -1968,7 +1968,12 @@ pub async fn update_app_config(
     app.memory_limit_mb = memory_limit_mb;
     app.rate_limit_rps = rate_limit_rps;
     if let Some(ssl) = ssl_enabled {
-        app.ssl_enabled = ssl;
+        let cert_ready = webserver
+            .ssl
+            .site_cert_paths(&domain)
+            .map(|(cert, key)| cert.is_file() && key.is_file())
+            .unwrap_or(false);
+        app.ssl_enabled = ssl && cert_ready;
     }
     if let Some(h3) = http3_quic {
         app.http3_quic = h3;

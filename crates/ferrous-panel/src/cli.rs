@@ -1174,6 +1174,27 @@ pub async fn run_fp_command(
                 .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/ferrous-panel"));
             let manager = WebServerManager::open_system(&config.db_path(), hook_exe)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Ok(sites) = manager.store.list_sites() {
+                for mut site in sites {
+                    if site.ssl_enabled {
+                        let cert_ready = manager
+                            .ssl
+                            .site_cert_paths(&site.domain)
+                            .map(|(c, k)| c.is_file() && k.is_file())
+                            .unwrap_or(false);
+                        if !cert_ready {
+                            eprintln!(
+                                "[!] SSL certificate missing for {}; downgrading site to HTTP-only...",
+                                site.domain
+                            );
+                            site.ssl_enabled = false;
+                            site.redirect_https = false;
+                            site.http3_quic = false;
+                            let _ = manager.upsert_and_apply_site(&site, None).await;
+                        }
+                    }
+                }
+            }
             let report = manager
                 .validate_configured_engine()
                 .await
