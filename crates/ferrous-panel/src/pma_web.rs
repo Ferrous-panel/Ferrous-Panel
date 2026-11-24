@@ -161,6 +161,25 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
     .muted { color: var(--muted); font-size: 12px; }
     label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 4px; }
     .hidden { display: none !important; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.76);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 16px;
+    }
+    .modal-card {
+      width: 100%;
+      max-width: 440px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+    }
   </style>
 </head>
 <body>
@@ -219,6 +238,20 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
     </main>
   </div>
 
+  <div id="pmaDialog" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <h3 id="pmaDialogTitle" style="margin:0 0 8px;font-size:15px;"></h3>
+      <p id="pmaDialogMsg" class="muted" style="margin:0 0 12px;"></p>
+      <div id="pmaDialogInputWrap" class="hidden" style="margin-bottom:12px;">
+        <input id="pmaDialogInput" type="text" />
+      </div>
+      <div class="row" style="justify-content:flex-end;">
+        <button type="button" id="pmaDialogCancel">Hủy</button>
+        <button type="button" id="pmaDialogOk" class="primary">Xác nhận</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       const path = window.location.pathname || '/';
@@ -256,9 +289,60 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         return isMysql ? ('`' + clean + '`') : ('"' + clean + '"');
       }
 
-      function sqlQuoteVal(val) {
+      function sqlQuoteVal(val, isMysql) {
         if (val === null || val === undefined || val === 'NULL') return 'NULL';
-        return "'" + String(val).replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
+        const s = String(val);
+        const escaped = isMysql ? s.replace(/\\/g, '\\\\').replace(/'/g, "''") : s.replace(/'/g, "''");
+        return "'" + escaped + "'";
+      }
+
+      function askDialog(opts) {
+        return new Promise((resolve) => {
+          const backdrop = document.getElementById('pmaDialog');
+          const titleEl = document.getElementById('pmaDialogTitle');
+          const msgEl = document.getElementById('pmaDialogMsg');
+          const inputWrap = document.getElementById('pmaDialogInputWrap');
+          const inputEl = document.getElementById('pmaDialogInput');
+          const btnCancel = document.getElementById('pmaDialogCancel');
+          const btnOk = document.getElementById('pmaDialogOk');
+
+          titleEl.textContent = opts.title || 'Xác nhận thao tác';
+          msgEl.textContent = opts.message || '';
+          btnOk.textContent = opts.confirmText || 'Xác nhận';
+          btnOk.className = opts.danger ? 'danger' : 'primary';
+
+          if (opts.prompt) {
+            inputWrap.classList.remove('hidden');
+            inputEl.type = opts.inputType || 'text';
+            inputEl.value = opts.defaultValue || '';
+            inputEl.placeholder = opts.placeholder || '';
+          } else {
+            inputWrap.classList.add('hidden');
+            inputEl.value = '';
+          }
+
+          backdrop.classList.remove('hidden');
+          if (opts.prompt) {
+            setTimeout(() => inputEl.focus(), 10);
+          }
+
+          function cleanup(result) {
+            backdrop.classList.add('hidden');
+            btnCancel.removeEventListener('click', onCancel);
+            btnOk.removeEventListener('click', onOk);
+            inputEl.removeEventListener('keydown', onKey);
+            resolve(result);
+          }
+          function onCancel() { cleanup(null); }
+          function onOk() { cleanup(opts.prompt ? inputEl.value : true); }
+          function onKey(ev) {
+            if (ev.key === 'Enter') { ev.preventDefault(); onOk(); }
+            if (ev.key === 'Escape') { ev.preventDefault(); onCancel(); }
+          }
+          btnCancel.addEventListener('click', onCancel);
+          btnOk.addEventListener('click', onOk);
+          inputEl.addEventListener('keydown', onKey);
+        });
       }
 
       function showBanner(msg, isErr) {
@@ -462,7 +546,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             b.addEventListener('click', async () => {
               const id = b.getAttribute('data-pw-db');
               const nm = b.getAttribute('data-pw-name');
-              const npw = window.prompt('Nhập mật khẩu mới cho user của database "' + nm + '":');
+              const npw = await askDialog({
+                title: 'Đổi mật khẩu Database User',
+                message: 'Nhập mật khẩu mới cho user của database "' + nm + '":',
+                prompt: true,
+                inputType: 'password',
+                placeholder: 'Tối thiểu 8 ký tự',
+                confirmText: 'Lưu mật khẩu'
+              });
               if (!npw) return;
               try {
                 databases = await api('/databases/' + encodeURIComponent(id) + '/password', {
@@ -479,7 +570,13 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           el.querySelectorAll('[data-drop-db]').forEach((b) => {
             b.addEventListener('click', async () => {
               const id = b.getAttribute('data-drop-db');
-              if (!window.confirm('Xác nhận xóa vĩnh viễn database này?')) return;
+              const ok = await askDialog({
+                title: 'Xóa vĩnh viễn Database',
+                message: 'Xác nhận xóa vĩnh viễn database này? Dữ liệu sẽ không thể khôi phục.',
+                danger: true,
+                confirmText: 'Xóa Database'
+              });
+              if (!ok) return;
               try {
                 const list = await api('/databases/' + encodeURIComponent(id), { method: 'DELETE' });
                 databases = Array.isArray(list) ? list : [];
@@ -567,7 +664,13 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           }));
           el.querySelectorAll('[data-addcol-tbl]').forEach((b) => b.addEventListener('click', async () => {
             const tbl = b.getAttribute('data-addcol-tbl');
-            const colSpec = window.prompt('Nhập định nghĩa cột mới cho bảng "' + tbl + '" (VD: status VARCHAR(64) DEFAULT \'active\'):', 'extra_note TEXT');
+            const colSpec = await askDialog({
+              title: 'Thêm cột mới (ALTER TABLE)',
+              message: 'Nhập định nghĩa cột mới cho bảng "' + tbl + '" (VD: status VARCHAR(64) DEFAULT \'active\'):',
+              prompt: true,
+              defaultValue: 'extra_note TEXT',
+              confirmText: 'Thêm cột'
+            });
             if (!colSpec) return;
             const sql = 'ALTER TABLE ' + sqlQuoteId(tbl, isMysql) + ' ADD COLUMN ' + colSpec + ';';
             try {
@@ -584,7 +687,13 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           }));
           el.querySelectorAll('[data-trunc]').forEach((b) => b.addEventListener('click', async () => {
             const tbl = b.getAttribute('data-trunc');
-            if (!window.confirm('Xác nhận làm rỗng (TRUNCATE) toàn bộ dữ liệu trong bảng "' + tbl + '"?')) return;
+            const ok = await askDialog({
+              title: 'Làm rỗng bảng (TRUNCATE)',
+              message: 'Xác nhận làm rỗng (TRUNCATE) toàn bộ dữ liệu trong bảng "' + tbl + '"?',
+              danger: true,
+              confirmText: 'Truncate'
+            });
+            if (!ok) return;
             try {
               databases = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(tbl) + '/truncate', { method: 'POST' });
               showBanner('Đã làm rỗng bảng ' + tbl, false);
@@ -593,7 +702,13 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           }));
           el.querySelectorAll('[data-drop-tbl]').forEach((b) => b.addEventListener('click', async () => {
             const tbl = b.getAttribute('data-drop-tbl');
-            if (!window.confirm('Xác nhận XÓA BẢNG (DROP TABLE) "' + tbl + '"?')) return;
+            const ok = await askDialog({
+              title: 'Xóa bảng (DROP TABLE)',
+              message: 'Xác nhận XÓA BẢNG (DROP TABLE) "' + tbl + '"?',
+              danger: true,
+              confirmText: 'Drop Table'
+            });
+            if (!ok) return;
             try {
               databases = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(tbl), { method: 'DELETE' });
               if (activeTable === tbl) activeTable = '';
@@ -676,7 +791,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                 (effectiveRes.columns || []).forEach((c) => {
                   const newVal = fd.get(c);
                   if (String(newVal) !== String(rowObj[c] === null || rowObj[c] === undefined ? '' : rowObj[c])) {
-                    sets.push(sqlQuoteId(c, isMysql) + ' = ' + sqlQuoteVal(newVal));
+                    sets.push(sqlQuoteId(c, isMysql) + ' = ' + sqlQuoteVal(newVal, isMysql));
                   }
                 });
                 if (!sets.length) {
@@ -684,7 +799,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
                   return;
                 }
                 const sql = 'UPDATE ' + sqlQuoteId(activeTable, isMysql) + ' SET ' + sets.join(', ') +
-                  ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal) + ';';
+                  ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal, isMysql) + ';';
                 try {
                   const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
                     method: 'POST',
@@ -707,8 +822,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
               const rowObj = effectiveRes && effectiveRes.rows ? effectiveRes.rows[rIdx] : null;
               if (!rowObj || !pkCol) return;
               const pkVal = rowObj[pkCol];
-              if (!window.confirm('Xác nhận xóa dòng có ' + pkCol + ' = ' + pkVal + ' khỏi bảng ' + activeTable + '?')) return;
-              const sql = 'DELETE FROM ' + sqlQuoteId(activeTable, isMysql) + ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal) + ';';
+              const ok = await askDialog({
+                title: 'Xóa dòng (DELETE)',
+                message: 'Xác nhận xóa dòng có ' + pkCol + ' = ' + pkVal + ' khỏi bảng ' + activeTable + '?',
+                danger: true,
+                confirmText: 'Xóa dòng'
+              });
+              if (!ok) return;
+              const sql = 'DELETE FROM ' + sqlQuoteId(activeTable, isMysql) + ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal, isMysql) + ';';
               try {
                 const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
                   method: 'POST',
@@ -753,7 +874,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
               const raw = String(fd.get(c.name) || '');
               if (raw === '' && c.isPrimaryKey) return;
               colNames.push(sqlQuoteId(c.name, isMysql));
-              colVals.push(raw === '' && c.nullable ? 'NULL' : sqlQuoteVal(raw));
+              colVals.push(raw === '' && c.nullable ? 'NULL' : sqlQuoteVal(raw, isMysql));
             });
             if (!colNames.length) {
               showBanner('Hãy nhập ít nhất 1 cột.', true);
@@ -838,11 +959,15 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             const c3 = document.getElementById('ntCol3').value.trim();
             const isSqlite = db.engine.toLowerCase().includes('sqlite');
             const isPg = db.engine.toLowerCase().includes('postgres');
+            const qt = sqlQuoteId(t, isMysql);
+            const qc1 = sqlQuoteId(c1, isMysql);
+            const qc2 = sqlQuoteId(c2, isMysql);
+            const qc3 = sqlQuoteId(c3, isMysql);
             const ddl = isSqlite
-              ? 'CREATE TABLE ' + t + ' (' + c1 + ' INTEGER PRIMARY KEY AUTOINCREMENT, ' + c2 + ' TEXT NOT NULL, ' + c3 + " TEXT DEFAULT (datetime('now')));"
+              ? 'CREATE TABLE ' + qt + ' (' + qc1 + ' INTEGER PRIMARY KEY AUTOINCREMENT, ' + qc2 + ' TEXT NOT NULL, ' + qc3 + " TEXT DEFAULT (datetime('now')));"
               : isPg
-              ? 'CREATE TABLE ' + t + ' (' + c1 + ' BIGSERIAL PRIMARY KEY, ' + c2 + ' VARCHAR(255) NOT NULL, ' + c3 + ' TIMESTAMPTZ DEFAULT NOW());'
-              : 'CREATE TABLE `' + t + '` (`' + c1 + '` BIGINT AUTO_INCREMENT PRIMARY KEY, `' + c2 + '` VARCHAR(255) NOT NULL, `' + c3 + '` TIMESTAMP DEFAULT CURRENT_TIMESTAMP);';
+              ? 'CREATE TABLE ' + qt + ' (' + qc1 + ' BIGSERIAL PRIMARY KEY, ' + qc2 + ' VARCHAR(255) NOT NULL, ' + qc3 + ' TIMESTAMPTZ DEFAULT NOW());'
+              : 'CREATE TABLE ' + qt + ' (' + qc1 + ' BIGINT AUTO_INCREMENT PRIMARY KEY, ' + qc2 + ' VARCHAR(255) NOT NULL, ' + qc3 + ' TIMESTAMP DEFAULT CURRENT_TIMESTAMP);';
             try {
               const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
                 method: 'POST',

@@ -1221,6 +1221,7 @@ pub async fn delete_wireguard_peer(
     Ok(data)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_blake3_snapshot(
     store: &ModuleStore,
     config: &Config,

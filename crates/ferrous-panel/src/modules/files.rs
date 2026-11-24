@@ -77,12 +77,12 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn decode_hex_path(hex_id: &str) -> Result<String, PanelError> {
     let clean = hex_id.trim();
-    if clean.is_empty() || clean.len() % 2 != 0 || clean.len() > 2048 {
+    if clean.is_empty() || !clean.len().is_multiple_of(2) || clean.len() > 2048 {
         return Err(PanelError::Validation("invalid file identifier".to_string()));
     }
     let mut bytes = Vec::with_capacity(clean.len() / 2);
     let raw = clean.as_bytes();
-    for pair in raw.chunks_exact(2) {
+    for pair in raw.as_chunks::<2>().0 {
         let s = std::str::from_utf8(pair)
             .map_err(|_| PanelError::Validation("invalid file identifier encoding".to_string()))?;
         let val = u8::from_str_radix(s, 16)
@@ -315,6 +315,7 @@ pub fn list_files(
     Ok(nodes)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_node(
     app_id: &str,
     name: &str,

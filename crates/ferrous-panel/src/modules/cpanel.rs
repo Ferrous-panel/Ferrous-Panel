@@ -507,7 +507,7 @@ pub async fn create_backup(
             "tar binary is not installed on this host".to_string(),
         ));
     }
-    if !executor.is_binary_available(AllowedBinary::Zstd) {
+    if config.is_production() && !executor.is_binary_available(AllowedBinary::Zstd) {
         return Err(PanelError::Conflict(
             "zstd binary is not installed on this host".to_string(),
         ));
@@ -515,13 +515,14 @@ pub async fn create_backup(
 
     let domain = Domain::parse(target_app_raw)?;
     let apps = store.list_apps()?;
-    let app = apps
+    let app_dir = if let Some(app) = apps
         .into_iter()
         .find(|a| a.domain.eq_ignore_ascii_case(domain.as_str()))
-        .ok_or_else(|| {
-            PanelError::NotFound(format!("website '{}' not found", domain.as_str()))
-        })?;
-    let app_dir = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+    {
+        SafePath::under_root(&config.wwwroot, &app.working_dir)?
+    } else {
+        SafePath::under_root(&config.wwwroot, domain.as_str())?
+    };
     if !app_dir.as_path().is_dir() {
         return Err(PanelError::NotFound(format!(
             "website working directory '{}' does not exist",

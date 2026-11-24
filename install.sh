@@ -907,7 +907,8 @@ EOF_NGX_PHP
   if [ "$NGX_DEFAULT_TARGET" = "/etc/nginx/sites-available/default" ] || \
      { [ "$NGX_DEFAULT_TARGET" = "/etc/nginx/sites-available/ferrous-default.conf" ] && \
        head -n 1 /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null | grep -q 'Managed by FerrousPanel' && \
-       ! grep -q '/phpadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; then
+       { ! grep -q '/phpadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null || \
+         ! grep -q '/phpmyadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; }; then
     cat > /etc/nginx/sites-available/ferrous-default.conf <<'EOF_NGX_DEF'
 # Managed by FerrousPanel — Default catch-all vhost with ACME HTTP-01 webroot & phpMyAdmin reverse proxy
 server {

@@ -210,11 +210,13 @@ fn sqlite_value_to_sql_literal(val: ValueRef<'_>) -> String {
     }
 }
 
+type SqliteQueryRows = (Vec<String>, Vec<BTreeMap<String, Value>>);
+
 fn sqlite_query_rows(
     conn: &Connection,
     sql: &str,
     row_cap: usize,
-) -> Result<(Vec<String>, Vec<BTreeMap<String, Value>>), PanelError> {
+) -> Result<SqliteQueryRows, PanelError> {
     let mut stmt = conn.prepare(sql)?;
     let columns: Vec<String> = stmt
         .column_names()
@@ -752,6 +754,7 @@ pub async fn list_databases(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_database(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,

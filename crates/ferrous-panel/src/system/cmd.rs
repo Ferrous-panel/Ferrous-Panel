@@ -364,12 +364,10 @@ impl AllowedBinary {
 
     #[must_use]
     pub fn resolved_path_str(self) -> Option<&'static str> {
-        for candidate in self.candidate_paths() {
-            if Path::new(candidate).is_file() {
-                return Some(candidate);
-            }
-        }
-        None
+        self.candidate_paths()
+            .iter()
+            .copied()
+            .find(|candidate| Path::new(candidate).is_file())
     }
 
     #[must_use]

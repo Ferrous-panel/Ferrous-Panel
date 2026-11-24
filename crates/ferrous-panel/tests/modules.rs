@@ -633,7 +633,7 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
         let ws = TempWorkspace::new("apps")?;
         let (probe_addr, responder) = spawn_local_http_responder(
             b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\nhello-rust",
-            1,
+            3,
         )?;
         let (cfg, exec, shared, pw) = setup_test_state(&ws, probe_addr)?;
         let app = init_service(App::new().configure(|c| configure_app(c, shared.clone()))).await;
@@ -876,14 +876,27 @@ fn security_ufw_fail2ban_and_validation() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("add ufw error: {e}"))?;
         ensure_eq(&add_ufw_resp.status(), &StatusCode::OK, "POST /security/ufw")?;
 
-        let del_ufw = TestRequest::delete()
+        let del_ufw_blocked = TestRequest::delete()
             .uri("/api/security/ufw/3")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let del_ufw_blocked_resp = try_call_service(&app, del_ufw_blocked)
+            .await
+            .map_err(|e| anyhow::anyhow!("delete ufw error: {e}"))?;
+        ensure_eq(
+            &del_ufw_blocked_resp.status(),
+            &StatusCode::CONFLICT,
+            "DELETE /security/ufw/3 without force must guard active panel port 8443 with 409",
+        )?;
+
+        let del_ufw = TestRequest::delete()
+            .uri("/api/security/ufw/3?force=true")
             .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
             .to_request();
         let del_ufw_resp = try_call_service(&app, del_ufw)
             .await
             .map_err(|e| anyhow::anyhow!("delete ufw error: {e}"))?;
-        ensure_eq(&del_ufw_resp.status(), &StatusCode::OK, "DELETE /security/ufw/3")?;
+        ensure_eq(&del_ufw_resp.status(), &StatusCode::OK, "DELETE /security/ufw/3?force=true")?;
 
         // 3. Fail2ban ban and unban
         let ban_req = TestRequest::post()

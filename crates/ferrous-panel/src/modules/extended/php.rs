@@ -827,10 +827,8 @@ pub async fn update_php_settings(
             } else {
                 let _ = std::fs::remove_file(&ini_target);
             }
-            if let Some(pool_opt) = prev_p {
-                if let Some(bytes) = pool_opt {
-                    let _ = atomic_write_file(&pool_target, bytes, 0o644);
-                }
+            if let Some(Some(bytes)) = prev_p {
+                let _ = atomic_write_file(&pool_target, bytes, 0o644);
             }
         };
 
@@ -1104,7 +1102,19 @@ pub async fn switch_site_php_version(
         for a in &app.aliases {
             aliases.push(Domain::parse(a)?);
         }
-        let root = crate::webserver::WwwRootPath::under_root(&config.wwwroot, &app.working_dir)?;
+        let sub = app.run_sub_dir.trim().trim_start_matches('/').trim_end_matches('/');
+        let effective_rel = if !sub.is_empty() && !sub.contains("..") && !sub.contains('\0') {
+            let base = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
+            let candidate = base.as_path().join(sub);
+            if candidate.is_dir() && candidate.starts_with(base.as_path()) {
+                format!("{}/{sub}", app.working_dir.trim_end_matches('/'))
+            } else {
+                app.working_dir.clone()
+            }
+        } else {
+            app.working_dir.clone()
+        };
+        let root = crate::webserver::WwwRootPath::under_root(&config.wwwroot, &effective_rel)?;
         let redirects = app
             .redirects
             .as_deref()

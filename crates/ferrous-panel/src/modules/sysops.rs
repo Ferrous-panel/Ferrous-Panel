@@ -271,12 +271,9 @@ fn read_uptime_secs() -> u64 {
 fn read_load_avg() -> [f64; 3] {
     let mut out = [0.0, 0.0, 0.0];
     if let Some(raw) = read_trimmed("/proc/loadavg") {
-        let parts: Vec<&str> = raw.split_whitespace().collect();
-        for i in 0..3 {
-            if let Some(tok) = parts.get(i) {
-                if let Ok(v) = tok.parse::<f64>() {
-                    out[i] = (v * 100.0).round() / 100.0;
-                }
+        for (slot, tok) in out.iter_mut().zip(raw.split_whitespace()) {
+            if let Ok(v) = tok.parse::<f64>() {
+                *slot = (v * 100.0).round() / 100.0;
             }
         }
     }
@@ -1183,10 +1180,13 @@ mod tests {
     #[test]
     fn parses_proc_stat_with_spaces_in_comm() {
         let line = "412 (Web Content) S 123 412 412 0 -1 4194304";
-        let parsed = parse_proc_stat_fields(line).expect("parsed");
-        assert_eq!(parsed.0, "Web Content");
-        assert_eq!(parsed.1, "S");
-        assert_eq!(parsed.2, 123);
+        let parsed = parse_proc_stat_fields(line);
+        assert!(parsed.is_some());
+        if let Some(p) = parsed {
+            assert_eq!(p.0, "Web Content");
+            assert_eq!(p.1, "S");
+            assert_eq!(p.2, 123);
+        }
     }
 
     #[test]
@@ -1216,17 +1216,15 @@ tmpfs          tmpfs   1073741824     1048576  1072693248       1% /run\n";
     }
 
     #[test]
-    fn validates_systemd_units_and_blocks_traversal() {
+    fn validates_systemd_units_and_blocks_traversal() -> Result<(), PanelError> {
+        assert_eq!(validate_systemd_unit("nginx")?, "nginx.service");
         assert_eq!(
-            validate_systemd_unit("nginx").expect("valid"),
-            "nginx.service"
-        );
-        assert_eq!(
-            validate_systemd_unit("php8.3-fpm.service").expect("valid"),
+            validate_systemd_unit("php8.3-fpm.service")?,
             "php8.3-fpm.service"
         );
         assert!(validate_systemd_unit("-bad").is_err());
         assert!(validate_systemd_unit("../sshd").is_err());
         assert!(validate_systemd_unit("nginx;id").is_err());
+        Ok(())
     }
 }

@@ -778,18 +778,15 @@ fn scaffold_rust_http_starter(
 }
 
 fn resolve_active_php_cli(executor: &dyn CommandExecutor) -> Option<AllowedBinary> {
-    for bin in [
+    [
         AllowedBinary::Php83,
         AllowedBinary::Php84,
         AllowedBinary::Php82,
         AllowedBinary::Php81,
         AllowedBinary::Php74,
-    ] {
-        if executor.is_binary_available(bin) {
-            return Some(bin);
-        }
-    }
-    None
+    ]
+    .into_iter()
+    .find(|&bin| executor.is_binary_available(bin))
 }
 
 fn sanitize_wp_admin_user(raw: Option<&str>) -> String {
@@ -1017,14 +1014,21 @@ pub async fn deploy_oneclick(
             )));
         }
     }
-    if prod && is_tailwind && !executor.is_binary_available(AllowedBinary::TailwindCli) && auto_install {
-        if ensure_apt_tool(executor, &mut apt, AllowedBinary::Curl, "curl", true, &mut provision_logs).await.is_ok() {
-            if let Ok(msg) = super::software::install_zero_node_cli_package("pkg-tailwindcss", executor).await {
-                provision_logs.push(format!(
-                    "[{}] [auto-provision] {msg}",
-                    Utc::now().to_rfc3339()
-                ));
-            }
+    if prod
+        && is_tailwind
+        && !executor.is_binary_available(AllowedBinary::TailwindCli)
+        && auto_install
+        && ensure_apt_tool(executor, &mut apt, AllowedBinary::Curl, "curl", true, &mut provision_logs)
+            .await
+            .is_ok()
+    {
+        if let Ok(msg) =
+            super::software::install_zero_node_cli_package("pkg-tailwindcss", executor).await
+        {
+            provision_logs.push(format!(
+                "[{}] [auto-provision] {msg}",
+                Utc::now().to_rfc3339()
+            ));
         }
     }
     if prod && is_rust && !executor.is_binary_available(AllowedBinary::Cargo) {

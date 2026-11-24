@@ -588,6 +588,19 @@ impl SiteSpec {
                 "redirectHttps requires sslEnabled = true".to_string(),
             ));
         }
+        let is_reserved_location = |p: &str| {
+            matches!(
+                p,
+                "/"
+                    | "/phpadmin"
+                    | "/phpadmin/"
+                    | "/phpmyadmin"
+                    | "/phpmyadmin/"
+                    | "/.well-known/acme-challenge"
+                    | "/.well-known/acme-challenge/"
+            ) || p.starts_with("/.well-known/acme-challenge/")
+        };
+        let mut seen_redirect_paths = Vec::new();
         for rule in &self.redirects {
             if !rule.enabled {
                 continue;
@@ -595,15 +608,30 @@ impl SiteSpec {
             let src = rule.source_path.trim();
             let dst = rule.target_url.trim();
             if !src.starts_with('/')
-                || src.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+                || is_reserved_location(src)
+                || src.bytes().any(|b| {
+                    b.is_ascii_control()
+                        || b.is_ascii_whitespace()
+                        || matches!(b, b';' | b'{' | b'}' | b'"' | b'\'')
+                })
             {
                 return Err(PanelError::Validation(format!(
-                    "invalid redirect sourcePath '{}'",
+                    "invalid or reserved redirect sourcePath '{}'",
                     rule.source_path
                 )));
             }
+            if seen_redirect_paths.iter().any(|p: &String| p == src) {
+                return Err(PanelError::Validation(format!(
+                    "duplicate redirect sourcePath '{src}'"
+                )));
+            }
+            seen_redirect_paths.push(src.to_string());
             if dst.is_empty()
-                || dst.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+                || dst.bytes().any(|b| {
+                    b.is_ascii_control()
+                        || b.is_ascii_whitespace()
+                        || matches!(b, b';' | b'{' | b'}' | b'"' | b'\'')
+                })
             {
                 return Err(PanelError::Validation(format!(
                     "invalid redirect targetUrl '{}'",
@@ -616,19 +644,31 @@ impl SiteSpec {
                 ));
             }
         }
+        let mut seen_auth_paths = Vec::new();
         for auth in &self.directory_auth {
             if !auth.enabled {
                 continue;
             }
             let p = auth.path.trim();
             if !p.starts_with('/')
-                || p.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b'{' | b'}' | b'"' | b'\''))
+                || is_reserved_location(p)
+                || p.bytes().any(|b| {
+                    b.is_ascii_control()
+                        || b.is_ascii_whitespace()
+                        || matches!(b, b';' | b'{' | b'}' | b'"' | b'\'')
+                })
             {
                 return Err(PanelError::Validation(format!(
-                    "invalid directoryAuth path '{}'",
+                    "invalid or reserved directoryAuth path '{}'",
                     auth.path
                 )));
             }
+            if seen_auth_paths.iter().any(|prev: &String| prev == p) {
+                return Err(PanelError::Validation(format!(
+                    "duplicate directoryAuth path '{p}'"
+                )));
+            }
+            seen_auth_paths.push(p.to_string());
             let u = auth.username.trim();
             if u.is_empty()
                 || u.len() > 64
@@ -762,7 +802,7 @@ fn panel_md5_digest(input: &[u8]) -> [u8; 16] {
     let mut b0: u32 = 0xefcd_ab89;
     let mut c0: u32 = 0x98ba_dcfe;
     let mut d0: u32 = 0x1032_5476;
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for (idx, word) in m.iter_mut().enumerate() {
             let off = idx * 4;

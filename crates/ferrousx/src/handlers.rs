@@ -773,7 +773,7 @@ fn md5_digest(input: &[u8]) -> [u8; 16] {
     let mut c0: u32 = 0x98ba_dcfe;
     let mut d0: u32 = 0x1032_5476;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut m = [0u32; 16];
         for (idx, word) in m.iter_mut().enumerate() {
             let off = idx * 4;
@@ -828,11 +828,11 @@ fn sha1_digest(input: &[u8]) -> [u8; 20] {
     let mut h3: u32 = 0x1032_5476;
     let mut h4: u32 = 0xc3d2_e1f0;
 
-    for chunk in msg.chunks_exact(64) {
+    for chunk in msg.as_chunks::<64>().0 {
         let mut w = [0u32; 80];
-        for i in 0..16 {
+        for (i, word) in w.iter_mut().take(16).enumerate() {
             let off = i * 4;
-            w[i] = u32::from_be_bytes([
+            *word = u32::from_be_bytes([
                 chunk[off],
                 chunk[off + 1],
                 chunk[off + 2],
@@ -883,7 +883,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
         .bytes()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if bytes.is_empty() || bytes.len() % 4 != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
         return None;
     }
     let val = |c: u8| -> Option<u8> {
@@ -897,7 +897,7 @@ fn decode_base64(input: &str) -> Option<Vec<u8>> {
         }
     };
     let mut out = Vec::with_capacity((bytes.len() / 4) * 3);
-    for chunk in bytes.chunks_exact(4) {
+    for chunk in bytes.as_chunks::<4>().0 {
         let a = val(chunk[0])?;
         let b = val(chunk[1])?;
         out.push((a << 2) | (b >> 4));
@@ -1484,9 +1484,63 @@ async fn handle_php_fpm(
         .await;
     }
 
-    // Choose script filename: direct .php file if present, else fallback front-controller index.php.
+    // If request targets a directory (e.g. /wp-admin or /wp-admin/), check for directory index.php or index.html.
+    if resolved.is_dir() {
+        let dir_php_index = resolved.join(default_index);
+        let dir_html_index = resolved.join("index.html");
+        if dir_php_index.is_file() || dir_html_index.is_file() {
+            if !req_path.ends_with('/') {
+                let target = match req.uri().query() {
+                    Some(q) if !q.is_empty() => format!("{req_path}/?{q}"),
+                    _ => format!("{req_path}/"),
+                };
+                let mut builder = Response::builder().status(StatusCode::MOVED_PERMANENTLY);
+                if let Ok(hv) = HeaderValue::from_str(&target) {
+                    builder = builder.header(header::LOCATION, hv);
+                }
+                if server_tokens {
+                    builder = builder.header(header::SERVER, "FerrousX");
+                }
+                if let Ok(resp) = builder.body(empty_body()) {
+                    return resp;
+                }
+            }
+            if !dir_php_index.is_file() && dir_html_index.is_file() {
+                let is_head = *req.method() == Method::HEAD;
+                let accept_encoding = req
+                    .headers()
+                    .get(header::ACCEPT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let html_req_path = format!("{}/index.html", req_path.trim_end_matches('/'));
+                return serve_static_file_from_root(
+                    &site.root,
+                    &html_req_path,
+                    None,
+                    StaticServeOptions::static_assets_only(),
+                    accept_encoding.as_deref(),
+                    is_head,
+                    server_tokens,
+                )
+                .await;
+            }
+        }
+    }
+
+    // Choose script filename:
+    // 1. Direct .php file if present on disk
+    // 2. Directory index.php if request path is a directory containing default_index (e.g. /wp-admin/ -> /wp-admin/index.php)
+    // 3. Fallback front-controller /index.php (WordPress / Laravel / Symfony pretty permalinks)
     let (script_path, script_name) = if is_php_ext && resolved.is_file() {
         (resolved, req_path.clone())
+    } else if resolved.is_dir() && resolved.join(default_index).is_file() {
+        let prefix = req_path.trim_end_matches('/');
+        let s_name = if prefix.is_empty() {
+            format!("/{default_index}")
+        } else {
+            format!("{prefix}/{default_index}")
+        };
+        (resolved.join(default_index), s_name)
     } else {
         let idx_path = site.root.join(default_index);
         if !idx_path.is_file() {
@@ -1558,7 +1612,7 @@ async fn handle_php_fpm(
         .script_name(&script_name)
         .script_filename(&script_filename)
         .request_uri(&request_uri)
-        .document_uri(&req_path)
+        .document_uri(&script_name)
         .remote_addr(&remote_ip)
         .remote_port(remote_port)
         .server_addr("127.0.0.1")
@@ -1569,18 +1623,39 @@ async fn handle_php_fpm(
 
     params.insert(Cow::Borrowed("QUERY_STRING"), Cow::Owned(query_string));
     params.insert(Cow::Borrowed("DOCUMENT_ROOT"), Cow::Owned(doc_root));
+    params.insert(Cow::Borrowed("REDIRECT_STATUS"), Cow::Borrowed("200"));
+    params.insert(Cow::Borrowed("GATEWAY_INTERFACE"), Cow::Borrowed("CGI/1.1"));
+    params.insert(
+        Cow::Borrowed("SERVER_PROTOCOL"),
+        Cow::Borrowed(match parts.version {
+            hyper::Version::HTTP_2 => "HTTP/2.0",
+            hyper::Version::HTTP_10 => "HTTP/1.0",
+            _ => "HTTP/1.1",
+        }),
+    );
+    params.insert(
+        Cow::Borrowed("REQUEST_SCHEME"),
+        Cow::Borrowed(if is_tls { "https" } else { "http" }),
+    );
     if is_tls {
         params.insert(Cow::Borrowed("HTTPS"), Cow::Borrowed("on"));
     }
 
+    let mut has_http_host = false;
     for (name, value) in &parts.headers {
         if let Ok(val_str) = value.to_str() {
+            if name == header::HOST {
+                has_http_host = true;
+            }
             let fcgi_key = format!(
                 "HTTP_{}",
                 name.as_str().to_ascii_uppercase().replace('-', "_")
             );
             params.insert(Cow::Owned(fcgi_key), Cow::Owned(val_str.to_string()));
         }
+    }
+    if !has_http_host && !host.is_empty() {
+        params.insert(Cow::Borrowed("HTTP_HOST"), Cow::Owned(host.to_string()));
     }
 
     let mut body_cursor = Cursor::new(collected.as_ref());

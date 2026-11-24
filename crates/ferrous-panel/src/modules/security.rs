@@ -633,7 +633,7 @@ fn read_kernel_dropped_packets() -> u64 {
     let mut total = 0u64;
     if let Ok(netstat) = std::fs::read_to_string("/proc/net/netstat") {
         let lines: Vec<&str> = netstat.lines().collect();
-        for pair in lines.chunks_exact(2) {
+        for pair in lines.as_chunks::<2>().0 {
             if pair[0].starts_with("TcpExt:") && pair[1].starts_with("TcpExt:") {
                 let keys: Vec<&str> = pair[0].split_whitespace().collect();
                 let vals: Vec<&str> = pair[1].split_whitespace().collect();

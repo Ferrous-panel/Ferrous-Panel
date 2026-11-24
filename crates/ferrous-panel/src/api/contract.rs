@@ -75,13 +75,13 @@ pub enum WebsiteRuntimeType {
     AxumRust,
     #[serde(rename = "Rocket (Rust)")]
     RocketRust,
-    #[serde(rename = "Next.js 15 (React SSR)")]
+    #[serde(rename = "Next.js 15 (React SSR)", alias = "Next.js 15 (SSR)")]
     NextJs15,
-    #[serde(rename = "Nuxt 3 (Vue 3 SSR)")]
+    #[serde(rename = "Nuxt 3 (Vue 3 SSR)", alias = "Nuxt 3 (SSR)")]
     Nuxt3,
-    #[serde(rename = "SvelteKit 2 (Svelte 5)")]
+    #[serde(rename = "SvelteKit 2 (Svelte 5)", alias = "SvelteKit 2")]
     SvelteKit2,
-    #[serde(rename = "Astro 5 (Hybrid / Static)")]
+    #[serde(rename = "Astro 5 (Hybrid / Static)", alias = "Astro 5")]
     Astro5,
     #[serde(rename = "Remix / React Router v7")]
     RemixReactRouterV7,
@@ -126,9 +126,9 @@ pub enum WebsiteRuntimeType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum WebServerEngineType {
     #[default]
-    #[serde(rename = "FerrousX (Rust Web Server)")]
+    #[serde(rename = "FerrousX (Rust Web Server)", alias = "ferrousx", alias = "FerrousX")]
     FerrousX,
-    #[serde(rename = "Nginx 1.26")]
+    #[serde(rename = "Nginx 1.26", alias = "nginx", alias = "Nginx")]
     Nginx,
 }
 
@@ -299,31 +299,64 @@ pub struct WebsiteLiveTestResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployWebsiteRequest {
+    #[serde(default)]
     pub name: String,
     pub framework: WebsiteRuntimeType,
     pub domain: String,
+    #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default = "default_deploy_internal_port")]
     pub internal_port: u16,
+    #[serde(default)]
     pub working_dir: String,
+    #[serde(default)]
     pub run_sub_dir: String,
+    #[serde(default)]
     pub exec_command: String,
+    #[serde(default = "default_deploy_workers")]
     pub workers: u32,
+    #[serde(default = "default_deploy_memory_limit_mb")]
     pub memory_limit_mb: u64,
+    #[serde(default)]
     pub ssl_enabled: bool,
+    #[serde(default)]
     pub http3_quic: bool,
+    #[serde(default)]
     pub websocket_enabled: bool,
+    #[serde(default)]
     pub rate_limit_rps: u32,
+    #[serde(default, alias = "autoCreateDb")]
     pub create_database: bool,
+    #[serde(default)]
     pub db_engine: String,
+    #[serde(default)]
     pub db_name: String,
+    #[serde(default)]
     pub db_user: String,
+    #[serde(default)]
     pub db_password: String,
+    #[serde(default)]
     pub create_ftp: bool,
+    #[serde(default)]
     pub ftp_user: String,
+    #[serde(default)]
     pub git_repo_url: String,
+    #[serde(default)]
     pub git_branch: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_server_engine: Option<WebServerEngineType>,
+}
+
+const fn default_deploy_internal_port() -> u16 {
+    3000
+}
+
+const fn default_deploy_workers() -> u32 {
+    2
+}
+
+const fn default_deploy_memory_limit_mb() -> u64 {
+    512
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

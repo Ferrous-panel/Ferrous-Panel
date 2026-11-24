@@ -468,19 +468,31 @@ impl SslManager {
             std::fs::create_dir_all(&challenge_dir)?;
 
             // If live/<domain>/fullchain.pem exists as a non-symlink regular file (self-signed or custom PEM),
-            // remove the non-certbot files so certbot writes directly to live/<domain> instead of <domain>-0001.
+            // snapshot and temporarily remove the non-certbot files so certbot writes directly to live/<domain>
+            // instead of <domain>-0001; if certbot fails, restore the snapshot so the active vhost never breaks.
             let (cert_path, key_path) = self.site_cert_paths(domain)?;
             let is_non_certbot_cert = cert_path
                 .symlink_metadata()
                 .map(|m| m.file_type().is_file())
                 .unwrap_or(false);
-            if is_non_certbot_cert {
+            let backup_non_certbot = if is_non_certbot_cert {
+                let prev_cert = std::fs::read(&cert_path).ok();
+                let prev_key = std::fs::read(&key_path).ok();
                 let _ = std::fs::remove_file(&cert_path);
                 let _ = std::fs::remove_file(&key_path);
                 if let Some(parent) = cert_path.parent() {
                     let _ = std::fs::remove_dir(parent);
                 }
-            }
+                prev_cert.zip(prev_key)
+            } else {
+                None
+            };
+            let restore_backup = |bkp: &Option<(Vec<u8>, Vec<u8>)>| {
+                if let Some((c_bytes, k_bytes)) = bkp {
+                    let _ = atomic_write_file(&cert_path, c_bytes, 0o644);
+                    let _ = atomic_write_file(&key_path, k_bytes, 0o600);
+                }
+            };
 
             let mut owned_args = self.build_certbot_args(domain, aliases, email)?;
             owned_args.push("--cert-name".to_string());
@@ -493,12 +505,20 @@ impl SslManager {
             }
             let arg_refs: Vec<&str> = owned_args.iter().map(String::as_str).collect();
 
-            let out = self
+            let out = match self
                 .executor
                 .run(AllowedBinary::Certbot, &arg_refs, CERTBOT_TIMEOUT)
-                .await?;
+                .await
+            {
+                Ok(out) => out,
+                Err(err) => {
+                    restore_backup(&backup_non_certbot);
+                    return Err(err);
+                }
+            };
 
             if !out.success {
+                restore_backup(&backup_non_certbot);
                 let reason = if !out.stderr.trim().is_empty() {
                     out.stderr.trim().to_string()
                 } else if !out.stdout.trim().is_empty() {
@@ -654,9 +674,13 @@ impl SslManager {
             let days_str = days.to_string();
 
             let mut san_entries = vec![format!("DNS:{}", domain.as_str())];
+            if !domain.as_str().starts_with("www.") {
+                san_entries.push(format!("DNS:www.{}", domain.as_str()));
+            }
             for alias in aliases {
-                if alias.as_str() != domain.as_str() {
-                    san_entries.push(format!("DNS:{}", alias.as_str()));
+                let entry = format!("DNS:{}", alias.as_str());
+                if !san_entries.contains(&entry) {
+                    san_entries.push(entry);
                 }
             }
             let san_ext = format!("subjectAltName={}", san_entries.join(","));
@@ -875,10 +899,10 @@ WantedBy=timers.target\n"
                                 "LoadState" => load_state = val.to_string(),
                                 "UnitFileState" => unit_file_state = val.to_string(),
                                 "ActiveState" => active_state = val.to_string(),
-                                "NextElapseUSecRealtime" => {
-                                    if !val.is_empty() && val != "n/a" {
-                                        next_run = Some(val.to_string());
-                                    }
+                                "NextElapseUSecRealtime"
+                                    if !val.is_empty() && val != "n/a" =>
+                                {
+                                    next_run = Some(val.to_string());
                                 }
                                 _ => {}
                             }

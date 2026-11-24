@@ -83,7 +83,7 @@ async fn run_daemon(args: CliArgs) -> Result<(), ServerError> {
 fn main() -> ExitCode {
     init_tracing();
     let mut args = CliArgs::parse();
-    if args.config == PathBuf::from(DEFAULT_MASTER_CONFIG) {
+    if args.config == std::path::Path::new(DEFAULT_MASTER_CONFIG) {
         let env_map = load_default_env_map();
         if let Some(cfg_path) = resolve_env_var("FERROUSX_CONFIG", &env_map) {
             args.config = PathBuf::from(cfg_path);
