@@ -138,6 +138,46 @@ impl SslManager {
         Ok((fullchain, privkey))
     }
 
+    /// Returns `true` when both `fullchain.pem` and `privkey.pem` exist on disk for `domain`.
+    #[must_use]
+    pub fn site_cert_ready(&self, domain: &Domain) -> bool {
+        self.site_cert_paths(domain)
+            .map(|(cert, key)| cert.is_file() && key.is_file())
+            .unwrap_or(false)
+    }
+
+    /// Self-healing guard used before writing SSL vhosts: if the certificate pair is missing on a
+    /// real host (`/etc/letsencrypt/live`) and `openssl` is available, regenerates a 10-year
+    /// self-signed X.509 certificate so Nginx (`nginx -t`) and FerrousX never fail or downgrade
+    /// to HTTP-only. Returns whether a usable certificate pair is present afterwards.
+    pub async fn ensure_site_cert_or_self_sign(&self, domain: &Domain, aliases: &[Domain]) -> bool {
+        if self.site_cert_ready(domain) {
+            return true;
+        }
+        if self.paths.letsencrypt_live.as_path() != Path::new("/etc/letsencrypt/live")
+            || !self.executor.is_binary_available(AllowedBinary::OpenSsl)
+        {
+            return false;
+        }
+        match self.issue_self_signed(domain, aliases, 3650).await {
+            Ok(_) => {
+                tracing::warn!(
+                    domain = %domain.as_str(),
+                    "SSL certificate was missing on disk; regenerated self-signed X.509 fallback"
+                );
+                self.site_cert_ready(domain)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    domain = %domain.as_str(),
+                    error = %err,
+                    "failed to regenerate missing SSL certificate"
+                );
+                false
+            }
+        }
+    }
+
     /// Ensures `/www/acme/.well-known/acme-challenge` exists with world-traversable `0755` permissions
     /// so both `www-data` (Nginx) and `ferrousx` can serve HTTP-01 challenge tokens.
     pub fn ensure_acme_webroot_permissions(&self) -> Result<PathBuf, PanelError> {

@@ -56,6 +56,17 @@ pub struct NginxEngine {
     paths: NginxPaths,
     executor: Arc<dyn CommandExecutor>,
     http3_supported: Arc<AtomicBool>,
+    ipv6_enabled: bool,
+}
+
+/// Returns `false` on IPv4-only hosts (IPv6 disabled via sysctl or kernel built without IPv6),
+/// where `listen [::]:80;` would make `nginx -t` fail with "Address family not supported".
+#[must_use]
+pub fn host_supports_ipv6() -> bool {
+    match std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6") {
+        Ok(v) => v.trim() != "1",
+        Err(_) => Path::new("/proc/net/if_inet6").exists(),
+    }
 }
 
 impl NginxEngine {
@@ -65,7 +76,15 @@ impl NginxEngine {
             paths,
             executor,
             http3_supported: Arc::new(AtomicBool::new(false)),
+            ipv6_enabled: host_supports_ipv6(),
         }
+    }
+
+    /// Overrides IPv6 auto-detection (used for deterministic rendering/snapshots).
+    #[must_use]
+    pub fn with_ipv6(mut self, enabled: bool) -> Self {
+        self.ipv6_enabled = enabled;
+        self
     }
 
     /// Probes `nginx -V` to detect `--with-http_v3_module` and updates cached capability flag.
@@ -388,10 +407,19 @@ impl WebServerEngine for NginxEngine {
             "    }"
         );
 
-        let quic_directives = if spec.http3_quic {
-            "    listen 443 quic;\n    listen [::]:443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n"
+        let quic_directives = match (spec.http3_quic, self.ipv6_enabled) {
+            (true, true) => "    listen 443 quic;\n    listen [::]:443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n",
+            (true, false) => "    listen 443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n",
+            (false, _) => "",
+        };
+
+        let (listen_80, listen_443) = if self.ipv6_enabled {
+            (
+                "    listen 80;\n    listen [::]:80;\n",
+                "    listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n",
+            )
         } else {
-            ""
+            ("    listen 80;\n", "    listen 443 ssl http2;\n")
         };
 
         let content = if spec.ssl_enabled {
@@ -403,12 +431,12 @@ impl WebServerEngine for NginxEngine {
             };
 
             format!(
-                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n    listen 80;\n    listen [::]:80;\n    server_name {server_names};\n\n{acme_block}\n\n{http_body}\n}}\n\nserver {{\n    listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n{quic_directives}    server_name {server_names};\n\n    ssl_certificate {cert_dir}/fullchain.pem;\n    ssl_certificate_key {cert_dir}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_prefer_server_ciphers on;\n\n    root {doc_root};\n    server_tokens off;\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
+                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n{listen_80}    server_name {server_names};\n\n{acme_block}\n\n{http_body}\n}}\n\nserver {{\n{listen_443}{quic_directives}    server_name {server_names};\n\n    ssl_certificate {cert_dir}/fullchain.pem;\n    ssl_certificate_key {cert_dir}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_prefer_server_ciphers on;\n    ssl_session_cache shared:FerrousSSL:10m;\n    ssl_session_timeout 1d;\n    ssl_session_tickets off;\n\n    root {doc_root};\n    server_tokens off;\n\n{acme_block}\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
                 domain = spec.domain.as_str(),
             )
         } else {
             format!(
-                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n    listen 80;\n    listen [::]:80;\n    server_name {server_names};\n\n    root {doc_root};\n    server_tokens off;\n\n{acme_block}\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
+                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n{listen_80}    server_name {server_names};\n\n    root {doc_root};\n    server_tokens off;\n\n{acme_block}\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
                 domain = spec.domain.as_str(),
             )
         };
@@ -612,7 +640,7 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: 
                 ""
             };
             format!(
-                "    location / {{\n        proxy_pass {url};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;{ws_block}\n    }}"
+                "    location / {{\n        client_max_body_size 128m;\n        proxy_pass {url};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;{ws_block}\n    }}"
             )
         }
         SiteMode::PhpFpm {
@@ -622,7 +650,7 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: 
             let idx = index_file.as_str();
             let sock = php_version.socket_path();
             format!(
-                "    index {idx} index.html;\n    location / {{\n        try_files $uri $uri/ /{idx}?$query_string;\n    }}\n    location ~ \\.php$ {{\n        include snippets/fastcgi-php.conf;\n        fastcgi_param SCRIPT_FILENAME {doc_root}$fastcgi_script_name;\n        fastcgi_pass unix:{sock};\n    }}\n    location ~ /\\.ht {{\n        deny all;\n    }}"
+                "    index {idx} index.html;\n    client_max_body_size 128m;\n    location / {{\n        try_files $uri $uri/ /{idx}?$query_string;\n    }}\n    location ~ /\\.(?!well-known/) {{\n        deny all;\n    }}\n    location ~* ^/wp-content/uploads/.*\\.php$ {{\n        deny all;\n    }}\n    location ~ \\.php$ {{\n        include snippets/fastcgi-php.conf;\n        fastcgi_param SCRIPT_FILENAME {doc_root}$fastcgi_script_name;\n        fastcgi_pass unix:{sock};\n        fastcgi_read_timeout 300s;\n        fastcgi_buffers 16 16k;\n        fastcgi_buffer_size 32k;\n    }}"
             )
         }
         SiteMode::Unsupported => String::new(),

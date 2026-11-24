@@ -439,7 +439,7 @@ fn build_test_manager(
 #[test]
 fn render_site_snapshots_for_nginx_and_ferrousx_match_contract() -> Result<()> {
     let exec: Arc<dyn CommandExecutor> = Arc::new(FakeExecutor::new(true, true));
-    let nginx = NginxEngine::new(NginxPaths::default_system()?, Arc::clone(&exec));
+    let nginx = NginxEngine::new(NginxPaths::default_system()?, Arc::clone(&exec)).with_ipv6(true);
     let ferrousx = FerrousxEngine::new(FerrousxPaths::default_system()?, exec);
 
     // 1. Nginx static/SPA snapshot
@@ -534,9 +534,18 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/api.example.com/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:FerrousSSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
 
     root /www/wwwroot/api.example.com;
     server_tokens off;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /www/acme;
+        default_type \"text/plain\";
+        try_files $uri =404;
+    }
 
     location = /phpadmin {
         return 301 $scheme://$http_host/phpadmin/;
@@ -563,6 +572,7 @@ server {
     }
 
     location / {
+        client_max_body_size 128m;
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

@@ -163,7 +163,7 @@ impl Default for MasterConfigToml {
             request_timeout_ms: 30_000,
             upstream_connect_timeout_ms: 5_000,
             max_header_bytes: 16 * 1024,
-            max_body_bytes: 10 * 1024 * 1024,
+            max_body_bytes: 128 * 1024 * 1024,
             control_socket: None,
             admin_token_file: PathBuf::from(DEFAULT_ADMIN_TOKEN_FILE),
             allow_read_group_gid: None,

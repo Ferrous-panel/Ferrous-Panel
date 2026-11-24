@@ -1445,9 +1445,20 @@ async fn handle_php_fpm(
     let server_tokens = bundle.master.server_tokens;
     let req_path = req.uri().path().to_string();
 
-    // Block dotfiles like .htaccess / .env
-    if req_path.split('/').any(|seg| seg.starts_with(".ht") || seg == ".env") {
+    // Block hidden files/dirs like .htaccess / .env / .git / .user.ini (also percent-encoded `%2e`),
+    // while still allowing RFC 8615 `/.well-known/` URIs.
+    if req_path.split('/').any(|seg| {
+        let lower = seg.to_ascii_lowercase();
+        let hidden = lower.starts_with('.') || lower.starts_with("%2e");
+        hidden && lower != ".well-known" && lower != "%2ewell-known" && lower != "." && lower != ".."
+    }) {
         return text_response(StatusCode::FORBIDDEN, "Forbidden", server_tokens);
+    }
+    {
+        let lower_path = req_path.to_ascii_lowercase();
+        if lower_path.starts_with("/wp-content/uploads/") && lower_path.contains(".php") {
+            return text_response(StatusCode::FORBIDDEN, "Forbidden", server_tokens);
+        }
     }
 
     let resolved = match resolve_safe_path(&site.root, &req_path) {

@@ -1699,6 +1699,12 @@ impl WebServerManager {
     ) -> Result<RenderedSite, PanelError> {
         spec.validate_supported()?;
         let _guard = self.switch_lock.lock().await;
+        if spec.ssl_enabled {
+            let _ = self
+                .ssl
+                .ensure_site_cert_or_self_sign(&spec.domain, &spec.aliases)
+                .await;
+        }
         let mut cfg = self.store.load_config()?;
         if preferred_engine.is_none()
             && self.executor.is_binary_available(AllowedBinary::Systemctl)
