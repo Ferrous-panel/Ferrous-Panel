@@ -206,12 +206,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       <div id="banner" class="notice hidden"></div>
       <div class="tabs" id="mainTabs">
         <button type="button" class="tab active" data-tab="databases">Databases</button>
-        <button type="button" class="tab" data-tab="structure">Structure</button>
-        <button type="button" class="tab" data-tab="browse">Browse</button>
+        <button type="button" class="tab" data-tab="structure">Structure (Bảng &amp; Cột)</button>
+        <button type="button" class="tab" data-tab="browse">Browse &amp; Sửa Dòng</button>
+        <button type="button" class="tab" data-tab="insert">Chèn Dòng (Insert)</button>
         <button type="button" class="tab" data-tab="sql">SQL Console</button>
         <button type="button" class="tab" data-tab="new_table">Tạo Bảng</button>
         <button type="button" class="tab" data-tab="export">Export .SQL</button>
         <button type="button" class="tab" data-tab="import">Import .SQL</button>
+        <button type="button" class="tab" data-tab="server_cfg">Cấu hình MySQL / PMA</button>
       </div>
       <div id="tabContent"></div>
     </main>
@@ -225,14 +227,20 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         : path.startsWith('/phpmyadmin')
         ? '/phpmyadmin/api'
         : '/api';
+      const urlParams = new URLSearchParams(window.location.search || '');
+      const initialDbParam = urlParams.get('db') || '';
+      const initialTableParam = urlParams.get('table') || '';
 
       let databases = [];
-      let activeDbId = '';
-      let activeTable = '';
-      let activeTab = 'databases';
+      let activeDbId = initialDbParam;
+      let activeTable = initialTableParam;
+      let activeTab = initialTableParam ? 'browse' : (initialDbParam ? 'structure' : 'databases');
+      let browseLimit = 100;
+      let browseOffset = 0;
       let lastQueryResult = null;
       let lastExportSql = '';
-      let authToken = sessionStorage.getItem('fp_pma_token') || '';
+      let mysqlConfig = null;
+      let authToken = sessionStorage.getItem('fp_pma_token') || localStorage.getItem('fp_token') || '';
 
       function esc(v) {
         return String(v === null || v === undefined ? '' : v)
@@ -241,6 +249,16 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           .replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;')
           .replace(/'/g, '&#39;');
+      }
+
+      function sqlQuoteId(ident, isMysql) {
+        const clean = String(ident || '').replace(/[`"]/g, '');
+        return isMysql ? ('`' + clean + '`') : ('"' + clean + '"');
+      }
+
+      function sqlQuoteVal(val) {
+        if (val === null || val === undefined || val === 'NULL') return 'NULL';
+        return "'" + String(val).replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
       }
 
       function showBanner(msg, isErr) {
@@ -289,7 +307,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       }
 
       function getActiveDb() {
-        return databases.find((d) => d.id === activeDbId) || databases[0] || null;
+        return databases.find((d) => d.id === activeDbId || d.name === activeDbId) || databases[0] || null;
       }
 
       function renderSidebar() {
@@ -298,6 +316,8 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           container.innerHTML = '<p class="muted">Chưa có cơ sở dữ liệu nào. Nhấn "+ Tạo DB" để tạo SQLite 3 (WAL thuần Rust), MariaDB hoặc PostgreSQL.</p>';
           return;
         }
+        const currentDb = getActiveDb();
+        if (currentDb) activeDbId = currentDb.id;
         container.innerHTML = databases.map((db) => {
           const isActive = db.id === activeDbId;
           const tablesHtml = isActive && Array.isArray(db.tables) && db.tables.length
@@ -318,6 +338,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             activeDbId = el.getAttribute('data-select-db');
             const db = getActiveDb();
             activeTable = db && db.tables && db.tables[0] ? db.tables[0].tableName : '';
+            browseOffset = 0;
             if (activeTab === 'databases') activeTab = 'structure';
             syncTabs();
             renderSidebar();
@@ -327,6 +348,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         container.querySelectorAll('[data-select-table]').forEach((el) => {
           el.addEventListener('click', () => {
             activeTable = el.getAttribute('data-select-table');
+            browseOffset = 0;
             activeTab = 'browse';
             syncTabs();
             renderSidebar();
@@ -341,25 +363,33 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         });
       }
 
-      function renderResultTable(res) {
+      function renderResultTable(res, editableOpts) {
         if (!res) return '';
         if (!res.success) {
           return '<div class="notice err">' + esc(res.error || 'SQL execution failed') + '</div>';
         }
         const meta = '<div class="notice ok">OK · ' + esc(res.commandTag) + ' · ' + esc(res.affectedRows) + ' rows · ' + esc(res.executionTimeMs) + ' ms</div>';
         if (!res.columns || !res.columns.length) return meta;
-        const ths = res.columns.map((c) => '<th>' + esc(c) + '</th>').join('');
-        const trs = (res.rows || []).map((r) =>
-          '<tr>' + res.columns.map((c) => '<td>' + esc(r[c] === null || r[c] === undefined ? 'NULL' : r[c]) + '</td>').join('') + '</tr>'
-        ).join('');
-        return meta + '<div class="table-wrap"><table><thead><tr>' + ths + '</tr></thead><tbody>' + (trs || '<tr><td colspan="' + res.columns.length + '" class="muted">(0 dòng)</td></tr>') + '</tbody></table></div>';
+        const canEdit = editableOpts && editableOpts.pkCol && editableOpts.tableName;
+        const ths = res.columns.map((c) => '<th>' + esc(c) + (canEdit && c === editableOpts.pkCol ? ' <span class="badge">PK</span>' : '') + '</th>').join('') + (canEdit ? '<th>Thao tác dòng</th>' : '');
+        const trs = (res.rows || []).map((r, rIdx) => {
+          const tds = res.columns.map((c) => {
+            const val = r[c] === null || r[c] === undefined ? 'NULL' : r[c];
+            return '<td data-col="' + esc(c) + '">' + esc(val) + '</td>';
+          }).join('');
+          const actTd = canEdit
+            ? '<td class="row"><button type="button" data-edit-row="' + rIdx + '">Sửa nhanh</button><button type="button" class="danger" data-del-row="' + rIdx + '">Xóa dòng</button></td>'
+            : '';
+          return '<tr data-row-idx="' + rIdx + '">' + tds + actTd + '</tr>';
+        }).join('');
+        return meta + '<div class="table-wrap"><table><thead><tr>' + ths + '</tr></thead><tbody>' + (trs || '<tr><td colspan="' + (res.columns.length + (canEdit ? 1 : 0)) + '" class="muted">(0 dòng)</td></tr>') + '</tbody></table></div>';
       }
 
       async function loadBrowseRows() {
         const db = getActiveDb();
         if (!db || !activeTable) { renderTab(); return; }
         try {
-          const data = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(activeTable) + '/rows?limit=100&offset=0');
+          const data = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(activeTable) + '/rows?limit=' + browseLimit + '&offset=' + browseOffset);
           lastQueryResult = data;
           renderTab();
         } catch (err) {
@@ -378,20 +408,20 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             '<form id="createDbForm" class="grid-2">' +
             '<div><label>Tên Database</label><input id="newDbName" placeholder="app_store" required /></div>' +
             '<div><label>Engine</label><select id="newDbEngine">' +
-            '<option value="SQLite 3 (WAL)">SQLite 3 (WAL) — 100% Pure Rust (Không cần cài đặt)</option>' +
             '<option value="MariaDB 11.4">MariaDB 11.4 / MySQL</option>' +
             '<option value="PostgreSQL 17">PostgreSQL 17</option>' +
+            '<option value="SQLite 3 (WAL)">SQLite 3 (WAL) — 100% Pure Rust (Không cần cài đặt)</option>' +
             '</select></div>' +
             '<div><label>Username</label><input id="newDbUser" placeholder="app_store_usr" /></div>' +
-            '<div><label>Password (bắt buộc với MariaDB/PostgreSQL)</label><input id="newDbPass" type="password" placeholder="Tùy chọn với SQLite" /></div>' +
+            '<div><label>Password (bắt buộc với MariaDB/PostgreSQL)</label><input id="newDbPass" type="password" placeholder="Nhập mật khẩu DB user" /></div>' +
             '<div style="grid-column:1/-1;"><button type="submit" class="primary">Khởi tạo Database</button></div>' +
             '</form></div>' +
             '<div class="card"><h3 style="margin:0 0 10px;font-size:14px;">Danh sách Cơ sở dữ liệu (' + databases.length + ')</h3>' +
-            '<div class="table-wrap"><table><thead><tr><th>Tên</th><th>Engine</th><th>Trạng thái</th><th>Số bảng</th><th>Dung lượng</th><th>Thao tác</th></tr></thead><tbody>' +
+            '<div class="table-wrap"><table><thead><tr><th>Tên</th><th>Engine</th><th>User / Host</th><th>Trạng thái</th><th>Số bảng</th><th>Dung lượng</th><th>Thao tác</th></tr></thead><tbody>' +
             (databases.map((d) =>
-              '<tr><td><strong>' + esc(d.name) + '</strong></td><td>' + esc(d.engine) + '</td><td>' + esc(d.status) + '</td><td>' + (d.tables ? d.tables.length : 0) + '</td><td>' + esc(d.sizeMb) + ' MB</td>' +
-              '<td><button type="button" data-open-db="' + esc(d.id) + '">Mở</button> <button type="button" class="danger" data-drop-db="' + esc(d.id) + '">Xóa</button></td></tr>'
-            ).join('') || '<tr><td colspan="6" class="muted">Chưa có database nào.</td></tr>') +
+              '<tr><td><strong>' + esc(d.name) + '</strong></td><td>' + esc(d.engine) + '</td><td>' + esc(d.username) + '@' + esc(d.host) + '</td><td>' + esc(d.status) + '</td><td>' + (d.tables ? d.tables.length : 0) + '</td><td>' + esc(d.sizeMb) + ' MB</td>' +
+              '<td class="row"><button type="button" class="primary" data-open-db="' + esc(d.id) + '">Quản lý Bảng</button> <button type="button" data-pw-db="' + esc(d.id) + '" data-pw-name="' + esc(d.name) + '">Đổi MK</button> <button type="button" class="danger" data-drop-db="' + esc(d.id) + '">Xóa</button></td></tr>'
+            ).join('') || '<tr><td colspan="7" class="muted">Chưa có database nào.</td></tr>') +
             '</tbody></table></div></div>';
 
           document.getElementById('createDbForm').addEventListener('submit', async (ev) => {
@@ -428,9 +458,28 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
               renderTab();
             });
           });
+          el.querySelectorAll('[data-pw-db]').forEach((b) => {
+            b.addEventListener('click', async () => {
+              const id = b.getAttribute('data-pw-db');
+              const nm = b.getAttribute('data-pw-name');
+              const npw = window.prompt('Nhập mật khẩu mới cho user của database "' + nm + '":');
+              if (!npw) return;
+              try {
+                databases = await api('/databases/' + encodeURIComponent(id) + '/password', {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ newPassword: npw })
+                });
+                showBanner('Đã cập nhật mật khẩu cho database "' + nm + '".', false);
+              } catch (err) {
+                showBanner(err.message, true);
+              }
+            });
+          });
           el.querySelectorAll('[data-drop-db]').forEach((b) => {
             b.addEventListener('click', async () => {
               const id = b.getAttribute('data-drop-db');
+              if (!window.confirm('Xác nhận xóa vĩnh viễn database này?')) return;
               try {
                 const list = await api('/databases/' + encodeURIComponent(id), { method: 'DELETE' });
                 databases = Array.isArray(list) ? list : [];
@@ -446,31 +495,96 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           return;
         }
 
+        if (activeTab === 'server_cfg') {
+          if (!mysqlConfig) {
+            el.innerHTML = '<div class="card"><p class="muted">Đang nạp cấu hình MySQL / MariaDB &amp; phpMyAdmin...</p></div>';
+            api('/databases/mysql-config').then((cfg) => {
+              mysqlConfig = cfg;
+              renderTab();
+            }).catch((err) => showBanner(err.message, true));
+            return;
+          }
+          el.innerHTML =
+            '<div class="card">' +
+            '<h3 style="margin:0 0 10px;font-size:14px;">Cấu hình MariaDB / MySQL (50-server.cnf) &amp; FerrousAdmin (/phpadmin/)</h3>' +
+            '<div class="grid-2" style="margin-bottom:12px;">' +
+            '<div><label>Phiên bản Engine</label><input value="' + esc(mysqlConfig.mysqlVersion || '') + '" readonly /></div>' +
+            '<div><label>Unix Socket</label><input value="' + esc(mysqlConfig.socketPath || '/run/mysqld/mysqld.sock') + '" readonly /></div>' +
+            '<div><label>Bind Address : Port</label><input value="' + esc((mysqlConfig.bindAddress || '127.0.0.1') + ':' + (mysqlConfig.port || 3306)) + '" readonly /></div>' +
+            '<div><label>Max Connections / Buffer Pool</label><input value="' + esc((mysqlConfig.maxConnections || 151) + ' conn / ' + (mysqlConfig.innodbBufferPoolMb || 128) + ' MB') + '" readonly /></div>' +
+            '</div>' +
+            '<label>Nội dung cấu hình trực tiếp (/etc/mysql/mariadb.conf.d/50-server.cnf)</label>' +
+            '<textarea id="myCnfEditor" style="min-height:220px;" placeholder="[mysqld]\nbind-address = 127.0.0.1\nmax_connections = 200\ninnodb_buffer_pool_size = 256M">' + esc(mysqlConfig.myCnfRaw || '') + '</textarea>' +
+            '<div class="row" style="margin-top:12px;justify-content:flex-end;">' +
+            '<button type="button" class="primary" id="btnSaveMyCnf">Lưu cấu hình &amp; Reload MariaDB</button>' +
+            '</div></div>';
+          document.getElementById('btnSaveMyCnf').addEventListener('click', async () => {
+            const myCnfRaw = document.getElementById('myCnfEditor').value;
+            try {
+              mysqlConfig = await api('/databases/mysql-config', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ myCnfRaw })
+              });
+              showBanner('Đã lưu cấu hình MariaDB/MySQL và reload dịch vụ.', false);
+              renderTab();
+            } catch (err) {
+              showBanner(err.message, true);
+            }
+          });
+          return;
+        }
+
         if (!db) {
           el.innerHTML = '<div class="card"><p class="muted">Hãy chọn hoặc tạo một database ở tab Databases trước.</p></div>';
           return;
         }
 
+        const isMysql = db.engine.toLowerCase().includes('maria') || db.engine.toLowerCase().includes('mysql');
+
         if (activeTab === 'structure') {
           const rows = (db.tables || []).map((t) =>
             '<tr><td><strong>' + esc(t.tableName) + '</strong></td><td>' + esc(t.rowCount) + '</td><td>' + esc(t.sizeKb) + ' KB</td><td>' +
             (t.columns || []).map((c) => esc(c.name) + ':' + esc(c.dataType) + (c.isPrimaryKey ? ' [PK]' : '')).join(', ') +
-            '</td><td class="row"><button type="button" data-browse="' + esc(t.tableName) + '">Browse</button>' +
+            '</td><td class="row"><button type="button" class="primary" data-browse="' + esc(t.tableName) + '">Browse &amp; Sửa</button>' +
+            '<button type="button" data-insert-tbl="' + esc(t.tableName) + '">Chèn dòng</button>' +
+            '<button type="button" data-addcol-tbl="' + esc(t.tableName) + '">+ Thêm cột</button>' +
             '<button type="button" data-trunc="' + esc(t.tableName) + '">Truncate</button>' +
             '<button type="button" class="danger" data-drop-tbl="' + esc(t.tableName) + '">Drop</button></td></tr>'
           ).join('');
           el.innerHTML = '<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px;">' +
             '<h3 style="margin:0;font-size:14px;">Cấu trúc bảng — ' + esc(db.name) + ' (' + esc(db.engine) + ')</h3>' +
-            '<button type="button" class="primary" id="btnGoNewTable">+ Tạo bảng mới</button></div>' +
-            '<div class="table-wrap"><table><thead><tr><th>Bảng</th><th>Dòng</th><th>Kích thước</th><th>Cột (Schema)</th><th>Thao tác</th></tr></thead><tbody>' +
+            '<div class="row"><button type="button" class="primary" id="btnGoNewTable">+ Tạo bảng mới</button></div></div>' +
+            '<div class="table-wrap"><table><thead><tr><th>Bảng</th><th>Dòng</th><th>Kích thước</th><th>Cột (Schema)</th><th>Thao tác chuyên sâu</th></tr></thead><tbody>' +
             (rows || '<tr><td colspan="5" class="muted">Chưa có bảng nào trong database này.</td></tr>') +
             '</tbody></table></div></div>';
           document.getElementById('btnGoNewTable').addEventListener('click', () => { activeTab = 'new_table'; syncTabs(); renderTab(); });
           el.querySelectorAll('[data-browse]').forEach((b) => b.addEventListener('click', () => {
-            activeTable = b.getAttribute('data-browse'); activeTab = 'browse'; syncTabs(); renderSidebar(); loadBrowseRows();
+            activeTable = b.getAttribute('data-browse'); browseOffset = 0; activeTab = 'browse'; syncTabs(); renderSidebar(); loadBrowseRows();
+          }));
+          el.querySelectorAll('[data-insert-tbl]').forEach((b) => b.addEventListener('click', () => {
+            activeTable = b.getAttribute('data-insert-tbl'); activeTab = 'insert'; syncTabs(); renderSidebar(); renderTab();
+          }));
+          el.querySelectorAll('[data-addcol-tbl]').forEach((b) => b.addEventListener('click', async () => {
+            const tbl = b.getAttribute('data-addcol-tbl');
+            const colSpec = window.prompt('Nhập định nghĩa cột mới cho bảng "' + tbl + '" (VD: status VARCHAR(64) DEFAULT \'active\'):', 'extra_note TEXT');
+            if (!colSpec) return;
+            const sql = 'ALTER TABLE ' + sqlQuoteId(tbl, isMysql) + ' ADD COLUMN ' + colSpec + ';';
+            try {
+              const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: sql })
+              });
+              if (!res.success) { showBanner(res.error || 'ALTER TABLE lỗi', true); return; }
+              databases = await api('/databases');
+              showBanner('Đã thêm cột mới vào bảng ' + tbl, false);
+              renderSidebar(); renderTab();
+            } catch (err) { showBanner(err.message, true); }
           }));
           el.querySelectorAll('[data-trunc]').forEach((b) => b.addEventListener('click', async () => {
             const tbl = b.getAttribute('data-trunc');
+            if (!window.confirm('Xác nhận làm rỗng (TRUNCATE) toàn bộ dữ liệu trong bảng "' + tbl + '"?')) return;
             try {
               databases = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(tbl) + '/truncate', { method: 'POST' });
               showBanner('Đã làm rỗng bảng ' + tbl, false);
@@ -479,6 +593,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           }));
           el.querySelectorAll('[data-drop-tbl]').forEach((b) => b.addEventListener('click', async () => {
             const tbl = b.getAttribute('data-drop-tbl');
+            if (!window.confirm('Xác nhận XÓA BẢNG (DROP TABLE) "' + tbl + '"?')) return;
             try {
               databases = await api('/databases/' + encodeURIComponent(db.id) + '/tables/' + encodeURIComponent(tbl), { method: 'DELETE' });
               if (activeTable === tbl) activeTable = '';
@@ -492,6 +607,8 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         if (activeTab === 'browse') {
           const tblOpts = (db.tables || []).map((t) => '<option value="' + esc(t.tableName) + '" ' + (t.tableName === activeTable ? 'selected' : '') + '>' + esc(t.tableName) + ' (' + esc(t.rowCount) + ')</option>').join('');
           const selectedObj = (db.tables || []).find((t) => t.tableName === activeTable);
+          const pkColObj = selectedObj && selectedObj.columns ? (selectedObj.columns.find((c) => c.isPrimaryKey) || selectedObj.columns[0]) : null;
+          const pkCol = pkColObj ? pkColObj.name : '';
           const fallbackRes = selectedObj ? {
             success: true,
             commandTag: 'SELECT',
@@ -500,29 +617,191 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
             columns: (selectedObj.columns || []).map((c) => c.name),
             rows: selectedObj.rows || []
           } : null;
+          const effectiveRes = lastQueryResult || fallbackRes;
           el.innerHTML = '<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px;">' +
-            '<div class="row"><strong style="font-size:14px;">Duyệt dữ liệu bảng:</strong>' +
-            '<select id="browseTblSelect" style="width:auto;">' + (tblOpts || '<option value="">(Không có bảng)</option>') + '</select></div>' +
-            '<button type="button" class="primary" id="btnReloadRows">Tải dữ liệu</button></div>' +
-            renderResultTable(lastQueryResult || fallbackRes) + '</div>';
+            '<div class="row"><strong style="font-size:14px;">Bảng:</strong>' +
+            '<select id="browseTblSelect" style="width:auto;">' + (tblOpts || '<option value="">(Không có bảng)</option>') + '</select>' +
+            '<span class="muted">Khóa chính: <strong>' + esc(pkCol || '—') + '</strong> · Offset: ' + browseOffset + '</span></div>' +
+            '<div class="row">' +
+            '<button type="button" id="btnPrevPage" ' + (browseOffset === 0 ? 'disabled' : '') + '>&laquo; Trang trước</button>' +
+            '<button type="button" id="btnNextPage">Trang sau &raquo;</button>' +
+            '<button type="button" id="btnGoInsert">+ Chèn dòng mới</button>' +
+            '<button type="button" class="primary" id="btnReloadRows">Làm mới</button>' +
+            '</div></div>' +
+            '<div id="inlineEditBox" class="hidden card" style="background:#020617;margin-bottom:12px;"></div>' +
+            renderResultTable(effectiveRes, { pkCol, tableName: activeTable }) + '</div>';
+
           document.getElementById('browseTblSelect').addEventListener('change', (ev) => {
             activeTable = ev.target.value;
+            browseOffset = 0;
             loadBrowseRows();
           });
+          document.getElementById('btnPrevPage').addEventListener('click', () => {
+            browseOffset = Math.max(0, browseOffset - browseLimit);
+            loadBrowseRows();
+          });
+          document.getElementById('btnNextPage').addEventListener('click', () => {
+            browseOffset += browseLimit;
+            loadBrowseRows();
+          });
+          document.getElementById('btnGoInsert').addEventListener('click', () => {
+            activeTab = 'insert'; syncTabs(); renderTab();
+          });
           document.getElementById('btnReloadRows').addEventListener('click', loadBrowseRows);
+
+          el.querySelectorAll('[data-edit-row]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const rIdx = Number(btn.getAttribute('data-edit-row'));
+              const rowObj = effectiveRes && effectiveRes.rows ? effectiveRes.rows[rIdx] : null;
+              if (!rowObj || !pkCol) return;
+              const pkVal = rowObj[pkCol];
+              const editBox = document.getElementById('inlineEditBox');
+              editBox.classList.remove('hidden');
+              editBox.innerHTML =
+                '<h4 style="margin:0 0 10px;font-size:13px;">Chỉnh sửa dòng (' + esc(pkCol) + ' = ' + esc(pkVal) + ') trong bảng ' + esc(activeTable) + '</h4>' +
+                '<form id="inlineRowForm" class="grid-2">' +
+                (effectiveRes.columns || []).map((c) =>
+                  '<div><label>' + esc(c) + (c === pkCol ? ' (PK)' : '') + '</label>' +
+                  '<input name="' + esc(c) + '" value="' + esc(rowObj[c] === null || rowObj[c] === undefined ? '' : rowObj[c]) + '" /></div>'
+                ).join('') +
+                '<div class="row" style="grid-column:1/-1;justify-content:flex-end;margin-top:8px;">' +
+                '<button type="button" id="btnCancelInline">Hủy</button>' +
+                '<button type="submit" class="primary">Lưu UPDATE SQL</button>' +
+                '</div></form>';
+              document.getElementById('btnCancelInline').addEventListener('click', () => editBox.classList.add('hidden'));
+              document.getElementById('inlineRowForm').addEventListener('submit', async (ev) => {
+                ev.preventDefault();
+                const fd = new FormData(ev.target);
+                const sets = [];
+                (effectiveRes.columns || []).forEach((c) => {
+                  const newVal = fd.get(c);
+                  if (String(newVal) !== String(rowObj[c] === null || rowObj[c] === undefined ? '' : rowObj[c])) {
+                    sets.push(sqlQuoteId(c, isMysql) + ' = ' + sqlQuoteVal(newVal));
+                  }
+                });
+                if (!sets.length) {
+                  editBox.classList.add('hidden');
+                  return;
+                }
+                const sql = 'UPDATE ' + sqlQuoteId(activeTable, isMysql) + ' SET ' + sets.join(', ') +
+                  ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal) + ';';
+                try {
+                  const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: sql })
+                  });
+                  if (!res.success) { showBanner(res.error || 'UPDATE lỗi', true); return; }
+                  showBanner('Đã cập nhật dòng (' + pkCol + '=' + pkVal + ') thành công.', false);
+                  await loadBrowseRows();
+                } catch (err) {
+                  showBanner(err.message, true);
+                }
+              });
+            });
+          });
+
+          el.querySelectorAll('[data-del-row]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+              const rIdx = Number(btn.getAttribute('data-del-row'));
+              const rowObj = effectiveRes && effectiveRes.rows ? effectiveRes.rows[rIdx] : null;
+              if (!rowObj || !pkCol) return;
+              const pkVal = rowObj[pkCol];
+              if (!window.confirm('Xác nhận xóa dòng có ' + pkCol + ' = ' + pkVal + ' khỏi bảng ' + activeTable + '?')) return;
+              const sql = 'DELETE FROM ' + sqlQuoteId(activeTable, isMysql) + ' WHERE ' + sqlQuoteId(pkCol, isMysql) + ' = ' + sqlQuoteVal(pkVal) + ';';
+              try {
+                const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ query: sql })
+                });
+                if (!res.success) { showBanner(res.error || 'DELETE lỗi', true); return; }
+                databases = await api('/databases');
+                showBanner('Đã xóa dòng (' + pkCol + '=' + pkVal + ').', false);
+                renderSidebar();
+                await loadBrowseRows();
+              } catch (err) {
+                showBanner(err.message, true);
+              }
+            });
+          });
+          return;
+        }
+
+        if (activeTab === 'insert') {
+          const selectedObj = (db.tables || []).find((t) => t.tableName === activeTable) || (db.tables || [])[0];
+          if (!selectedObj) {
+            el.innerHTML = '<div class="card"><p class="muted">Hãy tạo bảng trước khi chèn dữ liệu.</p></div>';
+            return;
+          }
+          activeTable = selectedObj.tableName;
+          const cols = selectedObj.columns || [];
+          el.innerHTML = '<div class="card"><h3 style="margin:0 0 10px;font-size:14px;">Chèn dòng mới (INSERT INTO ' + esc(activeTable) + ')</h3>' +
+            '<form id="insertRowForm" class="grid-2">' +
+            cols.map((c) =>
+              '<div><label>' + esc(c.name) + ' <span class="muted">(' + esc(c.dataType) + (c.isPrimaryKey ? ' · PK' : '') + ')</span></label>' +
+              '<input name="' + esc(c.name) + '" placeholder="' + (c.isPrimaryKey ? 'Để trống nếu AUTO_INCREMENT' : (c.nullable ? 'NULL' : 'Nhập giá trị')) + '" /></div>'
+            ).join('') +
+            '<div style="grid-column:1/-1;margin-top:8px;"><button type="submit" class="primary">Thực thi INSERT</button></div>' +
+            '</form></div>';
+          document.getElementById('insertRowForm').addEventListener('submit', async (ev) => {
+            ev.preventDefault();
+            const fd = new FormData(ev.target);
+            const colNames = [];
+            const colVals = [];
+            cols.forEach((c) => {
+              const raw = String(fd.get(c.name) || '');
+              if (raw === '' && c.isPrimaryKey) return;
+              colNames.push(sqlQuoteId(c.name, isMysql));
+              colVals.push(raw === '' && c.nullable ? 'NULL' : sqlQuoteVal(raw));
+            });
+            if (!colNames.length) {
+              showBanner('Hãy nhập ít nhất 1 cột.', true);
+              return;
+            }
+            const sql = 'INSERT INTO ' + sqlQuoteId(activeTable, isMysql) + ' (' + colNames.join(', ') + ') VALUES (' + colVals.join(', ') + ');';
+            try {
+              const res = await api('/databases/' + encodeURIComponent(db.id) + '/query', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: sql })
+              });
+              if (!res.success) { showBanner(res.error || 'INSERT lỗi', true); return; }
+              databases = await api('/databases');
+              showBanner('Đã chèn dòng mới vào bảng "' + activeTable + '".', false);
+              activeTab = 'browse';
+              syncTabs();
+              renderSidebar();
+              await loadBrowseRows();
+            } catch (err) {
+              showBanner(err.message, true);
+            }
+          });
           return;
         }
 
         if (activeTab === 'sql') {
           const defaultSql = activeTable
-            ? 'SELECT * FROM ' + activeTable + ' LIMIT 50;'
+            ? 'SELECT * FROM ' + sqlQuoteId(activeTable, isMysql) + ' LIMIT 50;'
             : (db.engine.toLowerCase().includes('sqlite')
               ? "SELECT name, type FROM sqlite_master WHERE type = 'table';"
-              : 'SELECT 1 AS ok;');
-          el.innerHTML = '<div class="card"><h3 style="margin:0 0 10px;font-size:14px;">SQL Console — ' + esc(db.name) + ' (' + esc(db.engine) + ')</h3>' +
+              : 'SHOW TABLES;');
+          el.innerHTML = '<div class="card"><div class="row" style="justify-content:space-between;margin-bottom:10px;">' +
+            '<h3 style="margin:0;font-size:14px;">SQL Console — ' + esc(db.name) + ' (' + esc(db.engine) + ')</h3>' +
+            '<div class="row">' +
+            '<button type="button" data-tpl-sql="SHOW TABLES;">SHOW TABLES</button>' +
+            (isMysql ? '<button type="button" data-tpl-sql="SHOW PROCESSLIST;">PROCESSLIST</button><button type="button" data-tpl-sql="SHOW VARIABLES LIKE \'%buffer%\';">VARIABLES</button>' : '') +
+            (activeTable ? '<button type="button" data-tpl-sql="SELECT * FROM ' + esc(sqlQuoteId(activeTable, isMysql)) + ' LIMIT 100;">SELECT * (' + esc(activeTable) + ')</button>' : '') +
+            '<button type="button" data-tpl-sql="SELECT option_name, option_value FROM wp_options WHERE option_name IN (\'siteurl\', \'home\', \'blogname\', \'admin_email\');">WP Options</button>' +
+            '</div></div>' +
             '<textarea id="sqlEditor">' + esc(defaultSql) + '</textarea>' +
-            '<div class="row" style="margin-top:10px;"><button type="button" class="primary" id="btnRunSql">Thực thi SQL (Pure Rust)</button></div></div>' +
+            '<div class="row" style="margin-top:10px;"><button type="button" class="primary" id="btnRunSql">Thực thi SQL</button></div></div>' +
             '<div id="sqlOut">' + renderResultTable(lastQueryResult) + '</div>';
+          el.querySelectorAll('[data-tpl-sql]').forEach((b) => {
+            b.addEventListener('click', () => {
+              document.getElementById('sqlEditor').value = b.getAttribute('data-tpl-sql');
+            });
+          });
           document.getElementById('btnRunSql').addEventListener('click', async () => {
             const query = document.getElementById('sqlEditor').value;
             showBanner('', false);
@@ -546,7 +825,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
           el.innerHTML = '<div class="card"><h3 style="margin:0 0 10px;font-size:14px;">Tạo bảng mới trong ' + esc(db.name) + '</h3>' +
             '<form id="newTableForm" class="grid-2">' +
             '<div><label>Tên bảng</label><input id="ntName" placeholder="users" required /></div>' +
-            '<div><label>Cột 1 (Primary Key)</label><input id="ntCol1" value="id" required /></div>' +
+            '<div><label>Cột 1 (Primary Key AUTO_INCREMENT)</label><input id="ntCol1" value="id" required /></div>' +
             '<div><label>Cột 2 (TEXT / VARCHAR)</label><input id="ntCol2" value="title" required /></div>' +
             '<div><label>Cột 3 (TEXT / TIMESTAMP)</label><input id="ntCol3" value="created_at" required /></div>' +
             '<div style="grid-column:1/-1;"><button type="submit" class="primary">Tạo bảng</button></div>' +
@@ -639,13 +918,24 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       async function loadAll() {
         const sess = await api('/auth/session');
         if (!sess || !sess.authenticated) { showLogin(); return; }
-        showApp(sess.username || 'admin');
+        const uname = (sess.user && sess.user.username) || sess.username || 'admin';
+        showApp(uname);
         databases = await api('/databases');
-        if (!activeDbId && databases[0]) activeDbId = databases[0].id;
+        if (activeDbId) {
+          const matched = databases.find((d) => d.id === activeDbId || d.name === activeDbId);
+          activeDbId = matched ? matched.id : (databases[0] ? databases[0].id : '');
+        } else if (databases[0]) {
+          activeDbId = databases[0].id;
+        }
         const db = getActiveDb();
         if (!activeTable && db && db.tables && db.tables[0]) activeTable = db.tables[0].tableName;
+        syncTabs();
         renderSidebar();
-        renderTab();
+        if (activeTab === 'browse' && activeTable) {
+          await loadBrowseRows();
+        } else {
+          renderTab();
+        }
       }
 
       document.getElementById('loginForm').addEventListener('submit', async (ev) => {
@@ -693,8 +983,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
     })();
   </script>
 </body>
-</html>
-"##;
+</html>"##;
 
 /// Serves the standalone Pure-Rust FerrousAdmin SQL Studio (Zero PHP replacement for phpMyAdmin)
 /// at `/phpadmin`, `/phpadmin/`, `/phpmyadmin`, and `/phpmyadmin/`.

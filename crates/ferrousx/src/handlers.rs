@@ -126,6 +126,70 @@ pub async fn dispatch_request(
     };
 
     let server_tokens = bundle.master.server_tokens;
+    let req_path = req.uri().path().to_string();
+
+    // 0. Global /phpadmin & /phpmyadmin reverse-proxy route (works on any Host or IP when enabled).
+    if bundle.master.enable_phpmyadmin_route {
+        if let Some(ref pma_upstream) = bundle.master.phpmyadmin_upstream {
+            let raw_host = req
+                .headers()
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .or_else(|| req.uri().host())
+                .unwrap_or("localhost")
+                .to_string();
+            if req_path == "/phpadmin" || req_path == "/phpmyadmin" {
+                let target = format!("{req_path}/");
+                let mut builder = Response::builder().status(StatusCode::MOVED_PERMANENTLY);
+                if let Ok(hv) = HeaderValue::from_str(&target) {
+                    builder = builder.header(header::LOCATION, hv);
+                }
+                if server_tokens {
+                    builder = builder.header(header::SERVER, "FerrousX");
+                }
+                if let Ok(resp) = builder.body(empty_body()) {
+                    return Ok(resp);
+                }
+            }
+            if req_path.starts_with("/phpadmin/") || req_path.starts_with("/phpmyadmin/") {
+                return Ok(handle_reverse_proxy(
+                    req,
+                    peer_addr,
+                    is_tls,
+                    &raw_host,
+                    pma_upstream,
+                    true,
+                    true,
+                    &bundle,
+                    &runtime.http_client,
+                )
+                .await);
+            }
+        }
+    }
+
+    // 0.5 Global ACME HTTP-01 challenge before host matching so IP/new-SAN preflight challenges always succeed.
+    if !is_tls && req_path.starts_with(&bundle.master.acme_challenge_prefix) {
+        if !matches!(*req.method(), Method::GET | Method::HEAD) {
+            return Ok(text_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "Method Not Allowed",
+                server_tokens,
+            ));
+        }
+        let is_head = *req.method() == Method::HEAD;
+        return Ok(serve_static_file_from_root(
+            &bundle.master.acme_webroot,
+            &req_path,
+            None,
+            StaticServeOptions::acme(),
+            None,
+            is_head,
+            server_tokens,
+        )
+        .await);
+    }
+
     let (site, host) = match match_site_for_request(&req, &bundle) {
         Ok(pair) => pair,
         Err(err) => {
@@ -133,9 +197,7 @@ pub async fn dispatch_request(
         }
     };
 
-    let req_path = req.uri().path().to_string();
-
-    // 1. Serve ACME HTTP-01 challenge cleanly before HTTPS redirects when enabled.
+    // 1. Serve site-specific ACME HTTP-01 challenge cleanly before HTTPS redirects when enabled.
     if !is_tls && site.acme_serve_before_redirect && req_path.starts_with(&site.acme_prefix) {
         if !matches!(*req.method(), Method::GET | Method::HEAD) {
             return Ok(text_response(

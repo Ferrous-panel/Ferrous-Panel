@@ -139,6 +139,14 @@ pub struct MasterConfigToml {
     pub max_failed_attempts: u32,
     pub brute_force_lockout_secs: u64,
     pub waf_mode: String,
+    #[serde(default = "default_true")]
+    pub enable_phpmyadmin_route: bool,
+    #[serde(default = "default_phpmyadmin_upstream")]
+    pub phpmyadmin_upstream: String,
+}
+
+fn default_phpmyadmin_upstream() -> String {
+    "127.0.0.1:888".to_string()
 }
 
 impl Default for MasterConfigToml {
@@ -163,6 +171,8 @@ impl Default for MasterConfigToml {
             max_failed_attempts: 5,
             brute_force_lockout_secs: 60,
             waf_mode: "block".to_string(),
+            enable_phpmyadmin_route: true,
+            phpmyadmin_upstream: default_phpmyadmin_upstream(),
         }
     }
 }
@@ -523,6 +533,8 @@ pub struct ValidatedMasterConfig {
     pub max_failed_attempts: u32,
     pub brute_force_lockout_secs: u64,
     pub waf_mode: String,
+    pub enable_phpmyadmin_route: bool,
+    pub phpmyadmin_upstream: Option<UpstreamOrigin>,
 }
 
 #[derive(Debug)]
@@ -604,6 +616,12 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
     if let Some(v) = resolve_env_var("FERROUSX_WAF_MODE", &env_map) {
         parsed_master.waf_mode = v;
     }
+    if let Some(v) = resolve_env_var("FERROUSX_ENABLE_PHPMYADMIN", &env_map).and_then(|s| parse_env_bool(&s)) {
+        parsed_master.enable_phpmyadmin_route = v;
+    }
+    if let Some(v) = resolve_env_var("FERROUSX_PHPMYADMIN_UPSTREAM", &env_map) {
+        parsed_master.phpmyadmin_upstream = v;
+    }
 
     let bind_http: SocketAddr = parsed_master.bind_http.trim().parse().map_err(|err| {
         ServerError::Config(format!(
@@ -647,6 +665,19 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
     let admin_token_file =
         validate_absolute_clean_path(&parsed_master.admin_token_file, "admin_token_file")?;
 
+    let phpmyadmin_upstream = if parsed_master.enable_phpmyadmin_route {
+        let raw_pma = parsed_master.phpmyadmin_upstream.trim();
+        if raw_pma.is_empty() {
+            Some(UpstreamOrigin::parse("http://127.0.0.1:888")?)
+        } else if raw_pma.starts_with("http://") {
+            Some(UpstreamOrigin::parse(raw_pma)?)
+        } else {
+            Some(UpstreamOrigin::parse(&format!("http://{raw_pma}"))?)
+        }
+    } else {
+        None
+    };
+
     let master = ValidatedMasterConfig {
         worker_threads: parsed_master.worker_threads,
         bind_http,
@@ -667,6 +698,8 @@ pub fn load_bundle(master_path: &Path) -> Result<LoadedBundle, ServerError> {
         max_failed_attempts: parsed_master.max_failed_attempts.max(3),
         brute_force_lockout_secs: parsed_master.brute_force_lockout_secs.max(30),
         waf_mode: parsed_master.waf_mode,
+        enable_phpmyadmin_route: parsed_master.enable_phpmyadmin_route,
+        phpmyadmin_upstream,
     };
 
     let mut site_files: Vec<PathBuf> = Vec::new();

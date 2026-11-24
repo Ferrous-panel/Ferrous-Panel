@@ -94,6 +94,18 @@ fn render_wp_config_from_sample(
             );
         }
     }
+
+    let proxy_https_snippet = "\n/* FerrousPanel HTTPS / Cloudflare Reverse-Proxy detection */\n\
+if ( ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false )\n\
+  || ( isset( $_SERVER['HTTP_CF_VISITOR'] ) && strpos( $_SERVER['HTTP_CF_VISITOR'], 'https' ) !== false ) ) {\n\
+    $_SERVER['HTTPS'] = 'on';\n\
+}\n";
+    if let Some(pos) = cfg.find("require_once") {
+        cfg.insert_str(pos, proxy_https_snippet);
+    } else {
+        cfg.push_str(proxy_https_snippet);
+    }
+
     Ok(cfg)
 }
 
@@ -189,7 +201,7 @@ pub fn list_oneclick_templates() -> Vec<OneClickTemplate> {
             category: "PHP CMS / Framework".to_string(),
             framework: WebsiteRuntimeType::Php83Fpm,
             version: "6.7.2 (PHP 8.3)".to_string(),
-            description: "Tải trực tiếp gói WordPress chính thức (wordpress.org/latest.tar.gz), tự cấu hình MariaDB + wp-config.php và chạy qua PHP 8.3-FPM Unix socket.".to_string(),
+            description: "Tải trực tiếp gói WordPress chính thức (wordpress.org/latest.tar.gz), tự động tạo MariaDB, sinh wp-config.php, khởi tạo toàn bộ bảng CSDL & tài khoản Admin WordPress — vào web là chạy ngay.".to_string(),
             default_port: 9000,
             requires_db: "MariaDB 11.4".to_string(),
             build_command: "php -v".to_string(),
@@ -765,6 +777,150 @@ fn scaffold_rust_http_starter(
     Ok(())
 }
 
+fn resolve_active_php_cli(executor: &dyn CommandExecutor) -> Option<AllowedBinary> {
+    for bin in [
+        AllowedBinary::Php83,
+        AllowedBinary::Php84,
+        AllowedBinary::Php82,
+        AllowedBinary::Php81,
+        AllowedBinary::Php74,
+    ] {
+        if executor.is_binary_available(bin) {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+fn sanitize_wp_admin_user(raw: Option<&str>) -> String {
+    let candidate = raw.map(str::trim).unwrap_or("");
+    let cleaned: String = candidate
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(32)
+        .collect();
+    if cleaned.len() >= 3 {
+        cleaned
+    } else {
+        "admin".to_string()
+    }
+}
+
+fn sanitize_wp_admin_email(raw: Option<&str>, domain: &str) -> String {
+    if let Some(val) = raw.map(str::trim).filter(|s| !s.is_empty()) {
+        if val.contains('@')
+            && val.len() <= 128
+            && !val.chars().any(|c| c.is_control() || c.is_whitespace() || matches!(c, '\'' | '"' | ';' | '`'))
+        {
+            return val.to_string();
+        }
+    }
+    format!("admin@{domain}")
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_wordpress_auto_install(
+    site_dir: &Path,
+    domain: &str,
+    ssl_enabled: bool,
+    site_title: &str,
+    admin_user: &str,
+    admin_pass: &str,
+    admin_email: &str,
+    executor: &dyn CommandExecutor,
+) -> Result<bool, String> {
+    if !site_dir.join("wp-admin/includes/upgrade.php").is_file() {
+        return Ok(false);
+    }
+    let Some(php_bin) = resolve_active_php_cli(executor) else {
+        return Err("Không tìm thấy PHP CLI (/usr/bin/php8.3 hoặc /usr/bin/php) để chạy wp_install.".to_string());
+    };
+
+    let scheme = if ssl_enabled { "https" } else { "http" };
+    let site_url = format!("{scheme}://{domain}");
+    let bootstrap_path = site_dir.join(".fp-wp-auto-install.php");
+    let bootstrap_code = r#"<?php
+error_reporting(E_ERROR | E_PARSE);
+define('WP_INSTALLING', true);
+define('WP_USE_THEMES', false);
+
+$domain = getenv('FP_WP_DOMAIN') ?: 'localhost';
+$site_url = getenv('FP_WP_URL') ?: ('http://' . $domain);
+$title = getenv('FP_WP_TITLE') ?: $domain;
+$user = getenv('FP_WP_USER') ?: 'admin';
+$pass = getenv('FP_WP_PASS') ?: '';
+$email = getenv('FP_WP_EMAIL') ?: ('admin@' . $domain);
+
+$_SERVER['HTTP_HOST'] = $domain;
+$_SERVER['SERVER_NAME'] = $domain;
+$_SERVER['REQUEST_URI'] = '/';
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+$_SERVER['SERVER_PROTOCOL'] = 'HTTP/1.1';
+
+require_once __DIR__ . '/wp-load.php';
+require_once ABSPATH . 'wp-admin/includes/upgrade.php';
+require_once ABSPATH . 'wp-includes/wp-db.php';
+
+if (function_exists('is_blog_installed') && is_blog_installed()) {
+    update_option('siteurl', $site_url);
+    update_option('home', $site_url);
+    echo "WP_ALREADY_INSTALLED\n";
+    exit(0);
+}
+
+$result = wp_install($title, $user, $email, true, '', wp_slash($pass));
+if (is_wp_error($result)) {
+    fwrite(STDERR, $result->get_error_message() . "\n");
+    exit(1);
+}
+
+update_option('siteurl', $site_url);
+update_option('home', $site_url);
+update_option('permalink_structure', '/%postname%/');
+if (isset($GLOBALS['wp_rewrite']) && is_object($GLOBALS['wp_rewrite'])) {
+    $GLOBALS['wp_rewrite']->set_permalink_structure('/%postname%/');
+    flush_rewrite_rules(false);
+}
+echo "WP_INSTALLED_OK\n";
+"#;
+
+    if let Err(err) = atomic_write_file(&bootstrap_path, bootstrap_code.as_bytes(), 0o600) {
+        return Err(format!("Không thể tạo script bootstrap cài đặt WordPress: {err}"));
+    }
+
+    let script_arg = bootstrap_path.display().to_string();
+    let run_res = executor
+        .run_with_env(
+            php_bin,
+            &[&script_arg],
+            &[
+                ("FP_WP_DOMAIN", domain),
+                ("FP_WP_URL", &site_url),
+                ("FP_WP_TITLE", site_title),
+                ("FP_WP_USER", admin_user),
+                ("FP_WP_PASS", admin_pass),
+                ("FP_WP_EMAIL", admin_email),
+            ],
+            Some(site_dir),
+            WP_DOWNLOAD_TIMEOUT,
+        )
+        .await;
+    let _ = std::fs::remove_file(&bootstrap_path);
+
+    match run_res {
+        Ok(out) if out.success => Ok(true),
+        Ok(out) => {
+            let detail = if !out.stderr.trim().is_empty() {
+                out.stderr.trim().to_string()
+            } else {
+                out.stdout.trim().to_string()
+            };
+            Err(detail)
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
 pub async fn deploy_oneclick(
     req: OneClickDeployRequest,
     store: &ModuleStore,
@@ -973,9 +1129,9 @@ pub async fn deploy_oneclick(
         }
     }
 
+    const PASS_CHARS: &[u8] =
+        b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#%^&*";
     let (create_database, db_name, db_user, db_password) = if wants_db {
-        const PASS_CHARS: &[u8] =
-            b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#%^&*";
         let prefix = if is_wordpress { "wp_" } else { "app_" };
         let ident = derive_db_ident(prefix, domain.as_str());
         let pass = generate_secure_token(20, PASS_CHARS)?;
@@ -989,7 +1145,8 @@ pub async fn deploy_oneclick(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or(&tpl.name);
+        .unwrap_or(&tpl.name)
+        .to_string();
 
     let deploy_req = DeployWebsiteRequest {
         name: format!("{} ({})", domain.as_str(), display_title),
@@ -1033,7 +1190,7 @@ pub async fn deploy_oneclick(
         let _ = store.upsert_app(&deployed);
     }
 
-    // Auto-generate wp-config.php when WordPress was downloaded and database was created
+    // Auto-generate wp-config.php and automatically complete WordPress database & admin setup
     if is_wordpress && create_database {
         let sample_path = site_dir.as_path().join("wp-config-sample.php");
         let target_path = site_dir.as_path().join("wp-config.php");
@@ -1057,13 +1214,100 @@ pub async fn deploy_oneclick(
                         .await;
                 }
                 deployed.logs.push(format!(
-                    "[{}] Generated wp-config.php linked to database '{}' (user '{}'). Complete setup at http://{}/wp-admin/install.php",
+                    "[{}] Đã tạo wp-config.php kết nối MariaDB '{}' (user '{}').",
                     Utc::now().to_rfc3339(),
                     db_name,
-                    db_user,
-                    domain.as_str()
+                    db_user
                 ));
-                let _ = store.upsert_app(&deployed);
+            }
+        }
+
+        let wp_admin_user = sanitize_wp_admin_user(req.admin_user.as_deref());
+        let wp_admin_email = sanitize_wp_admin_email(req.admin_email.as_deref(), domain.as_str());
+        let wp_admin_pass = match req
+            .admin_password
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| p.len() >= 6 && p.len() <= 128 && !p.chars().any(char::is_control))
+        {
+            Some(custom) => custom.to_string(),
+            None => generate_secure_token(16, PASS_CHARS)?,
+        };
+
+        let scheme = if deployed.ssl_enabled { "https" } else { "http" };
+        let site_url = format!("{scheme}://{}", domain.as_str());
+        let admin_url = format!("{site_url}/wp-login.php");
+
+        let mut auto_installed = false;
+        let setup_msg = if target_path.is_file() {
+            match run_wordpress_auto_install(
+                site_dir.as_path(),
+                domain.as_str(),
+                deployed.ssl_enabled,
+                &display_title,
+                &wp_admin_user,
+                &wp_admin_pass,
+                &wp_admin_email,
+                executor,
+            )
+            .await
+            {
+                Ok(true) => {
+                    auto_installed = true;
+                    if prod && executor.is_binary_available(AllowedBinary::Chown) {
+                        let dest_str = site_dir.as_path().display().to_string();
+                        let _ = executor
+                            .run(
+                                AllowedBinary::Chown,
+                                &["-R", "www-data:www-data", "--", &dest_str],
+                                WP_DOWNLOAD_TIMEOUT,
+                            )
+                            .await;
+                    }
+                    let msg = format!(
+                        "Đã tự động cài đặt hoàn chỉnh WordPress (khởi tạo bảng CSDL, cấu hình Permalink & tạo tài khoản quản trị '{}'). Website đã sẵn sàng truy cập tại {}",
+                        wp_admin_user, site_url
+                    );
+                    deployed.logs.push(format!("[{}] [wp-setup] {msg}", Utc::now().to_rfc3339()));
+                    msg
+                }
+                Ok(false) => {
+                    let msg = format!(
+                        "Đã cấu hình wp-config.php & MariaDB. Hoàn tất bước cuối tại {site_url}/wp-admin/install.php"
+                    );
+                    deployed.logs.push(format!("[{}] [wp-setup] {msg}", Utc::now().to_rfc3339()));
+                    msg
+                }
+                Err(err) => {
+                    let msg = format!(
+                        "Đã tạo wp-config.php & MariaDB (tự động chạy wp_install gặp lỗi: {err}). Bạn có thể hoàn tất tại {site_url}/wp-admin/install.php"
+                    );
+                    deployed.logs.push(format!("[{}] [wp-setup] {msg}", Utc::now().to_rfc3339()));
+                    msg
+                }
+            }
+        } else {
+            format!("Đã triển khai mã nguồn WordPress tại {site_url}")
+        };
+
+        // Persist summary WITHOUT storing plaintext password in SQLite, then attach password for the one-time response
+        let persisted_summary = OneClickSetupSummary {
+            site_url: site_url.clone(),
+            admin_url: admin_url.clone(),
+            admin_user: wp_admin_user.clone(),
+            admin_password: None,
+            admin_email: wp_admin_email.clone(),
+            db_name: Some(db_name.clone()),
+            db_user: Some(db_user.clone()),
+            auto_installed,
+            message: setup_msg.clone(),
+        };
+        deployed.setup_summary = Some(persisted_summary);
+        let _ = store.upsert_app(&deployed);
+
+        if let Some(ref mut summary) = deployed.setup_summary {
+            if auto_installed {
+                summary.admin_password = Some(wp_admin_pass);
             }
         }
     }

@@ -59,6 +59,11 @@ pub fn match_site_for_request<'a, B>(
         .host_index
         .get(&normalized)
         .copied()
+        .or_else(|| {
+            normalized
+                .strip_prefix("www.")
+                .and_then(|bare| bundle.host_index.get(bare).copied())
+        })
         .ok_or(HostMatchError::UnknownHost)?;
 
     let site = bundle

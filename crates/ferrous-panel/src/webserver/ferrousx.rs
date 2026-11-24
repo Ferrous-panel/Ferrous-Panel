@@ -227,6 +227,8 @@ bind_https = \"0.0.0.0:443\"\n\
 sites_dir = \"{sites_dir}\"\n\
 acme_webroot = \"{acme}\"\n\
 acme_challenge_prefix = \"/.well-known/acme-challenge/\"\n\
+enable_phpmyadmin_route = true\n\
+phpmyadmin_upstream = \"127.0.0.1:888\"\n\
 server_tokens = false\n"
         )
     }

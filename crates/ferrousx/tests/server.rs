@@ -552,6 +552,12 @@ fn ferrousx_tls_sni_and_alpn_selection() -> TestResult {
                     "-subj",
                     &format!("/CN={cn}"),
                     "-addext",
+                    "basicConstraints=critical,CA:FALSE",
+                    "-addext",
+                    "keyUsage=critical,digitalSignature,keyEncipherment",
+                    "-addext",
+                    "extendedKeyUsage=serverAuth",
+                    "-addext",
                     &format!("subjectAltName=DNS:{cn}"),
                 ])
                 .status()?;

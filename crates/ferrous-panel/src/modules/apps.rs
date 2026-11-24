@@ -1435,6 +1435,7 @@ pub async fn deploy_app(
         }
     };
     if req.ssl_enabled && !effective_ssl {
+        let mut issued_le = false;
         if webserver
             .executor()
             .is_binary_available(AllowedBinary::Certbot)
@@ -1452,6 +1453,7 @@ pub async fn deploy_app(
                     {
                         rendered = ssl_rendered;
                         effective_ssl = true;
+                        issued_le = true;
                         initial_logs.push(format!(
                             "[{}] Issued Let's Encrypt certificate and enabled HTTPS for {}",
                             Utc::now().to_rfc3339(),
@@ -1461,22 +1463,48 @@ pub async fn deploy_app(
                 }
                 Ok(_) => {
                     initial_logs.push(format!(
-                        "[{}] Deployed HTTP vhost cleanly (SSL pending: point DNS to this VPS then run SSL issue/renew)",
-                        Utc::now().to_rfc3339()
+                        "[{}] Let's Encrypt pending for {} (falling back to Self-Signed HTTPS so port 443 works immediately)",
+                        Utc::now().to_rfc3339(),
+                        domain.as_str()
                     ));
                 }
                 Err(err) => {
                     initial_logs.push(format!(
-                        "[{}] Deployed HTTP vhost cleanly (initial SSL issuance skipped: {err}; point DNS to this VPS then retry SSL)",
+                        "[{}] Let's Encrypt issuance skipped ({err}); falling back to Self-Signed HTTPS so port 443 works immediately",
                         Utc::now().to_rfc3339()
                     ));
                 }
             }
-        } else {
-            initial_logs.push(format!(
-                "[{}] Deployed HTTP vhost cleanly (certbot not installed on host)",
-                Utc::now().to_rfc3339()
-            ));
+        }
+        // If Let's Encrypt could not be issued yet (e.g. Cloudflare proxy active or DNS propagating),
+        // automatically generate a real Self-Signed X.509 certificate via OpenSSL so HTTPS (port 443) works immediately.
+        if !issued_le
+            && config.is_production()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            if let Ok(self_status) = webserver
+                .ssl
+                .issue_self_signed(&domain, &parsed_aliases, 365)
+                .await
+            {
+                if self_status.present {
+                    spec.ssl_enabled = true;
+                    if let Ok(ssl_rendered) = webserver
+                        .upsert_and_apply_site(&spec, preferred_engine)
+                        .await
+                    {
+                        rendered = ssl_rendered;
+                        effective_ssl = true;
+                        initial_logs.push(format!(
+                            "[{}] Enabled real HTTPS on port 443 with OpenSSL Self-Signed certificate for {} (compatible with Cloudflare Full SSL; re-run Let's Encrypt anytime)",
+                            Utc::now().to_rfc3339(),
+                            domain.as_str()
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -2028,6 +2056,16 @@ pub async fn update_site_settings(
                 cert_ready = issued.present;
             }
         }
+        if !cert_ready
+            && config.is_production()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            if let Ok(self_issued) = webserver.ssl.issue_self_signed(&domain, &aliases, 365).await {
+                cert_ready = self_issued.present;
+            }
+        }
         if !cert_ready {
             return Err(PanelError::Validation(format!(
                 "SSL certificate not found for {} — ensure DNS A/AAAA points to this VPS and issue SSL first",
@@ -2168,6 +2206,28 @@ async fn apply_app_ssl_vhost(
     app.url_rewrite_rules = rendered.content;
     app.nginx_vhost = rendered.config_path.display().to_string();
     store.upsert_app(app)?;
+
+    // If this is a WordPress site with a linked MariaDB database, automatically update `siteurl` and `home`
+    // in `wp_options` to match `https://` or `http://` so WordPress does not suffer mixed-content or redirect loops.
+    if is_php_runtime(app.framework) && effective_doc_root.join("wp-config.php").is_file() {
+        if let Some(ref db_name) = app.linked_db_name {
+            let db_id = format!("db-mysql-{}", db_name.trim());
+            let scheme = if ssl_enabled { "https" } else { "http" };
+            let target_url = format!("{scheme}://{}", app.domain);
+            let escaped_url = target_url.replace('\\', "\\\\").replace('\'', "\\'");
+            let sql = format!(
+                "UPDATE `wp_options` SET `option_value` = '{escaped_url}' WHERE `option_name` IN ('siteurl', 'home');"
+            );
+            let _ = crate::modules::databases::execute_sql_query(
+                store,
+                webserver.executor().as_ref(),
+                &db_id,
+                &sql,
+            )
+            .await;
+        }
+    }
+
     Ok(())
 }
 
@@ -2252,11 +2312,17 @@ pub async fn install_app_ssl_letsencrypt(
 
     if aliases_changed {
         app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
-        // Apply HTTP vhost first so ACME HTTP-01 challenge works for newly added SAN aliases too.
-        let cur_ssl = app.ssl_enabled;
-        let cur_force = app.force_https;
-        apply_app_ssl_vhost(&mut app, cur_ssl, cur_force, store, config, webserver).await?;
     }
+    // Always ensure the HTTP vhost (with /.well-known/acme-challenge/ -> /www/acme) is active on port 80
+    // before Certbot performs ACME HTTP-01 validation.
+    let cert_present_on_disk = webserver
+        .ssl
+        .site_cert_paths(&domain)
+        .map(|(c, k)| c.is_file() && k.is_file())
+        .unwrap_or(false);
+    let cur_ssl = app.ssl_enabled && cert_present_on_disk;
+    let cur_force = app.force_https && cur_ssl;
+    apply_app_ssl_vhost(&mut app, cur_ssl, cur_force, store, config, webserver).await?;
 
     let issued = webserver
         .ssl

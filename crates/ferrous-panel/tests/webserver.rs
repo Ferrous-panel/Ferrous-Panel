@@ -461,9 +461,39 @@ server {
         try_files $uri =404;
     }
 
+    location = /phpadmin {
+        return 301 $scheme://$http_host/phpadmin/;
+    }
+
+    location ^~ /phpadmin/ {
+        proxy_pass http://127.0.0.1:888;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /phpmyadmin {
+        return 301 $scheme://$http_host/phpmyadmin/;
+    }
+
+    location ^~ /phpmyadmin/ {
+        proxy_pass http://127.0.0.1:888;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     index index.html;
+    location ~* \\.(?:mjs|js|css|wasm|woff2|woff|svg|webp|avif)$ {
+        expires 30d;
+        add_header Cache-Control \"public, max-age=2592000\";
+        add_header X-Content-Type-Options \"nosniff\" always;
+        try_files $uri =404;
+    }
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri $uri.html $uri/ /index.html;
     }
 }
 ";
@@ -508,6 +538,30 @@ server {
     root /www/wwwroot/api.example.com;
     server_tokens off;
 
+    location = /phpadmin {
+        return 301 $scheme://$http_host/phpadmin/;
+    }
+
+    location ^~ /phpadmin/ {
+        proxy_pass http://127.0.0.1:888;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location = /phpmyadmin {
+        return 301 $scheme://$http_host/phpmyadmin/;
+    }
+
+    location ^~ /phpmyadmin/ {
+        proxy_pass http://127.0.0.1:888;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3000;
         proxy_http_version 1.1;
@@ -542,6 +596,8 @@ bind_https = \"0.0.0.0:443\"
 sites_dir = \"/etc/ferrousx/sites\"
 acme_webroot = \"/www/acme\"
 acme_challenge_prefix = \"/.well-known/acme-challenge/\"
+enable_phpmyadmin_route = true
+phpmyadmin_upstream = \"127.0.0.1:888\"
 server_tokens = false
 ";
     ensure_eq(&master_toml, &expected_master.to_string(), "ferrousx master.toml snapshot")?;
@@ -552,6 +608,7 @@ server_tokens = false
 domain = \"api.example.com\"
 server_names = [\"api.example.com\"]
 root = \"/www/wwwroot/api.example.com\"
+rate_limit_rps = 0
 
 [acme]
 prefix = \"/.well-known/acme-challenge/\"

@@ -1047,6 +1047,8 @@ fn oneclick_wordpress_preflight_returns_409_and_api_rejects_invalid_json_with_40
             domain: "wordpress.example.com".to_string(),
             site_title: Some("WP Test".to_string()),
             admin_email: None,
+            admin_user: None,
+            admin_password: None,
             create_db: true,
             enable_ssl: false,
             web_server_engine: None,
@@ -1324,4 +1326,133 @@ fn fp_cli_update_subcommand_and_detached_updater_enforce_guards() -> Result<()> 
         Ok(())
     })
 }
+
+#[test]
+fn wordpress_oneclick_auto_installs_tables_and_returns_admin_credentials() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("wp-auto-install")?;
+        let wwwroot = ws.path().join("wwwroot");
+        let site_dir = wwwroot.join("wpblog.example.com");
+        std::fs::create_dir_all(site_dir.join("wp-admin/includes"))?;
+        std::fs::create_dir_all(site_dir.join("wp-includes"))?;
+        std::fs::write(site_dir.join("wp-login.php"), "<?php // wp-login\n")?;
+        std::fs::write(site_dir.join("wp-load.php"), "<?php // wp-load\n")?;
+        std::fs::write(site_dir.join("wp-admin/includes/upgrade.php"), "<?php // upgrade\n")?;
+        std::fs::write(
+            site_dir.join("wp-config-sample.php"),
+            "<?php\ndefine( 'DB_NAME', 'database_name_here' );\ndefine( 'DB_USER', 'username_here' );\ndefine( 'DB_PASSWORD', 'password_here' );\ndefine( 'DB_HOST', 'localhost' );\ndefine( 'AUTH_KEY',         'put your unique phrase here' );\n",
+        )?;
+
+        let cfg = Config::for_test(ws.path().to_path_buf(), wwwroot);
+        let mod_store = ModuleStore::open(&ws.path().join("panel.db"))?;
+        let ws_store = WebServerStore::open(&ws.path().join("panel.db"))?;
+        let acme = SafePath::under_root(ws.path(), "acme")?;
+        let le_live = SafePath::under_root(ws.path(), "le/live")?;
+        std::fs::create_dir_all(acme.as_path())?;
+        std::fs::create_dir_all(le_live.as_path())?;
+
+        let exec: Arc<dyn CommandExecutor> = Arc::new(MockExecutor::new(
+            &[
+                AllowedBinary::Nginx,
+                AllowedBinary::Php83,
+                AllowedBinary::Mysql,
+            ],
+            |bin, _args, _stdin, _probe| match bin {
+                AllowedBinary::Nginx => ok_out("nginx: configuration file syntax is ok\n"),
+                AllowedBinary::Php83 => ok_out("WP_INSTALLED_OK\n"),
+                AllowedBinary::Mysql => ok_out(""),
+                _ => ok_out(""),
+            },
+        ));
+
+        let ws_mgr = WebServerManager::with_components(
+            ws_store,
+            NginxEngine::new(
+                NginxPaths::for_dirs(
+                    ws.path().join("ngx/avail"),
+                    ws.path().join("ngx/enabled"),
+                    acme.clone(),
+                    le_live.clone(),
+                )?,
+                Arc::clone(&exec),
+            ),
+            FerrousxEngine::new(
+                FerrousxPaths::for_dirs(
+                    ws.path().join("fx/ferrousx.toml"),
+                    ws.path().join("fx/sites"),
+                    acme.clone(),
+                    le_live.clone(),
+                )?,
+                Arc::clone(&exec),
+            ),
+            SslManager::new(
+                SslPaths::for_dirs(
+                    acme,
+                    le_live,
+                    PathBuf::from("/usr/local/bin/ferrous-panel"),
+                    ws.path().join("sys/renew.service"),
+                    ws.path().join("sys/renew.timer"),
+                ),
+                Arc::clone(&exec),
+            ),
+            exec,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 80),
+        );
+
+        let req = OneClickDeployRequest {
+            template_id: "tpl-wordpress-fpm".to_string(),
+            domain: "wpblog.example.com".to_string(),
+            site_title: Some("My Ferrous WP".to_string()),
+            admin_email: Some("owner@wpblog.example.com".to_string()),
+            admin_user: Some("wp_owner".to_string()),
+            admin_password: None,
+            create_db: true,
+            enable_ssl: false,
+            web_server_engine: None,
+            auto_install_deps: false,
+            source_url: None,
+        };
+
+        let deployed = oneclick::deploy_oneclick(req, &mod_store, &cfg, &ws_mgr).await?;
+        ensure(
+            site_dir.join("wp-config.php").is_file(),
+            "wp-config.php must be generated from wp-config-sample.php",
+        )?;
+        ensure(
+            !site_dir.join(".fp-wp-auto-install.php").exists(),
+            "temporary .fp-wp-auto-install.php bootstrap script must be cleaned up after execution",
+        )?;
+
+        let summary = deployed
+            .setup_summary
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("deployed WordPress app must return setupSummary"))?;
+        ensure(summary.auto_installed, "setupSummary.autoInstalled must be true")?;
+        ensure_eq(&summary.admin_user, &"wp_owner".to_string(), "admin_user must match")?;
+        ensure_eq(
+            &summary.admin_url,
+            &"http://wpblog.example.com/wp-login.php".to_string(),
+            "admin_url must point to /wp-login.php",
+        )?;
+        ensure(
+            summary.admin_password.as_deref().unwrap_or("").len() >= 12,
+            "one-time response must include generated adminPassword",
+        )?;
+
+        // Verify plaintext password is NOT persisted in SQLite
+        let persisted = mod_store
+            .get_app(&deployed.id)?
+            .ok_or_else(|| anyhow::anyhow!("deployed app must be stored in SQLite"))?;
+        let persisted_pw = persisted
+            .setup_summary
+            .and_then(|s| s.admin_password);
+        ensure(
+            persisted_pw.is_none(),
+            "plaintext WordPress admin password must NEVER be stored in SQLite",
+        )?;
+
+        Ok(())
+    })
+}
+
 

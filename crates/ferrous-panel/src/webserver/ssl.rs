@@ -240,7 +240,7 @@ impl SslManager {
                 let name = host.as_str().to_string();
                 match tokio::time::timeout(
                     Duration::from_secs(4),
-                    tokio::net::lookup_host((name.as_str(), 80u16)),
+                    tokio::net::lookup_host((name.clone(), 80u16)),
                 )
                 .await
                 {
@@ -300,7 +300,7 @@ impl SslManager {
                             warning: Some("Quá thời gian kiểm tra DNS (4s).".to_string()),
                         });
                     }
-                }
+                };
             }
             results
         })
@@ -695,6 +695,12 @@ impl SslManager {
                         &tmp_cert_str,
                         "-subj",
                         &subj,
+                        "-addext",
+                        "basicConstraints=critical,CA:FALSE",
+                        "-addext",
+                        "keyUsage=critical,digitalSignature,keyEncipherment",
+                        "-addext",
+                        "extendedKeyUsage=serverAuth",
                         "-addext",
                         &san_ext,
                     ],

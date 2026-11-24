@@ -265,8 +265,15 @@ export async function renderApps(container) {
                     ? filtered.map((a) => `
                       <tr>
                         <td>
-                          <div><strong>${esc(a.domain)}</strong></div>
-                          <div class="meta-line"><span>${esc(a.name)}</span><span>·</span><span class="mono">${esc(a.workingDir || '')}</span></div>
+                          <div>
+                            <a href="${a.sslEnabled ? 'https' : 'http'}://${esc(a.domain)}" target="_blank" rel="noopener noreferrer" style="color:var(--text);text-decoration:underline;text-underline-offset:3px"><strong>${esc(a.domain)}</strong></a>
+                          </div>
+                          <div class="meta-line">
+                            <span>${esc(a.name)}</span>
+                            <span>·</span>
+                            <span class="mono">${esc(a.workingDir || '')}</span>
+                            ${a.linkedDbName ? `<span>·</span><a href="/phpmyadmin/?db=${encodeURIComponent(a.linkedDbName)}" target="_blank" rel="noopener noreferrer" class="mono" style="color:var(--accent)">DB: ${esc(a.linkedDbName)} (phpMyAdmin)</a>` : ''}
+                          </div>
                         </td>
                         <td>
                           <div>${esc(a.framework)}</div>
@@ -281,6 +288,8 @@ export async function renderApps(container) {
                         <td class="mono">${esc(a.internalPort || '—')}</td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
+                            <a class="btn btn-sm" href="${a.sslEnabled ? 'https' : 'http'}://${esc(a.domain)}" target="_blank" rel="noopener noreferrer">Mở Web</a>
+                            ${a.linkedDbName ? `<a class="btn btn-sm" href="/phpmyadmin/?db=${encodeURIComponent(a.linkedDbName)}" target="_blank" rel="noopener noreferrer">phpMyAdmin</a>` : ''}
                             <button type="button" class="btn btn-sm ${a.sslEnabled ? '' : 'btn-primary'}" data-app-ssl="${esc(a.id)}">SSL / HTTPS</button>
                             <button type="button" class="btn btn-sm" data-app-vhost="${esc(a.id)}">Vhost &amp; Log</button>
                             <button type="button" class="btn btn-sm" data-app-settings="${esc(a.id)}">Cài đặt Site</button>
@@ -402,6 +411,7 @@ export async function renderApps(container) {
     container.querySelectorAll('[data-oc-deploy]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const requiresDb = btn.dataset.ocDb && btn.dataset.ocDb !== 'None' ? btn.dataset.ocDb : '';
+        const isWp = btn.dataset.ocDeploy === 'tpl-wordpress-fpm';
         openModal(`Triển khai 1-Click: ${btn.dataset.ocName}`, `
           <form id="oc-form">
             <div id="oc-form-err"></div>
@@ -414,9 +424,23 @@ export async function renderApps(container) {
               <input class="input" id="oc-title" name="siteTitle" value="${esc(btn.dataset.ocName)}" />
             </div>
             <div class="field">
-              <label for="oc-email">Email quản trị (dùng cho SSL / Admin)</label>
+              <label for="oc-email">Email quản trị (dùng cho SSL / Admin Website)</label>
               <input class="input" id="oc-email" name="adminEmail" type="email" inputmode="email" autocapitalize="none" placeholder="admin@example.com" />
             </div>
+            ${
+              isWp
+                ? `<div class="form-grid">
+                    <div class="field">
+                      <label for="oc-admin-user">Tài khoản Admin WordPress</label>
+                      <input class="input mono" id="oc-admin-user" name="adminUser" value="admin" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="admin" />
+                    </div>
+                    <div class="field">
+                      <label for="oc-admin-pass">Mật khẩu Admin WordPress (để trống = tự sinh bảo mật)</label>
+                      <input class="input mono" id="oc-admin-pass" name="adminPassword" type="password" placeholder="Tự động tạo mật khẩu mạnh 16 ký tự" />
+                    </div>
+                  </div>`
+                : ''
+            }
             <div class="field">
               <label for="oc-source-url">URL nguồn tài nguyên bên ngoài (tùy chọn: .git / .tar.gz / .zip)</label>
               <input class="input" id="oc-source-url" name="sourceUrl" inputmode="url" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="https://... (để trống để dùng nguồn chuẩn của mẫu)" />
@@ -426,7 +450,7 @@ export async function renderApps(container) {
                 ? `<div class="field">
                     <label class="checkbox-row">
                       <input type="checkbox" name="createDb" checked />
-                      <span>Tự động tạo cơ sở dữ liệu (${esc(requiresDb)}) &amp; cấu hình kết nối</span>
+                      <span>Tự động tạo cơ sở dữ liệu (${esc(requiresDb)}), cấu hình kết nối${isWp ? ' &amp; tự động cài đặt hoàn chỉnh WordPress (bảng CSDL + Admin)' : ''}</span>
                     </label>
                   </div>`
                 : ''
@@ -464,18 +488,22 @@ export async function renderApps(container) {
                 const domain = String(fd.get('domain') || '').trim();
                 const autoInstallDeps = fd.get('autoInstallDeps') === 'on';
                 const sourceUrl = String(fd.get('sourceUrl') || '').trim();
+                const adminUser = String(fd.get('adminUser') || '').trim();
+                const adminPassword = String(fd.get('adminPassword') || '').trim();
                 if (progNote) {
                   progNote.style.display = 'block';
                   progNote.textContent = autoInstallDeps
-                    ? 'Đang tự động nạp tài nguyên/runtime từ bên ngoài và triển khai (có thể mất 30–90 giây ở lần đầu cài PHP/DB)...'
-                    : 'Đang triển khai ứng dụng...';
+                    ? 'Đang tự động nạp tài nguyên/runtime, tạo CSDL và cài đặt hoàn chỉnh website (có thể mất 30–90 giây ở lần đầu)...'
+                    : 'Đang triển khai và cài đặt hoàn chỉnh ứng dụng...';
                 }
                 try {
-                  await api('POST', '/api/oneclick/deploy', {
+                  const created = await api('POST', '/api/oneclick/deploy', {
                     templateId: btn.dataset.ocDeploy,
                     domain,
                     siteTitle: String(fd.get('siteTitle') || '').trim(),
                     adminEmail: String(fd.get('adminEmail') || '').trim(),
+                    adminUser: adminUser || undefined,
+                    adminPassword: adminPassword || undefined,
                     enableSsl: fd.get('enableSsl') === 'on',
                     createDb: requiresDb ? fd.get('createDb') === 'on' : false,
                     autoInstallDeps,
@@ -484,6 +512,44 @@ export async function renderApps(container) {
                   closeModal();
                   toast(`Đã triển khai 1-Click ${btn.dataset.ocName} cho ${domain}.`);
                   await renderApps(container);
+                  if (created?.setupSummary) {
+                    const s = created.setupSummary;
+                    openModal(`Hoàn tất cài đặt Website: ${domain}`, `
+                      <div class="${s.autoInstalled ? 'alert-ok' : 'alert-warn'}" style="margin-bottom:14px">
+                        ${esc(s.message || 'Triển khai hoàn tất.')}
+                      </div>
+                      <div class="kv-grid" style="margin-bottom:14px">
+                        <div class="kv-item">
+                          <span class="kv-label">Địa chỉ Website</span>
+                          <span class="kv-value mono"><a href="${esc(s.siteUrl)}" target="_blank" rel="noopener noreferrer">${esc(s.siteUrl)}</a></span>
+                        </div>
+                        <div class="kv-item">
+                          <span class="kv-label">Trang Quản trị (WP-Admin)</span>
+                          <span class="kv-value mono"><a href="${esc(s.adminUrl)}" target="_blank" rel="noopener noreferrer">${esc(s.adminUrl)}</a></span>
+                        </div>
+                        <div class="kv-item">
+                          <span class="kv-label">Tài khoản Admin</span>
+                          <span class="kv-value mono"><strong>${esc(s.adminUser || 'admin')}</strong></span>
+                        </div>
+                        <div class="kv-item">
+                          <span class="kv-label">Mật khẩu Admin (hiển thị 1 lần)</span>
+                          <span class="kv-value mono"><strong class="status-ok">${esc(s.adminPassword || '(đã cấu hình)')}</strong></span>
+                        </div>
+                        <div class="kv-item">
+                          <span class="kv-label">Email Quản trị</span>
+                          <span class="kv-value mono">${esc(s.adminEmail || '—')}</span>
+                        </div>
+                        <div class="kv-item">
+                          <span class="kv-label">Cơ sở dữ liệu MariaDB</span>
+                          <span class="kv-value mono">${esc(s.dbName || '—')} (user: ${esc(s.dbUser || '—')})</span>
+                        </div>
+                      </div>
+                      <div class="row" style="justify-content:flex-end;gap:10px">
+                        <a class="btn" href="${esc(s.siteUrl)}" target="_blank" rel="noopener noreferrer">Mở Website</a>
+                        <a class="btn btn-primary" href="${esc(s.adminUrl)}" target="_blank" rel="noopener noreferrer">Đăng nhập WP-Admin</a>
+                      </div>
+                    `);
+                  }
                 } catch (err) {
                   if (progNote) progNote.style.display = 'none';
                   if (errBox) {
@@ -1612,64 +1678,178 @@ export async function renderFiles(container) {
 // 4. SQL DATABASES & PURE-RUST FERROUSADMIN
 // ============================================================================
 export async function renderDatabases(container) {
-  const dbs = await api('GET', '/api/databases');
+  const [dbs, mysqlCfg] = await Promise.all([
+    api('GET', '/api/databases'),
+    api('GET', '/api/databases/mysql-config').catch(() => null),
+  ]);
 
-  container.innerHTML = `
-    <div class="page-head">
-      <div>
-        <h1 class="page-title">Cơ sở dữ liệu SQL (Pure-Rust Engine)</h1>
-        <p class="page-desc">Quản lý SQLite 3 (WAL thuần Rust), MariaDB 11.4 và PostgreSQL 17, truyền mật khẩu an toàn qua stdin, xuất/nhập SQL streaming.</p>
-      </div>
-      <div class="row">
-        <a class="btn" href="/phpadmin/" target="_blank" rel="noopener">Mở FerrousAdmin Studio (/phpadmin/)</a>
-        <button type="button" class="btn btn-primary" id="db-create-btn">Tạo Database mới</button>
-      </div>
-    </div>
+  let activeDbTab = 'list';
+  let studioDbId = Array.isArray(dbs) && dbs[0] ? dbs[0].id : '';
 
-    ${capBannerHtml(['mariadb', 'postgresql'])}
+  function draw() {
+    const pmaUrl = studioDbId
+      ? `/phpmyadmin/?db=${encodeURIComponent(studioDbId)}`
+      : '/phpmyadmin/';
 
-    <section class="surface">
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead>
-            <tr><th>Tên Database</th><th>Engine & Trạng thái</th><th>Tài khoản</th><th class="right">Kết nối / Bảng / Dung lượng</th><th class="right">Thao tác</th></tr>
-          </thead>
-          <tbody>
-            ${
-              Array.isArray(dbs) && dbs.length
-                ? dbs.map((d) => {
-                  const tblCount = Array.isArray(d.tables) ? d.tables.length : 0;
-                  const connStr = `${d.activeConnections ?? 0}/${d.maxConnections ?? 0}`;
-                  return `
-                  <tr>
-                    <td><strong class="mono">${esc(d.name)}</strong></td>
-                    <td>
-                      <div>${esc(d.engine)}</div>
-                      <div class="meta-line"><span class="${statusClass(d.status)}">${esc(d.status || 'online')}</span></div>
-                    </td>
-                    <td class="mono">${esc(d.username)}</td>
-                    <td class="right mono">${esc(connStr)} conn · ${esc(tblCount)} bảng · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
-                    <td class="right">
-                      <div class="row" style="justify-content:flex-end">
-                        <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">Chạy SQL</button>
-                        <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">Đổi MK</button>
-                        <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">Xuất .sql</button>
-                        <label class="btn btn-sm" style="cursor:pointer">
-                          Nhập .sql
-                          <input type="file" accept=".sql,.txt" hidden data-db-import="${esc(d.id)}" />
-                        </label>
-                        <button type="button" class="btn btn-sm btn-danger" data-db-del="${esc(d.id)}" data-name="${esc(d.name)}">Xóa</button>
-                      </div>
-                    </td>
-                  </tr>`;
-                }).join('')
-                : '<tr><td colspan="5" class="empty-state">Chưa có cơ sở dữ liệu nào. Bạn có thể tạo ngay SQLite 3 (WAL · Pure Rust) mà không cần cài đặt thêm dịch vụ.</td></tr>'
-            }
-          </tbody>
-        </table>
+    container.innerHTML = `
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">Cơ sở dữ liệu SQL &amp; phpMyAdmin Studio</h1>
+          <p class="page-desc">Quản lý MariaDB 11.4, PostgreSQL 17, SQLite 3 (WAL) và tùy chỉnh sâu bảng/dòng/cột qua trình quản trị phpMyAdmin (/phpmyadmin/ &amp; /phpadmin/).</p>
+        </div>
+        <div class="row">
+          <div class="tabs">
+            <button type="button" class="tab-btn ${activeDbTab === 'list' ? 'active' : ''}" id="db-tab-list">Danh sách DB (${Array.isArray(dbs) ? dbs.length : 0})</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'studio' ? 'active' : ''}" id="db-tab-studio">Nạp trang phpMyAdmin (Tùy chỉnh sâu)</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'config' ? 'active' : ''}" id="db-tab-config">Cấu hình MySQL / PMA</button>
+          </div>
+          <a class="btn" href="${esc(pmaUrl)}" target="_blank" rel="noopener">Mở tab mới (/phpmyadmin/)</a>
+          <button type="button" class="btn btn-primary" id="db-create-btn">Tạo Database mới</button>
+        </div>
       </div>
-    </section>
-  `;
+
+      ${capBannerHtml(['mariadb', 'postgresql'])}
+
+      ${activeDbTab === 'list' ? `
+        <section class="surface">
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr><th>Tên Database</th><th>Engine &amp; Trạng thái</th><th>Tài khoản</th><th class="right">Kết nối / Bảng / Dung lượng</th><th class="right">Thao tác</th></tr>
+              </thead>
+              <tbody>
+                ${
+                  Array.isArray(dbs) && dbs.length
+                    ? dbs.map((d) => {
+                      const tblCount = Array.isArray(d.tables) ? d.tables.length : 0;
+                      const connStr = `${d.activeConnections ?? 0}/${d.maxConnections ?? 0}`;
+                      return `
+                      <tr>
+                        <td>
+                          <div><strong class="mono">${esc(d.name)}</strong></div>
+                          ${d.linkedAppName ? `<div class="meta-line"><span>Web: <strong class="mono">${esc(d.linkedAppName)}</strong></span></div>` : ''}
+                        </td>
+                        <td>
+                          <div>${esc(d.engine)}</div>
+                          <div class="meta-line"><span class="${statusClass(d.status)}">${esc(d.status || 'online')}</span></div>
+                        </td>
+                        <td class="mono">${esc(d.username)}</td>
+                        <td class="right mono">${esc(connStr)} conn · ${esc(tblCount)} bảng · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
+                        <td class="right">
+                          <div class="row" style="justify-content:flex-end">
+                            <button type="button" class="btn btn-sm btn-primary" data-db-pma="${esc(d.id)}">phpMyAdmin</button>
+                            <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">Chạy SQL</button>
+                            <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">Đổi MK</button>
+                            <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">Xuất .sql</button>
+                            <label class="btn btn-sm" style="cursor:pointer">
+                              Nhập .sql
+                              <input type="file" accept=".sql,.txt" hidden data-db-import="${esc(d.id)}" />
+                            </label>
+                            <button type="button" class="btn btn-sm btn-danger" data-db-del="${esc(d.id)}" data-name="${esc(d.name)}">Xóa</button>
+                          </div>
+                        </td>
+                      </tr>`;
+                    }).join('')
+                    : '<tr><td colspan="5" class="empty-state">Chưa có cơ sở dữ liệu nào. Bạn có thể tạo ngay MariaDB 11.4, PostgreSQL 17 hoặc SQLite 3 (WAL).</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ` : activeDbTab === 'studio' ? `
+        <section class="surface" style="padding:12px">
+          <div class="surface-head" style="margin-bottom:10px">
+            <div class="row">
+              <strong>Trình quản trị phpMyAdmin / FerrousAdmin tích hợp trực tiếp</strong>
+              <span class="meta-line mono">(${esc(pmaUrl)})</span>
+            </div>
+            <div class="row">
+              <select class="select" id="pma-db-picker" style="width:auto">
+                <option value="">-- Chọn Database để nạp --</option>
+                ${(Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
+              </select>
+              <a class="btn btn-sm btn-primary" href="${esc(pmaUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
+            </div>
+          </div>
+          <iframe src="${esc(pmaUrl)}" title="phpMyAdmin SQL Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+        </section>
+      ` : `
+        <section class="surface">
+          <div class="surface-head">
+            <h2 class="surface-title">Cấu hình MariaDB / MySQL (50-server.cnf) &amp; Đường dẫn phpMyAdmin</h2>
+            <span class="meta-line mono">${esc(mysqlCfg?.mysqlVersion || 'MariaDB / MySQL')}</span>
+          </div>
+          <form id="mysql-cfg-form">
+            <div class="form-grid" style="margin-bottom:12px">
+              <div class="field">
+                <label>Đường dẫn truy cập phpMyAdmin</label>
+                <input class="input mono" name="pmaPath" value="${esc(mysqlCfg?.pmaPath || '/phpmyadmin')}" />
+              </div>
+              <div class="field">
+                <label>Cổng Loopback Nội bộ (Nginx/FerrousX Proxy)</label>
+                <input class="input mono" name="pmaPort" type="number" value="${esc(mysqlCfg?.pmaPort || 888)}" />
+              </div>
+              <div class="field">
+                <label>Giới hạn Upload / Import SQL (MB)</label>
+                <input class="input mono" name="pmaMaxUploadMb" type="number" min="1" max="512" value="${esc(mysqlCfg?.pmaMaxUploadMb || 64)}" />
+              </div>
+              <div class="field">
+                <label>Socket MariaDB</label>
+                <input class="input mono" value="${esc(mysqlCfg?.socketPath || '/run/mysqld/mysqld.sock')}" readonly />
+              </div>
+            </div>
+            <div class="field">
+              <label>Tệp cấu hình MariaDB trực tiếp (<code>/etc/mysql/mariadb.conf.d/50-server.cnf</code>)</label>
+              <textarea class="textarea mono" name="myCnfRaw" style="min-height:220px" placeholder="[mysqld]\nbind-address = 127.0.0.1\nport = 3306\nmax_connections = 200">${esc(mysqlCfg?.myCnfRaw || '')}</textarea>
+            </div>
+            <div class="row" style="justify-content:flex-end;margin-top:12px">
+              <button type="submit" class="btn btn-primary" id="mysql-cfg-save">Lưu cấu hình &amp; Reload MariaDB</button>
+            </div>
+          </form>
+        </section>
+      `}
+    `;
+
+    document.getElementById('db-tab-list')?.addEventListener('click', () => { activeDbTab = 'list'; draw(); });
+    document.getElementById('db-tab-studio')?.addEventListener('click', () => { activeDbTab = 'studio'; draw(); });
+    document.getElementById('db-tab-config')?.addEventListener('click', () => { activeDbTab = 'config'; draw(); });
+    document.getElementById('pma-db-picker')?.addEventListener('change', (e) => {
+      studioDbId = e.target.value;
+      draw();
+    });
+
+    container.querySelectorAll('[data-db-pma]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        studioDbId = btn.dataset.dbPma;
+        activeDbTab = 'studio';
+        draw();
+      });
+    });
+
+    document.getElementById('mysql-cfg-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const sub = document.getElementById('mysql-cfg-save');
+      await withBusy(sub, async () => {
+        const fd = new FormData(e.target);
+        try {
+          await api('PUT', '/api/databases/mysql-config', {
+            pmaPath: String(fd.get('pmaPath') || '/phpmyadmin').trim(),
+            pmaPort: Number(fd.get('pmaPort') || 888),
+            pmaMaxUploadMb: Number(fd.get('pmaMaxUploadMb') || 64),
+            myCnfRaw: String(fd.get('myCnfRaw') || ''),
+          });
+          toast('Đã lưu cấu hình MySQL / phpMyAdmin.');
+          await renderDatabases(container);
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+    });
+
+    bindDatabaseRowActions();
+  }
+
+  function bindDatabaseRowActions() {
 
   document.getElementById('db-create-btn')?.addEventListener('click', () => {
     openModal('Tạo cơ sở dữ liệu SQL mới', `
@@ -1857,4 +2037,7 @@ export async function renderDatabases(container) {
       }));
     });
   });
+  }
+
+  draw();
 }

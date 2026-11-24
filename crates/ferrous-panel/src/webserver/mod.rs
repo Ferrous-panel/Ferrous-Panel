@@ -1637,7 +1637,8 @@ impl WebServerManager {
                 )?;
                 let r = self.nginx.render_site(spec)?;
                 self.nginx.write_site(spec).await?;
-                if self.nginx.status().await.map(|s| s.active).unwrap_or(false) {
+                let is_active = self.nginx.status().await.map(|s| s.active).unwrap_or(false);
+                if is_active {
                     if let Err(err) = self.nginx.reload().await {
                         let _ = link_snap.restore();
                         let _ = avail_snap.restore();
@@ -1660,6 +1661,11 @@ impl WebServerManager {
                             )));
                         }
                     }
+                } else if self.nginx.is_installed()
+                    && self.executor.is_binary_available(AllowedBinary::Systemctl)
+                    && !self.engine_is_active(EngineKind::Ferrousx).await.unwrap_or(false)
+                {
+                    let _ = self.nginx.start().await;
                 }
                 r
             }
@@ -1669,13 +1675,13 @@ impl WebServerManager {
                 )?;
                 let r = self.ferrousx.render_site(spec)?;
                 self.ferrousx.write_site(spec).await?;
-                if self
+                let is_active = self
                     .ferrousx
                     .status()
                     .await
                     .map(|s| s.active)
-                    .unwrap_or(false)
-                {
+                    .unwrap_or(false);
+                if is_active {
                     if let Err(err) = self.ferrousx.notify_vhost_add(spec.domain.as_str()).await {
                         let _ = site_snap.restore();
                         let _ = self.ferrousx.reload().await;
@@ -1694,6 +1700,11 @@ impl WebServerManager {
                             )));
                         }
                     }
+                } else if self.ferrousx.is_installed()
+                    && self.executor.is_binary_available(AllowedBinary::Systemctl)
+                    && !self.engine_is_active(EngineKind::Nginx).await.unwrap_or(false)
+                {
+                    let _ = self.ferrousx.start().await;
                 }
                 r
             }
