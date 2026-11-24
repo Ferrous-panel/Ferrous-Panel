@@ -82,13 +82,17 @@ export async function renderWebserver(container) {
           <tbody>
             ${
               sites.length
-                ? sites.map((s) => `
+                ? sites.map((s) => {
+                  const httpsOn = Boolean(s.sslEnabled ?? s.ssl?.enabled);
+                  const expText = s.ssl?.notAfter || s.ssl?.expiresAt || '—';
+                  return `
                   <tr>
                     <td class="mono"><strong>${esc(s.domain)}</strong></td>
                     <td class="mono">${esc(s.mode?.kind || 'proxy')}</td>
-                    <td><span class="${s.ssl?.enabled ? 'st-ok' : 'st-muted'}">${s.ssl?.enabled ? 'HTTPS Bật' : 'HTTP'}</span></td>
-                    <td class="mono">${esc(s.ssl?.expiresAt || '—')}</td>
-                  </tr>`).join('')
+                    <td><span class="${httpsOn ? 'st-ok' : 'st-muted'}">${httpsOn ? 'HTTPS Bật' : 'HTTP'}</span></td>
+                    <td class="mono">${esc(expText)}</td>
+                  </tr>`;
+                }).join('')
                 : '<tr><td colspan="4" class="empty-state">Chưa có virtual host nào được đăng ký.</td></tr>'
             }
           </tbody>
@@ -157,7 +161,7 @@ export async function renderPhpSoftware(container) {
     api('GET', '/api/software').catch(() => []),
     api('GET', '/api/apps').catch(() => []),
   ]);
-  if (!isActiveRender(renderSeq, 'php-software')) return;
+  if (!isActiveRender(renderSeq, 'software')) return;
 
   let tab = 'software';
   let pkgFilter = 'all';
@@ -1106,7 +1110,7 @@ export async function renderEdgePolyglot(container) {
     api('GET', '/api/edge-cloud').catch(() => ({})),
     api('GET', '/api/polyglot/toolchains').catch(() => []),
   ]);
-  if (!isActiveRender(renderSeq, 'edge-polyglot')) return;
+  if (!isActiveRender(renderSeq, 'edge')) return;
 
   const workers = edge.wasiWorkers || [];
   const containers = edge.ociContainers || [];

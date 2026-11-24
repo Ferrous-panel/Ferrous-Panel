@@ -717,6 +717,15 @@ else
         ' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ] && grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+        sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+      fi
+      for _cfg_rs in "${FERROUSX_SRC_DIR}/crates/ferrousx-config/src/config.rs" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; do
+        if [ -f "${_cfg_rs}" ] && grep -q 'validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;' "${_cfg_rs}"; then
+          sed -i 's/validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;/if clean_cert.is_file() \&\& clean_key.is_file() { validate_pem_cert_and_key_files(\&clean_cert, \&clean_key)?; } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); }/' "${_cfg_rs}"
+          sed -i 's/enabled: raw\.ssl\.enabled,/enabled: raw.ssl.enabled \&\& clean_cert.is_file() \&\& clean_key.is_file(),/' "${_cfg_rs}"
+        fi
+      done
       echo -e "${CYAN}[*] Building upstream FerrousX (${FX_COMMIT}) binaries (ferrousx-bin + ferrousx-ctl)...${NC}"
       if (cd "${FERROUSX_SRC_DIR}" && cargo build --release --bin ferrousx-bin --bin ferrousx-ctl); then
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then

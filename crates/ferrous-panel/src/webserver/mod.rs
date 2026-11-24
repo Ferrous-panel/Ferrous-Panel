@@ -1636,7 +1636,24 @@ impl WebServerManager {
     }
 
     pub async fn reload_configured_engine(&self) -> Result<(), PanelError> {
-        let cfg = self.store.load_config()?;
+        let mut cfg = self.store.load_config()?;
+        if self.executor.is_binary_available(AllowedBinary::Systemctl) {
+            let fx_active = self
+                .engine_is_active(EngineKind::Ferrousx)
+                .await
+                .unwrap_or(false);
+            let ng_active = self
+                .engine_is_active(EngineKind::Nginx)
+                .await
+                .unwrap_or(false);
+            if fx_active && !ng_active && cfg.frontend_engine != EngineKind::Ferrousx {
+                let _ = self.store.save_frontend_engine(EngineKind::Ferrousx);
+                cfg.frontend_engine = EngineKind::Ferrousx;
+            } else if ng_active && !fx_active && cfg.frontend_engine != EngineKind::Nginx {
+                let _ = self.store.save_frontend_engine(EngineKind::Nginx);
+                cfg.frontend_engine = EngineKind::Nginx;
+            }
+        }
         match cfg.frontend_engine {
             EngineKind::Nginx => self.nginx.reload().await,
             EngineKind::Ferrousx => self.ferrousx.reload().await,
@@ -1645,7 +1662,24 @@ impl WebServerManager {
 
     /// Gracefully reloads the active engine if running, or starts it if stopped.
     pub async fn reload_or_start_configured_engine(&self) -> Result<(), PanelError> {
-        let cfg = self.store.load_config()?;
+        let mut cfg = self.store.load_config()?;
+        if self.executor.is_binary_available(AllowedBinary::Systemctl) {
+            let fx_active = self
+                .engine_is_active(EngineKind::Ferrousx)
+                .await
+                .unwrap_or(false);
+            let ng_active = self
+                .engine_is_active(EngineKind::Nginx)
+                .await
+                .unwrap_or(false);
+            if fx_active && !ng_active && cfg.frontend_engine != EngineKind::Ferrousx {
+                let _ = self.store.save_frontend_engine(EngineKind::Ferrousx);
+                cfg.frontend_engine = EngineKind::Ferrousx;
+            } else if ng_active && !fx_active && cfg.frontend_engine != EngineKind::Nginx {
+                let _ = self.store.save_frontend_engine(EngineKind::Nginx);
+                cfg.frontend_engine = EngineKind::Nginx;
+            }
+        }
         if self.engine_is_active(cfg.frontend_engine).await.unwrap_or(false) {
             self.reload_engine(cfg.frontend_engine).await
         } else {
@@ -1665,7 +1699,26 @@ impl WebServerManager {
     ) -> Result<RenderedSite, PanelError> {
         spec.validate_supported()?;
         let _guard = self.switch_lock.lock().await;
-        let cfg = self.store.load_config()?;
+        let mut cfg = self.store.load_config()?;
+        if preferred_engine.is_none()
+            && self.executor.is_binary_available(AllowedBinary::Systemctl)
+        {
+            let fx_active = self
+                .engine_is_active(EngineKind::Ferrousx)
+                .await
+                .unwrap_or(false);
+            let ng_active = self
+                .engine_is_active(EngineKind::Nginx)
+                .await
+                .unwrap_or(false);
+            if fx_active && !ng_active && cfg.frontend_engine != EngineKind::Ferrousx {
+                let _ = self.store.save_frontend_engine(EngineKind::Ferrousx);
+                cfg.frontend_engine = EngineKind::Ferrousx;
+            } else if ng_active && !fx_active && cfg.frontend_engine != EngineKind::Nginx {
+                let _ = self.store.save_frontend_engine(EngineKind::Nginx);
+                cfg.frontend_engine = EngineKind::Nginx;
+            }
+        }
         let engine = preferred_engine.unwrap_or(cfg.frontend_engine);
         let rendered = match engine {
             EngineKind::Nginx => {
@@ -1705,6 +1758,20 @@ impl WebServerManager {
                 {
                     let _ = self.nginx.start().await;
                 }
+                if self.ferrousx.is_installed()
+                    && self.ferrousx.paths().sites_dir == Path::new("/etc/ferrousx/sites")
+                {
+                    let _ = self.ferrousx.write_site(spec).await;
+                    if self
+                        .ferrousx
+                        .status()
+                        .await
+                        .map(|s| s.active)
+                        .unwrap_or(false)
+                    {
+                        let _ = self.ferrousx.notify_vhost_add(spec.domain.as_str()).await;
+                    }
+                }
                 r
             }
             EngineKind::Ferrousx => {
@@ -1742,6 +1809,14 @@ impl WebServerManager {
                     && !self.engine_is_active(EngineKind::Nginx).await.unwrap_or(false)
                 {
                     let _ = self.ferrousx.start().await;
+                }
+                if self.nginx.is_installed()
+                    && self.nginx.paths().sites_available == Path::new("/etc/nginx/sites-available")
+                {
+                    let _ = self.nginx.write_site(spec).await;
+                    if self.nginx.status().await.map(|s| s.active).unwrap_or(false) {
+                        let _ = self.nginx.reload().await;
+                    }
                 }
                 r
             }

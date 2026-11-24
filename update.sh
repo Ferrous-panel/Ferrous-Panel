@@ -634,9 +634,10 @@ update_ferrousx_from_github() {
       fi
     ); then
       fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
+      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v2}"
       local fx_prev_sha
       fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
-      if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_target_sha}" ] && [ "${fx_prev_sha}" = "${fx_target_sha}" ]; then
+      if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_cache_tag}" ] && [ "${fx_prev_sha}" = "${fx_cache_tag}" ]; then
         echo -e "${GREEN}[+] FerrousX already up to date (${fx_target_sha:0:8}) — skipped rebuild.${NC}"
         fx_installed=true
         fx_skipped=true
@@ -772,10 +773,21 @@ update_ferrousx_from_github() {
         ' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
-      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs" ] && grep -q 'Some(load_certified_key(&clean_cert, &clean_key)?)' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; then
-        echo -e "${CYAN}[*] Applying compatibility patch: graceful HTTP fallback when SSL cert file is missing in upstream ferrousx-core/src/config.rs...${NC}"
-        sed -i 's/Some(load_certified_key(&clean_cert, &clean_key)?)/if clean_cert.is_file() \&\& clean_key.is_file() { Some(load_certified_key(\&clean_cert, \&clean_key)?) } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); None }/' "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ] && grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+        echo -e "${CYAN}[*] Applying compatibility patch: allowing Certbot symlinked private keys (/etc/letsencrypt/live/*) in upstream ferrousx-bin/src/main.rs...${NC}"
+        sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
       fi
+      for _cfg_rs in "${FERROUSX_SRC_DIR}/crates/ferrousx-config/src/config.rs" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; do
+        if [ -f "${_cfg_rs}" ] && grep -q 'Some(load_certified_key(&clean_cert, &clean_key)?)' "${_cfg_rs}"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: graceful HTTP fallback when SSL cert file is missing in ${_cfg_rs}...${NC}"
+          sed -i 's/Some(load_certified_key(&clean_cert, &clean_key)?)/if clean_cert.is_file() \&\& clean_key.is_file() { Some(load_certified_key(\&clean_cert, \&clean_key)?) } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); None }/' "${_cfg_rs}"
+        fi
+        if [ -f "${_cfg_rs}" ] && grep -q 'validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;' "${_cfg_rs}"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: graceful HTTP fallback on missing PEM files in ${_cfg_rs}...${NC}"
+          sed -i 's/validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;/if clean_cert.is_file() \&\& clean_key.is_file() { validate_pem_cert_and_key_files(\&clean_cert, \&clean_key)?; } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); }/' "${_cfg_rs}"
+          sed -i 's/enabled: raw\.ssl\.enabled,/enabled: raw.ssl.enabled \&\& clean_cert.is_file() \&\& clean_key.is_file(),/' "${_cfg_rs}"
+        fi
+      done
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
       ensure_swap_for_build
       configure_fast_cargo_env
@@ -783,7 +795,7 @@ update_ferrousx_from_github() {
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" ]; then
           atomic_install_binary "${FERROUSX_SRC_DIR}/target/release/ferrousx-bin" "${BIN_FERROUSX}" "ferrousx-bin.prev" "ferrousx-bin"
           fx_installed=true
-          [ -n "${fx_target_sha}" ] && printf '%s\n' "${fx_target_sha}" > "${FERROUSX_COMMIT_FILE}"
+          [ -n "${fx_cache_tag}" ] && printf '%s\n' "${fx_cache_tag}" > "${FERROUSX_COMMIT_FILE}"
         fi
         if [ -x "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" ]; then
           install -m 0755 "${FERROUSX_SRC_DIR}/target/release/ferrousx-ctl" "${BIN_FERROUSX_CTL}.new"
@@ -830,12 +842,14 @@ update_ferrousx_from_github() {
   ensure_ferrousx_runtime_files
 
   # Sanitize any stale /etc/ferrousx/sites/*.toml that has ssl.enabled = true pointing to a missing cert_path
+  # or a Certbot symlinked cert_path/key_path
   if [ -d /etc/ferrousx/sites ]; then
     for site_toml in /etc/ferrousx/sites/*.toml; do
       [ -f "$site_toml" ] || continue
-      local cert_val
+      local cert_val key_val
       cert_val="$(grep -E '^[[:space:]]*cert_path[[:space:]]*=' "$site_toml" 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d '[:space:]\"'\''' || true)"
-      if [ -n "$cert_val" ] && [ ! -f "$cert_val" ]; then
+      key_val="$(grep -E '^[[:space:]]*key_path[[:space:]]*=' "$site_toml" 2>/dev/null | head -n 1 | cut -d= -f2- | tr -d '[:space:]\"'\''' || true)"
+      if { [ -n "$cert_val" ] && [ ! -f "$cert_val" ]; } || { [ -n "$key_val" ] && [ ! -f "$key_val" ]; }; then
         if grep -Eq '^[[:space:]]*(enabled|redirect_https)[[:space:]]*=[[:space:]]*true' "$site_toml" 2>/dev/null; then
           echo -e "${YELLOW}[!] SSL certificate missing (${cert_val}) in ${site_toml}; downgrading site to HTTP-only so FerrousX can start cleanly...${NC}"
           awk '
@@ -845,6 +859,22 @@ update_ferrousx_from_github() {
             in_ssl && /^[[:space:]]*redirect_https[[:space:]]*=[[:space:]]*true/ { print "redirect_https = false"; next }
             { print }
           ' "$site_toml" > "${site_toml}.tmp" && chmod 0644 "${site_toml}.tmp" && mv -f "${site_toml}.tmp" "$site_toml"
+        fi
+      else
+        if [ -n "$cert_val" ] && [ -L "$cert_val" ]; then
+          local real_cert
+          real_cert="$(readlink -f "$cert_val" 2>/dev/null || true)"
+          if [ -n "$real_cert" ] && [ -f "$real_cert" ]; then
+            sed -i "s|^cert_path[[:space:]]*=.*|cert_path = \"${real_cert}\"|" "$site_toml"
+          fi
+        fi
+        if [ -n "$key_val" ] && [ -L "$key_val" ]; then
+          local real_key
+          real_key="$(readlink -f "$key_val" 2>/dev/null || true)"
+          if [ -n "$real_key" ] && [ -f "$real_key" ]; then
+            chmod 0600 "$real_key" 2>/dev/null || true
+            sed -i "s|^key_path[[:space:]]*=.*|key_path = \"${real_key}\"|" "$site_toml"
+          fi
         fi
       fi
     done

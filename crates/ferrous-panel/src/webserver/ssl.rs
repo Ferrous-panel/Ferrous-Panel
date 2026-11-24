@@ -678,22 +678,45 @@ impl SslManager {
             let _ = self.ensure_acme_webroot_permissions()?;
 
             // If live/<domain>/fullchain.pem exists as a non-symlink regular file (self-signed or custom PEM),
-            // back it up first and remove it so certbot writes directly to live/<domain> instead of <domain>-0001.
+            // or a dangling symlink, or live/<domain> exists without a matching renewal/<domain>.conf,
+            // back it up first and remove the stale live/<domain> directory so certbot writes directly to
+            // live/<domain> instead of failing with "live directory exists for <domain>" or creating <domain>-0001.
             // If Certbot fails for any reason, restore the backed-up certificate so HTTPS is never broken.
             let (cert_path, key_path) = self.site_cert_paths(domain)?;
             let is_non_certbot_cert = cert_path
                 .symlink_metadata()
                 .map(|m| m.file_type().is_file())
                 .unwrap_or(false);
+            let is_dangling_symlink =
+                cert_path.symlink_metadata().is_ok() && !cert_path.exists();
+            let live_dir = cert_path.parent().map(|p| p.to_path_buf());
+            let renewal_missing = self
+                .paths
+                .letsencrypt_live
+                .as_path()
+                .parent()
+                .map(|le_root| {
+                    let renewal_dir = le_root.join("renewal");
+                    renewal_dir.is_dir()
+                        && !renewal_dir
+                            .join(format!("{}.conf", domain.as_str()))
+                            .is_file()
+                })
+                .unwrap_or(false);
+            let should_clean_live_dir = is_non_certbot_cert
+                || is_dangling_symlink
+                || (renewal_missing
+                    && live_dir.as_ref().map(|d| d.exists()).unwrap_or(false));
+
             let mut backup_cert_bytes: Option<Vec<u8>> = None;
             let mut backup_key_bytes: Option<Vec<u8>> = None;
-            if is_non_certbot_cert {
+            if should_clean_live_dir {
                 backup_cert_bytes = std::fs::read(&cert_path).ok();
                 backup_key_bytes = std::fs::read(&key_path).ok();
                 let _ = std::fs::remove_file(&cert_path);
                 let _ = std::fs::remove_file(&key_path);
-                if let Some(parent) = cert_path.parent() {
-                    let _ = std::fs::remove_dir(parent);
+                if let Some(ref parent) = live_dir {
+                    let _ = std::fs::remove_dir_all(parent);
                 }
             }
 
@@ -739,7 +762,15 @@ impl SslManager {
                 }
             };
 
-            if !out.success {
+            // Check if Certbot actually wrote valid certificate files even if a post-hook exited non-zero.
+            let cert_written_by_certbot = cert_path.is_file()
+                && key_path.is_file()
+                && cert_path
+                    .symlink_metadata()
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+
+            if !out.success && !cert_written_by_certbot {
                 restore_backup();
                 let reason = if !out.stderr.trim().is_empty() {
                     out.stderr.trim().to_string()
@@ -753,6 +784,17 @@ impl SslManager {
                     exit_code: out.exit_code,
                     stderr: reason,
                 });
+            }
+
+            #[cfg(unix)]
+            if key_path.is_file() {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(canon_key) = std::fs::canonicalize(&key_path) {
+                    let _ = std::fs::set_permissions(
+                        &canon_key,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
             }
 
             if self.executor.is_binary_available(AllowedBinary::Systemctl) {

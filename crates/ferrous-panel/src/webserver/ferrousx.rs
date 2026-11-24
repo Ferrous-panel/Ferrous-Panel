@@ -257,6 +257,113 @@ server_tokens = false\n"
         Ok(snap)
     }
 
+    /// Auto-heals `/etc/ferrousx/sites/*.toml` before invoking `ferrousx-bin --check-config`:
+    /// 1. Downgrades `ssl.enabled = true` to `false` if the referenced `cert_path` or `key_path` is missing on disk.
+    /// 2. Canonicalizes Certbot symlinked `cert_path` / `key_path` (`/etc/letsencrypt/live/...`) to their
+    ///    archive regular files (`/etc/letsencrypt/archive/...`) so upstream `ferrousx-bin` never rejects symlinks.
+    pub fn sanitize_site_configs_on_disk(&self) {
+        if self.paths.sites_dir != Path::new("/etc/ferrousx/sites") {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(&self.paths.sites_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut cert_val: Option<String> = None;
+            let mut key_val: Option<String> = None;
+            for line in raw.lines() {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("cert_path") {
+                    if let Some((_, v)) = rest.split_once('=') {
+                        cert_val = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
+                    }
+                } else if let Some(rest) = t.strip_prefix("key_path") {
+                    if let Some((_, v)) = rest.split_once('=') {
+                        key_val = Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
+                    }
+                }
+            }
+            let cert_exists = cert_val
+                .as_deref()
+                .map(|p| !p.is_empty() && Path::new(p).is_file())
+                .unwrap_or(false);
+            let key_exists = key_val
+                .as_deref()
+                .map(|p| !p.is_empty() && Path::new(p).is_file())
+                .unwrap_or(false);
+
+            let mut changed = false;
+            let mut out = String::with_capacity(raw.len() + 64);
+            let mut in_ssl = false;
+            for line in raw.lines() {
+                let t = line.trim();
+                if t.starts_with('[') {
+                    in_ssl = t == "[ssl]";
+                }
+                if in_ssl && (!cert_exists || !key_exists) {
+                    if t.starts_with("enabled") && t.contains("true") {
+                        out.push_str("enabled = false\n");
+                        changed = true;
+                        continue;
+                    }
+                    if t.starts_with("redirect_https") && t.contains("true") {
+                        out.push_str("redirect_https = false\n");
+                        changed = true;
+                        continue;
+                    }
+                } else if in_ssl && cert_exists && key_exists {
+                    if t.starts_with("cert_path") {
+                        if let Some(ref cp) = cert_val {
+                            if std::fs::symlink_metadata(cp)
+                                .map(|m| m.file_type().is_symlink())
+                                .unwrap_or(false)
+                            {
+                                if let Ok(canon) = std::fs::canonicalize(cp) {
+                                    let _ = writeln!(out, "cert_path = \"{}\"", canon.display());
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if t.starts_with("key_path") {
+                        if let Some(ref kp) = key_val {
+                            if std::fs::symlink_metadata(kp)
+                                .map(|m| m.file_type().is_symlink())
+                                .unwrap_or(false)
+                            {
+                                if let Ok(canon) = std::fs::canonicalize(kp) {
+                                    #[cfg(unix)]
+                                    {
+                                        use std::os::unix::fs::PermissionsExt;
+                                        let _ = std::fs::set_permissions(
+                                            &canon,
+                                            std::fs::Permissions::from_mode(0o600),
+                                        );
+                                    }
+                                    let _ = writeln!(out, "key_path = \"{}\"", canon.display());
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            if changed {
+                let _ = atomic_write_file(&path, out.as_bytes(), 0o644);
+            }
+        }
+    }
+
     pub fn start(&self) -> BoxFuture<'_, Result<(), PanelError>> {
         Box::pin(async move {
             self.ensure_installed()?;
@@ -382,8 +489,33 @@ impl WebServerEngine for FerrousxEngine {
             live_raw
         };
 
-        let cert_path = format!("{live_root}/{}/fullchain.pem", spec.domain.as_str());
-        let key_path = format!("{live_root}/{}/privkey.pem", spec.domain.as_str());
+        let default_cert = format!("{live_root}/{}/fullchain.pem", spec.domain.as_str());
+        let default_key = format!("{live_root}/{}/privkey.pem", spec.domain.as_str());
+        let cert_path = if std::fs::symlink_metadata(&default_cert)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::canonicalize(&default_cert)
+                .map(|p| p.display().to_string())
+                .unwrap_or(default_cert)
+        } else {
+            default_cert
+        };
+        let key_path = if std::fs::symlink_metadata(&default_key)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            std::fs::canonicalize(&default_key)
+                .map(|p| p.display().to_string())
+                .unwrap_or(default_key)
+        } else {
+            default_key
+        };
+        #[cfg(unix)]
+        if spec.ssl_enabled && Path::new(&key_path).is_file() {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
 
         let mode_section = match &spec.mode {
             SiteMode::StaticSpa {
@@ -581,6 +713,7 @@ key_path = \"{key_path}\"\n\
     fn validate(&self) -> BoxFuture<'_, Result<ValidationReport, PanelError>> {
         Box::pin(async move {
             self.ensure_installed()?;
+            self.sanitize_site_configs_on_disk();
             let out = self
                 .executor
                 .run(AllowedBinary::Ferrousx, &["--check-config"], CMD_TIMEOUT)

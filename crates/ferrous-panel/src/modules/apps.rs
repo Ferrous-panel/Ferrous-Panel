@@ -2013,8 +2013,16 @@ pub async fn update_site_settings(
         aliases.push(Domain::parse(a)?);
     }
     let next_ssl = ssl_enabled.unwrap_or(app.ssl_enabled);
-    let next_force = force_https.unwrap_or(app.force_https);
-    let next_h3 = http3_quic.unwrap_or(app.http3_quic);
+    let next_force = if next_ssl {
+        force_https.unwrap_or(app.force_https)
+    } else {
+        false
+    };
+    let next_h3 = if next_ssl {
+        http3_quic.unwrap_or(false)
+    } else {
+        false
+    };
     let next_ws = websocket_enabled.unwrap_or(app.websocket_enabled);
     let next_rps = rate_limit_rps.unwrap_or(app.rate_limit_rps);
 
@@ -2029,16 +2037,21 @@ pub async fn update_site_settings(
                 .executor()
                 .is_binary_available(AllowedBinary::Certbot)
         {
-            if !site_vhost_exists(&domain, webserver) {
-                apply_app_ssl_vhost(&mut app, false, false, store, config, webserver).await?;
-            }
+            apply_app_ssl_vhost(&mut app, false, false, store, config, webserver).await?;
             if config.is_production() {
                 let _ = webserver.reload_or_start_configured_engine().await;
                 ensure_ssl_firewall_ports(config, webserver).await;
-                webserver
+                if let Err(err) = webserver
                     .ssl
                     .verify_acme_http01_reachable(&domain, webserver.probe_addr())
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(
+                        domain = %domain.as_str(),
+                        error = %err,
+                        "ACME HTTP-01 local loopback preflight warning before Certbot"
+                    );
+                }
             }
             let issued = webserver
                 .ssl
@@ -2160,7 +2173,7 @@ async fn apply_app_ssl_vhost(
     let effective_doc_root =
         resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
     let effective_force = if ssl_enabled { force_https } else { false };
-    let effective_h3 = if ssl_enabled { app.http3_quic } else { false };
+    let effective_h3 = false;
 
     let mut spec = build_site_spec_for_app(
         domain,
@@ -2322,15 +2335,16 @@ pub async fn install_app_ssl_letsencrypt(
         .unwrap_or(false);
 
     // Ensure the site vhost exists and serves `/.well-known/acme-challenge/` on port 80 before running Certbot.
+    if aliases_changed {
+        app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
+    }
+    let safe_ssl = app.ssl_enabled && cert_files_present;
+    let safe_force = safe_ssl && app.force_https;
     if aliases_changed
         || !site_vhost_exists(&domain, webserver)
         || (app.ssl_enabled && !cert_files_present)
+        || config.is_production()
     {
-        if aliases_changed {
-            app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
-        }
-        let safe_ssl = app.ssl_enabled && cert_files_present;
-        let safe_force = safe_ssl && app.force_https;
         apply_app_ssl_vhost(&mut app, safe_ssl, safe_force, store, config, webserver).await?;
     }
 
@@ -2338,10 +2352,17 @@ pub async fn install_app_ssl_letsencrypt(
     if config.is_production() {
         let _ = webserver.reload_or_start_configured_engine().await;
         ensure_ssl_firewall_ports(config, webserver).await;
-        webserver
+        if let Err(err) = webserver
             .ssl
             .verify_acme_http01_reachable(&domain, webserver.probe_addr())
-            .await?;
+            .await
+        {
+            tracing::warn!(
+                domain = %domain.as_str(),
+                error = %err,
+                "ACME HTTP-01 local loopback preflight warning; proceeding with Certbot webroot challenge"
+            );
+        }
     }
 
     let issued = webserver
