@@ -13,14 +13,34 @@ pub mod sysops;
 pub mod telemetry;
 pub mod webserver;
 
-use crate::auth::middleware::require_auth;
+use crate::auth::middleware::{require_auth, AuthenticatedUser};
+use crate::auth::rate_limit::extract_client_ip;
 use crate::error::PanelError;
+use crate::state::AppState;
 use actix_web::middleware::from_fn;
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
 
 const LARGE_SQL_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const LARGE_ZIP_JSON_BYTES: usize = 32 * 1024 * 1024;
 const LARGE_RAW_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Resolves the authenticated username and proxy-aware client IP for audit logging across all API modules.
+pub(crate) fn actor_and_ip(req: &HttpRequest) -> (String, String) {
+    let actor = req
+        .extensions()
+        .get::<AuthenticatedUser>()
+        .map(|u| u.username.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let ip = req
+        .app_data::<web::Data<AppState>>()
+        .map(|st| extract_client_ip(req, &st.config))
+        .unwrap_or_else(|| {
+            req.peer_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_else(|| "127.0.0.1".to_string())
+        });
+    (actor, ip)
+}
 
 async fn not_implemented() -> Result<HttpResponse, PanelError> {
     Err(PanelError::NotImplemented(

@@ -2358,6 +2358,15 @@ pub async fn install_app_ssl_letsencrypt(
     }
 
     apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
+    finalize_app_ssl_install(id, store, config, webserver).await
+}
+
+async fn finalize_app_ssl_install(
+    id: &str,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> Result<AppSslOverview, PanelError> {
     if config.is_production() {
         let _ = webserver.reload_or_start_configured_engine().await;
         ensure_ssl_firewall_ports(config, webserver).await;
@@ -2390,11 +2399,7 @@ pub async fn install_app_ssl_custom(
     }
 
     apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
-    if config.is_production() {
-        let _ = webserver.reload_or_start_configured_engine().await;
-        ensure_ssl_firewall_ports(config, webserver).await;
-    }
-    get_app_ssl_overview(id, store, webserver).await
+    finalize_app_ssl_install(id, store, config, webserver).await
 }
 
 pub async fn install_app_ssl_self_signed(
@@ -2422,11 +2427,7 @@ pub async fn install_app_ssl_self_signed(
     }
 
     apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
-    if config.is_production() {
-        let _ = webserver.reload_or_start_configured_engine().await;
-        ensure_ssl_firewall_ports(config, webserver).await;
-    }
-    get_app_ssl_overview(id, store, webserver).await
+    finalize_app_ssl_install(id, store, config, webserver).await
 }
 
 pub async fn update_app_ssl_settings(

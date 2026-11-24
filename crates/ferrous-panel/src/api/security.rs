@@ -1,9 +1,8 @@
-use crate::auth::middleware::AuthenticatedUser;
-use crate::auth::rate_limit::extract_client_ip;
+use crate::api::actor_and_ip;
 use crate::error::PanelError;
 use crate::modules::security as sec_mod;
 use crate::state::AppState;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -50,16 +49,6 @@ fn default_audit_limit() -> usize {
     100
 }
 
-fn actor_and_ip(req: &HttpRequest, state: &AppState) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = extract_client_ip(req, &state.config);
-    (actor, ip)
-}
-
 /// `GET /api/security` — loads real `ufw status numbered`, `fail2ban-client status`, `sysctl` directives, and Anti-DDoS WAF/FIM state.
 pub async fn get_security(state: web::Data<AppState>) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
@@ -93,7 +82,7 @@ pub async fn add_ufw_rule(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -120,7 +109,7 @@ pub async fn toggle_ufw_rule(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -161,7 +150,7 @@ pub async fn delete_ufw_rule(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -189,7 +178,7 @@ pub async fn ban_ip(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -217,7 +206,7 @@ pub async fn unban_ip(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -240,7 +229,7 @@ pub async fn toggle_hardening(
     let directives =
         sec_mod::toggle_hardening(state.webserver.executor().as_ref(), &id).await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -276,7 +265,7 @@ pub async fn set_ddos_mode(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -298,7 +287,7 @@ pub async fn toggle_waf_rule(
     let id = path.into_inner();
     let shield = sec_mod::toggle_waf_rule(&state.modules, &id)?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -322,7 +311,7 @@ pub async fn run_fim_scan(
             .await
             .map_err(|_| PanelError::Internal("FIM scan worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,

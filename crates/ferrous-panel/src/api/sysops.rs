@@ -1,8 +1,8 @@
-use crate::auth::middleware::AuthenticatedUser;
+use crate::api::actor_and_ip;
 use crate::error::PanelError;
 use crate::modules::sysops as sysops_mod;
 use crate::state::AppState;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -39,19 +39,6 @@ pub struct ServiceLogsQuery {
 
 fn default_log_lines() -> usize {
     120
-}
-
-fn actor_and_ip(req: &HttpRequest) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = req
-        .peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    (actor, ip)
 }
 
 /// `GET /api/sysops/overview` — returns real `/proc` processes, `ss` ports, `df` disks, `systemd` services, Swap & sysctl.

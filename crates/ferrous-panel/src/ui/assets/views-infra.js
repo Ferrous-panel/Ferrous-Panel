@@ -1,18 +1,20 @@
 // FerrousPanel Pure-Rust UI — Infrastructure Views (Web Engine, PHP/Software, Cron/Backup/DNS, Mail, Edge/Polyglot)
 import {
   api, esc, fmtTime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer,
-  capBannerHtml, capDisabledAttr, isCapUnavailable, withBusy,
+  capBannerHtml, capDisabledAttr, isCapUnavailable, withBusy, state, isActiveRender, waitForPanelReconnect,
 } from './app.js';
 
 // ============================================================================
 // 5. WEB SERVER ENGINE (NGINX / FERROUSX)
 // ============================================================================
 export async function renderWebserver(container) {
+  const renderSeq = state.renderSeq;
   const [ws, fxSync, fxIpc] = await Promise.all([
     api('GET', '/api/webserver'),
     api('GET', '/api/ferrousx/sync-status').catch(() => null),
     api('GET', '/api/ferrousx/ipc/status').catch(() => null),
   ]);
+  if (!isActiveRender(renderSeq, 'webserver')) return;
 
   const activeEngine = ws?.frontendEngine || ws?.frontend_engine || 'nginx';
   const sites = ws?.sites || [];
@@ -149,11 +151,13 @@ export async function renderWebserver(container) {
 // 6. PHP-FPM & SOFTWARE STORE (SETTINGS + SWITCH-SITE + CONFIG EDITOR)
 // ============================================================================
 export async function renderPhpSoftware(container) {
+  const renderSeq = state.renderSeq;
   const [phpList, pkgs, apps] = await Promise.all([
     api('GET', '/api/php').catch(() => []),
     api('GET', '/api/software').catch(() => []),
     api('GET', '/api/apps').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'php-software')) return;
 
   let tab = 'software';
   let pkgFilter = 'all';
@@ -410,20 +414,6 @@ export async function renderPhpSoftware(container) {
       });
     });
 
-    async function waitForPanelReconnect(maxWaitMs = 10000) {
-      const deadline = Date.now() + maxWaitMs;
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 700));
-        try {
-          const resp = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
-          if (resp.ok) return true;
-        } catch (_) {
-          // still restarting
-        }
-      }
-      return false;
-    }
-
     container.querySelectorAll('[data-pkg-act]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const pkgId = btn.dataset.id;
@@ -494,10 +484,12 @@ export async function renderPhpSoftware(container) {
 // 7. CRON, BACKUPS, DNS & SFTP
 // ============================================================================
 export async function renderCpanel(container) {
+  const renderSeq = state.renderSeq;
   const [cp, apps] = await Promise.all([
     api('GET', '/api/cpanel'),
     api('GET', '/api/apps').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'cpanel')) return;
 
   const crons = cp.cronJobs || [];
   const backups = cp.backups || [];
@@ -800,7 +792,9 @@ export async function renderCpanel(container) {
 // 8. MAIL SERVER (REAL DKIM + REAL DNS STATUS + FORWARDERS + SEND TEST)
 // ============================================================================
 export async function renderMail(container) {
+  const renderSeq = state.renderSeq;
   const data = await api('GET', '/api/mail');
+  if (!isActiveRender(renderSeq, 'mail')) return;
   const domains = data.domains || [];
   const mailboxes = data.mailboxes || [];
   const forwarders = data.forwarders || [];
@@ -1107,10 +1101,12 @@ export async function renderMail(container) {
 // 9. EDGE CLOUD & POLYGLOT FFI (EXPERIMENTAL / OPTIONAL)
 // ============================================================================
 export async function renderEdgePolyglot(container) {
+  const renderSeq = state.renderSeq;
   const [edge, toolchains] = await Promise.all([
     api('GET', '/api/edge-cloud').catch(() => ({})),
     api('GET', '/api/polyglot/toolchains').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'edge-polyglot')) return;
 
   const workers = edge.wasiWorkers || [];
   const containers = edge.ociContainers || [];

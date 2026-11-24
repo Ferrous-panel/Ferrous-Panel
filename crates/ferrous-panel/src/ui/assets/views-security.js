@@ -1,17 +1,19 @@
 // FerrousPanel Pure-Rust UI — Security, Optimizer/Diagnostics, SSH/Terminal, Jobs & Panel Settings
 import {
   api, esc, fmtBytes, fmtTime, fmtUptime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer, handleLogout,
-  capBannerHtml, capDisabledAttr, withBusy,
+  capBannerHtml, capDisabledAttr, withBusy, state, isActiveRender, waitForPanelReconnect,
 } from './app.js';
 
 // ============================================================================
 // 9. SECURITY, FIREWALL & AUDIT LOGS
 // ============================================================================
 export async function renderSecurity(container) {
+  const renderSeq = state.renderSeq;
   const [sec, auditLogs] = await Promise.all([
     api('GET', '/api/security'),
     api('GET', '/api/security/audit-logs?limit=50').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'security')) return;
 
   const ufw = sec.ufwRules || [];
   const jails = sec.fail2banJails || [];
@@ -303,10 +305,12 @@ export async function renderSecurity(container) {
 // 10. SYSTEM OPTIMIZER, KERNEL SYSCTL, ANTI-CRASH GUARD & DIAGNOSTICS
 // ============================================================================
 export async function renderOptimizer(container) {
+  const renderSeq = state.renderSeq;
   const [opt, diag] = await Promise.all([
     api('GET', '/api/optimizer'),
     api('GET', '/api/system/diagnostics').catch(() => []),
   ]);
+  if (!isActiveRender(renderSeq, 'optimizer')) return;
 
   const profiles = opt.profiles || [];
   const activeId = opt.activeProfileId || '';
@@ -510,7 +514,9 @@ export async function renderOptimizer(container) {
 // 11. SSH & WEB TERMINAL (PORT CONFIRM + REAL OUTPUT + ACTIVE SESSIONS)
 // ============================================================================
 export async function renderSsh(container) {
+  const renderSeq = state.renderSeq;
   const ssh = await api('GET', '/api/ssh');
+  if (!isActiveRender(renderSeq, 'ssh')) return;
   const cfg = ssh.config || {};
   const keys = ssh.authorizedKeys || [];
   const sessions = ssh.activeSessions || [];
@@ -713,11 +719,13 @@ export async function renderSsh(container) {
 // 12. BACKGROUND JOBS & PANEL ADMIN SETTINGS
 // ============================================================================
 export async function renderSettingsJobs(container) {
+  const renderSeq = state.renderSeq;
   const [admin, jobs, upd] = await Promise.all([
     api('GET', '/api/panel-admin'),
     api('GET', '/api/jobs?limit=30').catch(() => []),
     api('GET', '/api/system/update-status').catch(() => null),
   ]);
+  if (!isActiveRender(renderSeq, 'settings')) return;
 
   const origPort = Number(admin.panelPort || 8443);
   const shortSha = (sha) => (sha ? String(sha).slice(0, 10) : '—');
@@ -941,20 +949,7 @@ export async function renderSettingsJobs(container) {
           await api('POST', '/api/panel-admin/cli-action', { option: 1 });
           toast('Đã gửi lệnh khởi động lại ferrous-panel.service — đang chờ kết nối lại…');
           await new Promise((r) => setTimeout(r, 1200));
-          const deadline = Date.now() + 15000;
-          let ready = false;
-          while (Date.now() < deadline) {
-            try {
-              const r = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
-              if (r.ok) {
-                ready = true;
-                break;
-              }
-            } catch (_) {
-              // still restarting
-            }
-            await new Promise((r) => setTimeout(r, 600));
-          }
+          const ready = await waitForPanelReconnect(15000, 600);
           if (ready) {
             toast('FerrousPanel đã khởi động lại thành công.');
             await renderSettingsJobs(container);
@@ -1013,7 +1008,9 @@ export async function renderSettingsJobs(container) {
 // 13. LINUX SYSOPS (PROCESSES /proc, PORTS ss, SYSTEMD SERVICES, SWAP & SYSCTL)
 // ============================================================================
 export async function renderSysops(container) {
+  const renderSeq = state.renderSeq;
   let data = await api('GET', '/api/sysops/overview');
+  if (!isActiveRender(renderSeq, 'sysops')) return;
   let activeTab = 'processes';
   let search = '';
 

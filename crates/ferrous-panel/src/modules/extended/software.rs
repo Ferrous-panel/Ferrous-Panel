@@ -186,6 +186,51 @@ fn find_file_recursive(dir: &Path, filename: &str) -> Option<PathBuf> {
     None
 }
 
+async fn download_https_verified(
+    executor: &dyn CommandExecutor,
+    url: &str,
+    dest_path: &Path,
+    label: &str,
+) -> Result<String, PanelError> {
+    let dest_str = dest_path.display().to_string();
+    let dl = executor
+        .run(
+            AllowedBinary::Curl,
+            &[
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--connect-timeout",
+                "15",
+                "--max-time",
+                "180",
+                "--retry",
+                "3",
+                "--retry-delay",
+                "2",
+                "-o",
+                &dest_str,
+                url,
+            ],
+            APT_TIMEOUT,
+        )
+        .await?;
+    if !dl.success {
+        return Err(PanelError::CommandFailed {
+            binary: "curl",
+            exit_code: dl.exit_code,
+            stderr: dl.stderr,
+        });
+    }
+    if std::fs::metadata(dest_path).map(|m| m.len()).unwrap_or(0) == 0 {
+        return Err(PanelError::BadGateway(format!(
+            "Tệp tải về {label} rỗng (0 byte) từ GitHub Releases."
+        )));
+    }
+    Ok(dest_str)
+}
+
 pub(super) async fn install_zero_node_cli_package(
     id: &str,
     executor: &dyn CommandExecutor,
@@ -208,42 +253,7 @@ pub(super) async fn install_zero_node_cli_package(
                 "https://github.com/oven-sh/bun/releases/latest/download/bun-linux-{bun_arch}.zip"
             );
             let zip_path = tmp_dir.join("bun.zip");
-            let zip_str = zip_path.display().to_string();
-            let dl = executor
-                .run(
-                    AllowedBinary::Curl,
-                    &[
-                        "-fsSL",
-                        "--proto",
-                        "=https",
-                        "--tlsv1.2",
-                        "--connect-timeout",
-                        "15",
-                        "--max-time",
-                        "180",
-                        "--retry",
-                        "3",
-                        "--retry-delay",
-                        "2",
-                        "-o",
-                        &zip_str,
-                        &url,
-                    ],
-                    APT_TIMEOUT,
-                )
-                .await?;
-            if !dl.success {
-                return Err(PanelError::CommandFailed {
-                    binary: "curl",
-                    exit_code: dl.exit_code,
-                    stderr: dl.stderr,
-                });
-            }
-            if std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0) == 0 {
-                return Err(PanelError::BadGateway(
-                    "Tệp tải về Bun rỗng (0 byte) từ GitHub Releases.".to_string(),
-                ));
-            }
+            let zip_str = download_https_verified(executor, &url, &zip_path, "Bun").await?;
             let tmp_str = tmp_dir.display().to_string();
             let uz = executor
                 .run(AllowedBinary::Unzip, &["-qo", &zip_str, "-d", &tmp_str], APT_TIMEOUT)
@@ -282,42 +292,8 @@ pub(super) async fn install_zero_node_cli_package(
                 "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-{tw_arch}"
             );
             let dl_path = tmp_dir.join("tailwindcss");
-            let dl_str = dl_path.display().to_string();
-            let dl = executor
-                .run(
-                    AllowedBinary::Curl,
-                    &[
-                        "-fsSL",
-                        "--proto",
-                        "=https",
-                        "--tlsv1.2",
-                        "--connect-timeout",
-                        "15",
-                        "--max-time",
-                        "180",
-                        "--retry",
-                        "3",
-                        "--retry-delay",
-                        "2",
-                        "-o",
-                        &dl_str,
-                        &url,
-                    ],
-                    APT_TIMEOUT,
-                )
-                .await?;
-            if !dl.success {
-                return Err(PanelError::CommandFailed {
-                    binary: "curl",
-                    exit_code: dl.exit_code,
-                    stderr: dl.stderr,
-                });
-            }
-            if std::fs::metadata(&dl_path).map(|m| m.len()).unwrap_or(0) == 0 {
-                return Err(PanelError::BadGateway(
-                    "Tệp tải về Tailwind CSS rỗng (0 byte) từ GitHub Releases.".to_string(),
-                ));
-            }
+            let dl_str =
+                download_https_verified(executor, &url, &dl_path, "Tailwind CSS").await?;
             let inst = executor
                 .run(
                     AllowedBinary::Install,
@@ -348,42 +324,7 @@ pub(super) async fn install_zero_node_cli_package(
                 "https://github.com/denoland/deno/releases/latest/download/deno-{deno_target}.zip"
             );
             let zip_path = tmp_dir.join("deno.zip");
-            let zip_str = zip_path.display().to_string();
-            let dl = executor
-                .run(
-                    AllowedBinary::Curl,
-                    &[
-                        "-fsSL",
-                        "--proto",
-                        "=https",
-                        "--tlsv1.2",
-                        "--connect-timeout",
-                        "15",
-                        "--max-time",
-                        "180",
-                        "--retry",
-                        "3",
-                        "--retry-delay",
-                        "2",
-                        "-o",
-                        &zip_str,
-                        &url,
-                    ],
-                    APT_TIMEOUT,
-                )
-                .await?;
-            if !dl.success {
-                return Err(PanelError::CommandFailed {
-                    binary: "curl",
-                    exit_code: dl.exit_code,
-                    stderr: dl.stderr,
-                });
-            }
-            if std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0) == 0 {
-                return Err(PanelError::BadGateway(
-                    "Tệp tải về Deno rỗng (0 byte) từ GitHub Releases.".to_string(),
-                ));
-            }
+            let zip_str = download_https_verified(executor, &url, &zip_path, "Deno").await?;
             let tmp_str = tmp_dir.display().to_string();
             let uz = executor
                 .run(AllowedBinary::Unzip, &["-qo", &zip_str, "-d", &tmp_str], APT_TIMEOUT)
@@ -474,42 +415,8 @@ pub(super) async fn install_zero_node_cli_package(
                 })?;
 
             let tar_path = tmp_dir.join("wasmtime.tar.xz");
-            let tar_str = tar_path.display().to_string();
-            let dl = executor
-                .run(
-                    AllowedBinary::Curl,
-                    &[
-                        "-fsSL",
-                        "--proto",
-                        "=https",
-                        "--tlsv1.2",
-                        "--connect-timeout",
-                        "15",
-                        "--max-time",
-                        "180",
-                        "--retry",
-                        "3",
-                        "--retry-delay",
-                        "2",
-                        "-o",
-                        &tar_str,
-                        &download_url,
-                    ],
-                    APT_TIMEOUT,
-                )
-                .await?;
-            if !dl.success {
-                return Err(PanelError::CommandFailed {
-                    binary: "curl",
-                    exit_code: dl.exit_code,
-                    stderr: dl.stderr,
-                });
-            }
-            if std::fs::metadata(&tar_path).map(|m| m.len()).unwrap_or(0) == 0 {
-                return Err(PanelError::BadGateway(
-                    "Tệp tải về Wasmtime rỗng (0 byte) từ GitHub Releases.".to_string(),
-                ));
-            }
+            let tar_str =
+                download_https_verified(executor, &download_url, &tar_path, "Wasmtime").await?;
             let tmp_str = tmp_dir.display().to_string();
             let ex = executor
                 .run(
@@ -1185,26 +1092,8 @@ pub async fn software_package_action(
                                     m.apt_packages.join(" ")
                                 )));
                             }
-                            let _ = executor
-                                .run_with_env(
-                                    AllowedBinary::AptGet,
-                                    &["update", "-qq"],
-                                    &[("DEBIAN_FRONTEND", "noninteractive")],
-                                    None,
-                                    APT_TIMEOUT,
-                                )
-                                .await;
-                            let mut args = vec!["install", "-y", "-qq"];
-                            args.extend_from_slice(m.apt_packages);
-                            let res = executor
-                                .run_with_env(
-                                    AllowedBinary::AptGet,
-                                    &args,
-                                    &[("DEBIAN_FRONTEND", "noninteractive")],
-                                    None,
-                                    APT_TIMEOUT,
-                                )
-                                .await?;
+                            apt_update_quiet(executor).await;
+                            let res = apt_install_quiet(executor, m.apt_packages).await?;
                             if !res.success {
                                 return Err(PanelError::CommandFailed {
                                     binary: "apt-get",
@@ -1274,17 +1163,7 @@ pub async fn software_package_action(
                                     m.apt_packages.join(" ")
                                 )));
                             }
-                            let mut args = vec!["remove", "-y", "-qq"];
-                            args.extend_from_slice(m.apt_packages);
-                            let res = executor
-                                .run_with_env(
-                                    AllowedBinary::AptGet,
-                                    &args,
-                                    &[("DEBIAN_FRONTEND", "noninteractive")],
-                                    None,
-                                    APT_TIMEOUT,
-                                )
-                                .await?;
+                            let res = apt_remove_quiet(executor, m.apt_packages).await?;
                             if !res.success {
                                 return Err(PanelError::CommandFailed {
                                     binary: "apt-get",

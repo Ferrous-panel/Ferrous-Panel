@@ -1,9 +1,8 @@
-use crate::auth::middleware::AuthenticatedUser;
-use crate::auth::rate_limit::extract_client_ip;
+use crate::api::actor_and_ip;
 use crate::error::PanelError;
 use crate::modules::files::{self as files_mod, UploadZipRequest};
 use crate::state::AppState;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -70,16 +69,6 @@ fn default_root_dir() -> String {
     "/".to_string()
 }
 
-fn actor_and_ip(req: &HttpRequest, state: &AppState) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = extract_client_ip(req, &state.config);
-    (actor, ip)
-}
-
 /// `GET /api/files/{app_id}` — lists real filesystem tree inside `SafePath` under `/www/wwwroot`.
 pub async fn list_files(
     state: web::Data<AppState>,
@@ -127,7 +116,7 @@ pub async fn create_node(
     .await
     .map_err(|_| PanelError::Internal("file creation worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -159,7 +148,7 @@ pub async fn upload_zip(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -200,7 +189,7 @@ pub async fn upload_raw(
     .await
     .map_err(|_| PanelError::Internal("file upload worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -234,7 +223,7 @@ pub async fn compress_dir(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -267,7 +256,7 @@ pub async fn remote_download(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -293,7 +282,7 @@ pub async fn batch_chmod(
         .await
         .map_err(|_| PanelError::Internal("batch chmod worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -325,7 +314,7 @@ pub async fn extract_archive(
     )
     .await?;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -356,7 +345,7 @@ pub async fn rename_node(
     .await
     .map_err(|_| PanelError::Internal("file rename worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -394,7 +383,7 @@ pub async fn update_file(
     .await
     .map_err(|_| PanelError::Internal("file update worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
@@ -421,7 +410,7 @@ pub async fn delete_node(
         .await
         .map_err(|_| PanelError::Internal("file delete worker failed".to_string()))??;
 
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,

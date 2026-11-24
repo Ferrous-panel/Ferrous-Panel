@@ -1,8 +1,8 @@
-use crate::auth::middleware::AuthenticatedUser;
+use crate::api::actor_and_ip;
 use crate::error::PanelError;
 use crate::modules::cpanel as cpanel_mod;
 use crate::state::AppState;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -23,19 +23,6 @@ pub struct CreateBackupRequest {
     pub target_app: String,
     #[serde(default)]
     pub database_included: String,
-}
-
-fn actor_and_ip(req: &HttpRequest) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = req
-        .peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    (actor, ip)
 }
 
 /// `GET /api/cpanel` — loads real `crontab` jobs and verified `tar.zst` backups (DNS/SFTP empty & 501).

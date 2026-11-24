@@ -354,28 +354,10 @@ impl AptSession {
             return Ok(false);
         }
         if !self.updated {
-            let _ = executor
-                .run_with_env(
-                    AllowedBinary::AptGet,
-                    &["update", "-qq"],
-                    &[("DEBIAN_FRONTEND", "noninteractive")],
-                    None,
-                    APT_TIMEOUT,
-                )
-                .await;
+            apt_update_quiet(executor).await;
             self.updated = true;
         }
-        let mut args: Vec<&str> = vec!["install", "-y", "-qq"];
-        args.extend_from_slice(packages);
-        let res = executor
-            .run_with_env(
-                AllowedBinary::AptGet,
-                &args,
-                &[("DEBIAN_FRONTEND", "noninteractive")],
-                None,
-                APT_TIMEOUT,
-            )
-            .await?;
+        let res = apt_install_quiet(executor, packages).await?;
         Ok(res.success)
     }
 }

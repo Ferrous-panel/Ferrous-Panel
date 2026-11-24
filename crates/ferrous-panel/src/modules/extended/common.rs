@@ -78,6 +78,57 @@ pub(super) fn is_production_vps(config: &Config) -> bool {
     config.is_production()
 }
 
+pub(super) async fn apt_update_quiet(executor: &dyn CommandExecutor) {
+    if !executor.is_binary_available(AllowedBinary::AptGet) {
+        return;
+    }
+    let _ = executor
+        .run_with_env(
+            AllowedBinary::AptGet,
+            &["update", "-qq"],
+            &[("DEBIAN_FRONTEND", "noninteractive")],
+            None,
+            APT_TIMEOUT,
+        )
+        .await;
+}
+
+pub(super) async fn apt_install_quiet(
+    executor: &dyn CommandExecutor,
+    packages: &[&str],
+) -> Result<crate::system::cmd::CmdOutput, PanelError> {
+    let mut args = Vec::with_capacity(3 + packages.len());
+    args.extend_from_slice(&["install", "-y", "-qq"]);
+    args.extend_from_slice(packages);
+    executor
+        .run_with_env(
+            AllowedBinary::AptGet,
+            &args,
+            &[("DEBIAN_FRONTEND", "noninteractive")],
+            None,
+            APT_TIMEOUT,
+        )
+        .await
+}
+
+pub(super) async fn apt_remove_quiet(
+    executor: &dyn CommandExecutor,
+    packages: &[&str],
+) -> Result<crate::system::cmd::CmdOutput, PanelError> {
+    let mut args = Vec::with_capacity(3 + packages.len());
+    args.extend_from_slice(&["remove", "-y", "-qq"]);
+    args.extend_from_slice(packages);
+    executor
+        .run_with_env(
+            AllowedBinary::AptGet,
+            &args,
+            &[("DEBIAN_FRONTEND", "noninteractive")],
+            None,
+            APT_TIMEOUT,
+        )
+        .await
+}
+
 pub(super) fn read_env_file_value(path: &Path, key: &str) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     for line in raw.lines() {

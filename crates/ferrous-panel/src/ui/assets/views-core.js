@@ -1384,8 +1384,9 @@ function openDeployModal(container) {
 // ============================================================================
 // 3. SAFEPATH FILE MANAGER (FULL PARITY: RENAME, COMPRESS, REMOTE DOWNLOAD, CHMOD)
 // ============================================================================
-export async function renderFiles(container) {
+export async function renderFiles(container, renderSeq = state.renderSeq) {
   const apps = await api('GET', '/api/apps');
+  if (!isActiveRender(renderSeq, 'files')) return;
   if (!Array.isArray(apps) || !apps.length) {
     container.innerHTML = `
       <div class="page-head"><h1 class="page-title">Quản lý Tệp</h1></div>
@@ -1400,6 +1401,7 @@ export async function renderFiles(container) {
 
   async function loadAndDraw() {
     nodes = await api('GET', `/api/files/${encodeURIComponent(selectedAppId)}`);
+    if (!isActiveRender(renderSeq, 'files')) return;
     const visible = (Array.isArray(nodes) ? nodes : []).filter((n) => (n.parentDir || '/') === currentDir);
 
     container.innerHTML = `
@@ -1701,11 +1703,12 @@ export async function renderFiles(container) {
 // ============================================================================
 // 4. SQL DATABASES & PURE-RUST FERROUSADMIN
 // ============================================================================
-export async function renderDatabases(container) {
+export async function renderDatabases(container, renderSeq = state.renderSeq) {
   const [dbs, mysqlCfg] = await Promise.all([
     api('GET', '/api/databases'),
     api('GET', '/api/databases/mysql-config').catch(() => null),
   ]);
+  if (!isActiveRender(renderSeq, 'databases')) return;
 
   let activeDbTab = 'list';
   let studioDbId = Array.isArray(dbs) && dbs[0] ? dbs[0].id : '';

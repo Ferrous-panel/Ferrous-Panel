@@ -1,10 +1,9 @@
+use crate::api::actor_and_ip;
 use crate::api::cpanel::CreateBackupRequest;
-use crate::auth::middleware::AuthenticatedUser;
-use crate::auth::rate_limit::extract_client_ip;
 use crate::error::PanelError;
 use crate::modules::{jobs as jobs_mod, PanelJobRecord};
 use crate::state::AppState;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
@@ -42,16 +41,6 @@ pub struct JobPollResponse {
     pub log_chunk: String,
     pub next_offset: usize,
     pub done: bool,
-}
-
-fn actor_and_ip(req: &HttpRequest, state: &AppState) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = extract_client_ip(req, &state.config);
-    (actor, ip)
 }
 
 fn is_terminal_status(status: &str) -> bool {
@@ -151,7 +140,7 @@ pub async fn start_rebuild_app_job(
     let _conn_guard = state.telemetry.connection_guard();
 
     let app_id = path.into_inner();
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     let job = jobs_mod::spawn_rebuild_app_job(state.clone(), app_id.clone(), actor.clone(), ip.clone())?;
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -172,7 +161,7 @@ pub async fn start_git_deploy_job(
     let _conn_guard = state.telemetry.connection_guard();
 
     let app_id = path.into_inner();
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     let job = jobs_mod::spawn_git_deploy_job(state.clone(), app_id.clone(), actor.clone(), ip.clone())?;
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -193,7 +182,7 @@ pub async fn start_renew_ssl_job(
     let _conn_guard = state.telemetry.connection_guard();
 
     let app_id = path.into_inner();
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     let job = jobs_mod::spawn_renew_ssl_job(state.clone(), app_id.clone(), actor.clone(), ip.clone())?;
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -214,7 +203,7 @@ pub async fn start_create_backup_job(
     let _conn_guard = state.telemetry.connection_guard();
 
     let body = payload.into_inner();
-    let (actor, ip) = actor_and_ip(&req, &state);
+    let (actor, ip) = actor_and_ip(&req);
     let job = jobs_mod::spawn_create_backup_job(
         state.clone(),
         body.target_app.clone(),

@@ -1,14 +1,14 @@
+use crate::api::actor_and_ip;
 use crate::api::contract::{
     AppActionRequest, AppConfigUpdateRequest, DeployWebsiteRequest, DirectoryPrivacyItem,
     HotlinkProtectionConfig, NginxValidateRequest, NginxValidateResponse, RedirectRuleItem,
     RewritePresetType, WebServerEngineType,
 };
-use crate::auth::middleware::AuthenticatedUser;
 use crate::error::PanelError;
 use crate::modules::apps as apps_mod;
 use crate::state::AppState;
 use crate::system::validate::Domain;
-use actix_web::{web, HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{web, HttpRequest, HttpResponse};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -130,19 +130,6 @@ fn default_log_kind() -> String {
 
 fn default_app_log_lines() -> usize {
     150
-}
-
-fn actor_and_ip(req: &HttpRequest) -> (String, String) {
-    let actor = req
-        .extensions()
-        .get::<AuthenticatedUser>()
-        .map(|u| u.username.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-    let ip = req
-        .peer_addr()
-        .map(|a| a.ip().to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    (actor, ip)
 }
 
 /// `GET /api/apps` — lists managed websites enriched with real systemd MainPID/MemoryCurrent, disk usage, and SSL cert status.

@@ -513,15 +513,7 @@ pub async fn php_action(
                         "thiếu binary apt-get để cài PHP {version}; hãy cài thủ công: sudo apt install -y php{version}-fpm php{version}-cli"
                     )));
                 }
-                let _ = executor
-                    .run_with_env(
-                        AllowedBinary::AptGet,
-                        &["update", "-qq"],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        None,
-                        APT_TIMEOUT,
-                    )
-                    .await;
+                apt_update_quiet(executor).await;
                 let pkg_fpm = format!("php{version}-fpm");
                 let pkg_cli = format!("php{version}-cli");
                 let pkg_common = format!("php{version}-common");
@@ -530,27 +522,20 @@ pub async fn php_action(
                 let pkg_xml = format!("php{version}-xml");
                 let pkg_curl = format!("php{version}-curl");
                 let pkg_zip = format!("php{version}-zip");
-                let res = executor
-                    .run_with_env(
-                        AllowedBinary::AptGet,
-                        &[
-                            "install",
-                            "-y",
-                            "-qq",
-                            &pkg_fpm,
-                            &pkg_cli,
-                            &pkg_common,
-                            &pkg_mysql,
-                            &pkg_mb,
-                            &pkg_xml,
-                            &pkg_curl,
-                            &pkg_zip,
-                        ],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        None,
-                        APT_TIMEOUT,
-                    )
-                    .await?;
+                let res = apt_install_quiet(
+                    executor,
+                    &[
+                        &pkg_fpm,
+                        &pkg_cli,
+                        &pkg_common,
+                        &pkg_mysql,
+                        &pkg_mb,
+                        &pkg_xml,
+                        &pkg_curl,
+                        &pkg_zip,
+                    ],
+                )
+                .await?;
                 require_command_ok("apt-get", res)?;
 
                 if !executor.is_binary_available(AllowedBinary::Systemctl) {
@@ -613,15 +598,7 @@ pub async fn php_action(
                     }
                 }
                 let pkg_fpm = format!("php{version}-fpm");
-                let res = executor
-                    .run_with_env(
-                        AllowedBinary::AptGet,
-                        &["remove", "-y", "-qq", &pkg_fpm],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        None,
-                        APT_TIMEOUT,
-                    )
-                    .await?;
+                let res = apt_remove_quiet(executor, &[&pkg_fpm]).await?;
                 require_command_ok("apt-get", res)?;
             }
             inst.installed = false;
@@ -953,24 +930,8 @@ pub async fn toggle_php_extension(
         // Auto-install missing apt extension package when enabling (e.g. php8.3-redis, php8.3-imagick, php8.3-pgsql)
         if !mod_out.success && target_enabled && executor.is_binary_available(AllowedBinary::AptGet) {
             if let Some(apt_pkg) = apt_package_for_php_ext(version, &mod_name) {
-                let _ = executor
-                    .run_with_env(
-                        AllowedBinary::AptGet,
-                        &["update", "-qq"],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        None,
-                        APT_TIMEOUT,
-                    )
-                    .await;
-                let inst_res = executor
-                    .run_with_env(
-                        AllowedBinary::AptGet,
-                        &["install", "-y", "-qq", &apt_pkg],
-                        &[("DEBIAN_FRONTEND", "noninteractive")],
-                        None,
-                        APT_TIMEOUT,
-                    )
-                    .await?;
+                apt_update_quiet(executor).await;
+                let inst_res = apt_install_quiet(executor, &[&apt_pkg]).await?;
                 if inst_res.success {
                     mod_out = executor
                         .run(bin, &["-v", version, "-s", "fpm", &mod_name], CMD_TIMEOUT)

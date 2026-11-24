@@ -154,6 +154,20 @@ export async function withBusy(btn, fn) {
   }
 }
 
+export async function waitForPanelReconnect(maxWaitMs = 12000, stepMs = 650) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, stepMs));
+    try {
+      const resp = await fetch('/api/health', { cache: 'no-store', credentials: 'same-origin' });
+      if (resp.ok) return true;
+    } catch (_) {
+      // still restarting
+    }
+  }
+  return false;
+}
+
 function formatHttpError(status, contentType, text, data) {
   if (data && typeof data === 'object') {
     const raw = data.error || data.message;
