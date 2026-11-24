@@ -584,8 +584,11 @@ else
     mkdir -p "$(dirname "${FERROUSX_SRC_DIR}")"
     if (
       if [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
-        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 origin "${FERROUSX_BRANCH}" &&
-        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}"
+        (git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 --force origin "${FERROUSX_BRANCH}:refs/remotes/origin/${FERROUSX_BRANCH}" || \
+         git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 origin "${FERROUSX_BRANCH}") &&
+        (git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}" || \
+         git -C "${FERROUSX_SRC_DIR}" reset --hard FETCH_HEAD || \
+         git -C "${FERROUSX_SRC_DIR}" reset --hard HEAD)
       else
         rm -rf "${FERROUSX_SRC_DIR}" &&
         git clone --depth 1 --branch "${FERROUSX_BRANCH}" "https://github.com/${FERROUSX_REPO}.git" "${FERROUSX_SRC_DIR}"
@@ -722,8 +725,33 @@ else
       fi
       for _cfg_rs in "${FERROUSX_SRC_DIR}/crates/ferrousx-config/src/config.rs" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; do
         if [ -f "${_cfg_rs}" ] && grep -q 'validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;' "${_cfg_rs}"; then
-          sed -i 's/validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;/if clean_cert.is_file() \&\& clean_key.is_file() { validate_pem_cert_and_key_files(\&clean_cert, \&clean_key)?; } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); }/' "${_cfg_rs}"
-          sed -i 's/enabled: raw\.ssl\.enabled,/enabled: raw.ssl.enabled \&\& clean_cert.is_file() \&\& clean_key.is_file(),/' "${_cfg_rs}"
+          awk '
+            /validate_pem_cert_and_key_files\(&clean_cert, &clean_key\)\?;/ {
+              if ((getline next_line) > 0 && next_line ~ /\(Some\(clean_cert\), Some\(clean_key\)\)/) {
+                print "            if clean_cert.is_file() && clean_key.is_file() {"
+                print "                validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;"
+                print "                (Some(clean_cert), Some(clean_key))"
+                print "            } else {"
+                print "                eprintln!(\"[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only\", source_file.display(), clean_cert.display());"
+                print "                (None, None)"
+                print "            }"
+                next
+              } else {
+                print "            if clean_cert.is_file() && clean_key.is_file() { validate_pem_cert_and_key_files(&clean_cert, &clean_key)?; } else { eprintln!(\"[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only\", source_file.display(), clean_cert.display()); }"
+                if (next_line != "") print next_line
+                next
+              }
+            }
+            /ssl_enabled:[[:space:]]*raw\.ssl\.enabled,/ {
+              print "            ssl_enabled: raw.ssl.enabled && ssl_cert_path.is_some() && ssl_key_path.is_some(),"
+              next
+            }
+            /redirect_https:[[:space:]]*raw\.ssl\.redirect_https,/ {
+              print "            redirect_https: raw.ssl.redirect_https && ssl_cert_path.is_some() && ssl_key_path.is_some(),"
+              next
+            }
+            { print }
+          ' "${_cfg_rs}" > "${_cfg_rs}.tmp" && mv "${_cfg_rs}.tmp" "${_cfg_rs}"
         fi
       done
       echo -e "${CYAN}[*] Building upstream FerrousX (${FX_COMMIT}) binaries (ferrousx-bin + ferrousx-ctl)...${NC}"

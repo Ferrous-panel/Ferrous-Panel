@@ -627,14 +627,15 @@ update_ferrousx_from_github() {
     mkdir -p "$(dirname "${FERROUSX_SRC_DIR}")"
     if (
       if [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
-        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 --quiet origin "${FERROUSX_BRANCH}"
+        git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 --force --quiet origin "${FERROUSX_BRANCH}:refs/remotes/origin/${FERROUSX_BRANCH}" || \
+          git -C "${FERROUSX_SRC_DIR}" fetch --depth 1 --quiet origin "${FERROUSX_BRANCH}"
       else
         rm -rf "${FERROUSX_SRC_DIR}" &&
         git clone --depth 1 --branch "${FERROUSX_BRANCH}" "https://github.com/${FERROUSX_REPO}.git" "${FERROUSX_SRC_DIR}"
       fi
     ); then
-      fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
-      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v2}"
+      fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse FETCH_HEAD 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
+      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v3}"
       local fx_prev_sha
       fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
       if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_cache_tag}" ] && [ "${fx_prev_sha}" = "${fx_cache_tag}" ]; then
@@ -642,7 +643,9 @@ update_ferrousx_from_github() {
         fx_installed=true
         fx_skipped=true
       else
-        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}" >/dev/null 2>&1 || true
+        git -C "${FERROUSX_SRC_DIR}" reset --hard "origin/${FERROUSX_BRANCH}" >/dev/null 2>&1 || \
+          git -C "${FERROUSX_SRC_DIR}" reset --hard FETCH_HEAD >/dev/null 2>&1 || \
+          git -C "${FERROUSX_SRC_DIR}" reset --hard HEAD >/dev/null 2>&1 || true
       fi
     fi
     if [ "$fx_skipped" = false ] && [ -d "${FERROUSX_SRC_DIR}/.git" ]; then
@@ -784,8 +787,33 @@ update_ferrousx_from_github() {
         fi
         if [ -f "${_cfg_rs}" ] && grep -q 'validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;' "${_cfg_rs}"; then
           echo -e "${CYAN}[*] Applying compatibility patch: graceful HTTP fallback on missing PEM files in ${_cfg_rs}...${NC}"
-          sed -i 's/validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;/if clean_cert.is_file() \&\& clean_key.is_file() { validate_pem_cert_and_key_files(\&clean_cert, \&clean_key)?; } else { eprintln!("[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only", source_file.display(), clean_cert.display()); }/' "${_cfg_rs}"
-          sed -i 's/enabled: raw\.ssl\.enabled,/enabled: raw.ssl.enabled \&\& clean_cert.is_file() \&\& clean_key.is_file(),/' "${_cfg_rs}"
+          awk '
+            /validate_pem_cert_and_key_files\(&clean_cert, &clean_key\)\?;/ {
+              if ((getline next_line) > 0 && next_line ~ /\(Some\(clean_cert\), Some\(clean_key\)\)/) {
+                print "            if clean_cert.is_file() && clean_key.is_file() {"
+                print "                validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;"
+                print "                (Some(clean_cert), Some(clean_key))"
+                print "            } else {"
+                print "                eprintln!(\"[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only\", source_file.display(), clean_cert.display());"
+                print "                (None, None)"
+                print "            }"
+                next
+              } else {
+                print "            if clean_cert.is_file() && clean_key.is_file() { validate_pem_cert_and_key_files(&clean_cert, &clean_key)?; } else { eprintln!(\"[WARNING] SSL certificate missing for {}: {} — downgrading site to HTTP-only\", source_file.display(), clean_cert.display()); }"
+                if (next_line != "") print next_line
+                next
+              }
+            }
+            /ssl_enabled:[[:space:]]*raw\.ssl\.enabled,/ {
+              print "            ssl_enabled: raw.ssl.enabled && ssl_cert_path.is_some() && ssl_key_path.is_some(),"
+              next
+            }
+            /redirect_https:[[:space:]]*raw\.ssl\.redirect_https,/ {
+              print "            redirect_https: raw.ssl.redirect_https && ssl_cert_path.is_some() && ssl_key_path.is_some(),"
+              next
+            }
+            { print }
+          ' "${_cfg_rs}" > "${_cfg_rs}.tmp" && mv "${_cfg_rs}.tmp" "${_cfg_rs}"
         fi
       done
       echo -e "${CYAN}[*] Compiling upstream FerrousX (${fx_commit}) via Cargo (ferrousx-bin + ferrousx-ctl)...${NC}"
