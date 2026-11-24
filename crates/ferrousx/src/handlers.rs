@@ -168,8 +168,8 @@ pub async fn dispatch_request(
         }
     }
 
-    // 0.5 Global ACME HTTP-01 challenge before host matching so IP/new-SAN preflight challenges always succeed.
-    if !is_tls && req_path.starts_with(&bundle.master.acme_challenge_prefix) {
+    // 0.5 Global ACME HTTP-01 challenge before host matching so IP/new-SAN/Cloudflare-HTTPS preflight challenges always succeed.
+    if req_path.starts_with(&bundle.master.acme_challenge_prefix) {
         if !matches!(*req.method(), Method::GET | Method::HEAD) {
             return Ok(text_response(
                 StatusCode::METHOD_NOT_ALLOWED,
@@ -198,7 +198,7 @@ pub async fn dispatch_request(
     };
 
     // 1. Serve site-specific ACME HTTP-01 challenge cleanly before HTTPS redirects when enabled.
-    if !is_tls && site.acme_serve_before_redirect && req_path.starts_with(&site.acme_prefix) {
+    if site.acme_serve_before_redirect && req_path.starts_with(&site.acme_prefix) {
         if !matches!(*req.method(), Method::GET | Method::HEAD) {
             return Ok(text_response(
                 StatusCode::METHOD_NOT_ALLOWED,

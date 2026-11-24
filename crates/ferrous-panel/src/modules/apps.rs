@@ -276,9 +276,7 @@ fn normalize_zero_node_exec_command(
             )
         }
         "npm" | "pnpm" | "yarn" => {
-            let rewritten = if rest.is_empty() {
-                format!("{bun} --bun run start")
-            } else if rest.first().copied() == Some("start") {
+            let rewritten = if rest.is_empty() || rest.first().copied() == Some("start") {
                 format!("{bun} --bun run start")
             } else if rest.first().copied() == Some("run") {
                 format!("{bun} --bun {}", rest.join(" "))
@@ -377,10 +375,11 @@ fn resolve_effective_doc_root(
         && (is_static_runtime(framework) || is_php_runtime(framework))
     {
         let explicit = working_dir.join(trimmed);
-        if explicit.is_dir() && explicit.starts_with(working_dir) {
-            if is_php_runtime(framework) || explicit.join("index.html").is_file() {
-                return explicit;
-            }
+        if explicit.is_dir()
+            && explicit.starts_with(working_dir)
+            && (is_php_runtime(framework) || explicit.join("index.html").is_file())
+        {
+            return explicit;
         }
     }
 
@@ -1034,6 +1033,7 @@ fn php_tag_from_fpm(ver: PhpFpmVersion) -> PhpVersionTag {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_site_spec_for_app(
     domain: Domain,
     aliases: Vec<Domain>,
@@ -1150,7 +1150,7 @@ pub async fn enrich_app(
 
     if let Ok(domain) = Domain::parse(&app.domain) {
         if let Ok(ssl) = webserver.ssl.read_cert_status(&domain).await {
-            app.ssl_enabled = ssl.present;
+            app.ssl_enabled = app.ssl_enabled && ssl.present;
             app.ssl_issuer = ssl
                 .issuer
                 .unwrap_or_else(|| if ssl.present { "Let's Encrypt".to_string() } else { "None".to_string() });
@@ -1171,7 +1171,40 @@ pub async fn list_apps(
 ) -> Result<Vec<ManagedApp>, PanelError> {
     let raw = store.list_apps()?;
     let mut enriched = Vec::with_capacity(raw.len());
-    for app in raw {
+    for mut app in raw {
+        if config.is_production()
+            && !app.ssl_enabled
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            if let Ok(domain) = Domain::parse(&app.domain) {
+                let has_cert = webserver
+                    .ssl
+                    .site_cert_paths(&domain)
+                    .map(|(c, k)| c.is_file() && k.is_file())
+                    .unwrap_or(false);
+                if !has_cert {
+                    let aliases = parse_app_aliases(&app).unwrap_or_default();
+                    if let Ok(issued) = webserver
+                        .ssl
+                        .issue_self_signed(&domain, &aliases, 3650)
+                        .await
+                    {
+                        if issued.present {
+                            let _ = apply_app_ssl_vhost(
+                                &mut app, false, false, store, config, webserver,
+                            )
+                            .await;
+                            let _ = apply_app_ssl_vhost(
+                                &mut app, true, false, store, config, webserver,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
         enriched.push(enrich_app(app, config, webserver).await);
     }
     Ok(enriched)
@@ -1434,10 +1467,12 @@ pub async fn deploy_app(
             return Err(err);
         }
     };
-    if req.ssl_enabled && !effective_ssl {
-        if webserver
-            .executor()
-            .is_binary_available(AllowedBinary::Certbot)
+    if !effective_ssl && (req.ssl_enabled || config.is_production()) {
+        let mut issued_le = false;
+        if req.ssl_enabled
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Certbot)
         {
             match webserver
                 .ssl
@@ -1452,6 +1487,7 @@ pub async fn deploy_app(
                     {
                         rendered = ssl_rendered;
                         effective_ssl = true;
+                        issued_le = true;
                         initial_logs.push(format!(
                             "[{}] Issued Let's Encrypt certificate and enabled HTTPS for {}",
                             Utc::now().to_rfc3339(),
@@ -1461,22 +1497,49 @@ pub async fn deploy_app(
                 }
                 Ok(_) => {
                     initial_logs.push(format!(
-                        "[{}] Deployed HTTP vhost cleanly (SSL pending: point DNS to this VPS then run SSL issue/renew)",
-                        Utc::now().to_rfc3339()
+                        "[{}] Let's Encrypt pending for {} (falling back to Self-Signed HTTPS so port 443 works immediately)",
+                        Utc::now().to_rfc3339(),
+                        domain.as_str()
                     ));
                 }
                 Err(err) => {
                     initial_logs.push(format!(
-                        "[{}] Deployed HTTP vhost cleanly (initial SSL issuance skipped: {err}; point DNS to this VPS then retry SSL)",
+                        "[{}] Let's Encrypt issuance skipped ({err}); falling back to Self-Signed HTTPS so port 443 works immediately",
                         Utc::now().to_rfc3339()
                     ));
                 }
             }
-        } else {
-            initial_logs.push(format!(
-                "[{}] Deployed HTTP vhost cleanly (certbot not installed on host)",
-                Utc::now().to_rfc3339()
-            ));
+        }
+        // In production, always ensure a real X.509 certificate exists via OpenSSL so both HTTP (80)
+        // and HTTPS (443) work immediately (compatible with Cloudflare Full SSL and browser HTTPS-First).
+        if !issued_le
+            && config.is_production()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            if let Ok(self_status) = webserver
+                .ssl
+                .issue_self_signed(&domain, &parsed_aliases, 3650)
+                .await
+            {
+                if self_status.present {
+                    spec.ssl_enabled = true;
+                    spec.redirect_https = false;
+                    if let Ok(ssl_rendered) = webserver
+                        .upsert_and_apply_site(&spec, preferred_engine)
+                        .await
+                    {
+                        rendered = ssl_rendered;
+                        effective_ssl = true;
+                        initial_logs.push(format!(
+                            "[{}] Enabled real HTTPS on port 443 with OpenSSL X.509 certificate for {} (compatible with Cloudflare Full SSL; re-run Let's Encrypt anytime)",
+                            Utc::now().to_rfc3339(),
+                            domain.as_str()
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -1896,6 +1959,7 @@ pub async fn git_deploy_app(
     Ok(enrich_app(app, config, webserver).await)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn update_app_config(
     id: &str,
     workers: u32,
@@ -2053,11 +2117,27 @@ pub async fn update_site_settings(
                     );
                 }
             }
-            let issued = webserver
+            if let Ok(issued) = webserver
                 .ssl
                 .issue_certificate(&domain, &aliases, None)
-                .await?;
-            cert_ready = issued.present;
+                .await
+            {
+                cert_ready = issued.present;
+            }
+        }
+        if !cert_ready
+            && config.is_production()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            if let Ok(self_issued) = webserver
+                .ssl
+                .issue_self_signed(&domain, &aliases, 3650)
+                .await
+            {
+                cert_ready = self_issued.present;
+            }
         }
         if !cert_ready {
             return Err(PanelError::Validation(format!(
@@ -2122,6 +2202,7 @@ pub async fn update_site_settings(
     app.url_rewrite_rules = url_rewrite_rules.unwrap_or(rendered.content);
     app.nginx_vhost = rendered.config_path.display().to_string();
     store.upsert_app(&app)?;
+    sync_wordpress_siteurl_for_app(&app, &effective_doc_root, next_ssl, store, webserver).await;
     Ok(enrich_app(app, config, webserver).await)
 }
 
@@ -2141,6 +2222,8 @@ pub struct AppSslOverview {
     pub cert: SiteSslStatus,
     pub dns_preflight: Vec<SslDnsPreflight>,
     pub renewal_timer: SslRenewalTimerStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 fn parse_app_aliases(app: &ManagedApp) -> Result<Vec<Domain>, PanelError> {
@@ -2157,6 +2240,35 @@ fn parse_app_aliases(app: &ManagedApp) -> Result<Vec<Domain>, PanelError> {
         }
     }
     Ok(out)
+}
+
+/// If `app` is a WordPress site with a linked MariaDB database, automatically updates `siteurl` and `home`
+/// in `wp_options` to match `https://` or `http://` so WordPress does not suffer mixed-content or redirect loops.
+async fn sync_wordpress_siteurl_for_app(
+    app: &ManagedApp,
+    effective_doc_root: &Path,
+    ssl_enabled: bool,
+    store: &ModuleStore,
+    webserver: &WebServerManager,
+) {
+    if is_php_runtime(app.framework) && effective_doc_root.join("wp-config.php").is_file() {
+        if let Some(ref db_name) = app.linked_db_name {
+            let db_id = format!("db-mysql-{}", db_name.trim());
+            let scheme = if ssl_enabled { "https" } else { "http" };
+            let target_url = format!("{scheme}://{}", app.domain);
+            let escaped_url = target_url.replace('\\', "\\\\").replace('\'', "\\'");
+            let sql = format!(
+                "UPDATE `wp_options` SET `option_value` = '{escaped_url}' WHERE `option_name` IN ('siteurl', 'home');"
+            );
+            let _ = crate::modules::databases::execute_sql_query(
+                store,
+                webserver.executor().as_ref(),
+                &db_id,
+                &sql,
+            )
+            .await;
+        }
+    }
 }
 
 async fn apply_app_ssl_vhost(
@@ -2203,6 +2315,7 @@ async fn apply_app_ssl_vhost(
     app.url_rewrite_rules = rendered.content;
     app.nginx_vhost = rendered.config_path.display().to_string();
     store.upsert_app(app)?;
+    sync_wordpress_siteurl_for_app(app, &effective_doc_root, ssl_enabled, store, webserver).await;
     Ok(())
 }
 
@@ -2245,6 +2358,7 @@ pub async fn get_app_ssl_overview(
         cert,
         dns_preflight,
         renewal_timer,
+        notice: None,
     })
 }
 
@@ -2328,17 +2442,27 @@ pub async fn install_app_ssl_letsencrypt(
         }
     }
 
-    let cert_files_present = webserver
+    let mut cert_files_present = webserver
         .ssl
         .site_cert_paths(&domain)
         .map(|(c, k)| c.is_file() && k.is_file())
         .unwrap_or(false);
+    if !cert_files_present
+        && config.is_production()
+        && webserver
+            .executor()
+            .is_binary_available(AllowedBinary::OpenSsl)
+    {
+        if let Ok(self_cert) = webserver.ssl.issue_self_signed(&domain, &aliases, 3650).await {
+            cert_files_present = self_cert.present;
+        }
+    }
 
-    // Ensure the site vhost exists and serves `/.well-known/acme-challenge/` on port 80 before running Certbot.
+    // Ensure the site vhost exists and serves `/.well-known/acme-challenge/` on port 80 and 443 before running Certbot.
     if aliases_changed {
         app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
     }
-    let safe_ssl = app.ssl_enabled && cert_files_present;
+    let safe_ssl = cert_files_present;
     let safe_force = safe_ssl && app.force_https;
     if aliases_changed
         || !site_vhost_exists(&domain, webserver)
@@ -2365,7 +2489,7 @@ pub async fn install_app_ssl_letsencrypt(
         }
     }
 
-    let issued = webserver
+    match webserver
         .ssl
         .issue_or_renew_letsencrypt_with_options(
             &domain,
@@ -2375,17 +2499,50 @@ pub async fn install_app_ssl_letsencrypt(
             force_renewal,
             skip_dns_check,
         )
-        .await?;
-
-    if !issued.present {
-        return Err(PanelError::Internal(format!(
+        .await
+    {
+        Ok(issued) if issued.present => {
+            apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
+            finalize_app_ssl_install(id, store, config, webserver).await
+        }
+        Ok(issued) => Err(PanelError::Internal(format!(
             "Certbot kết thúc nhưng không tìm thấy tệp chứng chỉ tại {}",
             issued.cert_path
-        )));
+        ))),
+        Err(err) => {
+            if config.is_production()
+                && webserver
+                    .executor()
+                    .is_binary_available(AllowedBinary::OpenSsl)
+            {
+                let has_cert = webserver
+                    .ssl
+                    .site_cert_paths(&domain)
+                    .map(|(c, k)| c.is_file() && k.is_file())
+                    .unwrap_or(false);
+                let fallback_ready = if has_cert {
+                    true
+                } else {
+                    webserver
+                        .ssl
+                        .issue_self_signed(&domain, &aliases, 3650)
+                        .await
+                        .map(|s| s.present)
+                        .unwrap_or(false)
+                };
+                if fallback_ready {
+                    apply_app_ssl_vhost(&mut app, true, false, store, config, webserver).await?;
+                    let mut overview =
+                        finalize_app_ssl_install(id, store, config, webserver).await?;
+                    overview.notice = Some(format!(
+                        "Đã kích hoạt ngay HTTPS (cổng 443) với chứng chỉ OpenSSL X.509 (tương thích Cloudflare Full SSL & trình duyệt). Lưu ý Let's Encrypt ACME HTTP-01 chưa cấp được do: {err}"
+                    ));
+                    return Ok(overview);
+                }
+            }
+            Err(err)
+        }
     }
-
-    apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
-    finalize_app_ssl_install(id, store, config, webserver).await
 }
 
 async fn finalize_app_ssl_install(
@@ -2520,13 +2677,41 @@ pub async fn renew_ssl(
     let aliases = parse_app_aliases(&app)?;
 
     let current_cert = webserver.ssl.read_cert_status(&domain).await?;
-    if !current_cert.present {
+    let is_self_signed = current_cert
+        .issuer
+        .as_deref()
+        .is_some_and(|i| i.to_ascii_lowercase().contains("self-signed"))
+        || current_cert.provider.as_deref() == Some("Self-Signed");
+    let le_res = if !current_cert.present || is_self_signed {
+        let cur_ssl = app.ssl_enabled && current_cert.present;
+        let cur_force = app.force_https && cur_ssl;
+        apply_app_ssl_vhost(&mut app, cur_ssl, cur_force, store, config, webserver).await?;
         webserver
             .ssl
             .issue_or_renew_letsencrypt(&domain, &aliases, None, true, false)
-            .await?;
+            .await
+            .map(|_| ())
     } else {
-        webserver.ssl.renew_all().await?;
+        webserver.ssl.renew_all().await
+    };
+
+    if let Err(err) = le_res {
+        if config.is_production()
+            && webserver
+                .executor()
+                .is_binary_available(AllowedBinary::OpenSsl)
+        {
+            let has_cert = webserver
+                .ssl
+                .site_cert_paths(&domain)
+                .map(|(c, k)| c.is_file() && k.is_file())
+                .unwrap_or(false);
+            if !has_cert {
+                let _ = webserver.ssl.issue_self_signed(&domain, &aliases, 3650).await;
+            }
+        } else {
+            return Err(err);
+        }
     }
 
     let updated_cert = webserver.ssl.read_cert_status(&domain).await?;

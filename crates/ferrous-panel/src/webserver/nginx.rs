@@ -365,16 +365,31 @@ impl WebServerEngine for NginxEngine {
         let acme_block = format!(
             "    location ^~ /.well-known/acme-challenge/ {{\n        root {acme_str};\n        default_type \"text/plain\";\n        try_files $uri =404;\n    }}"
         );
+        let pma_block = concat!(
+            "    location = /phpadmin {\n",
+            "        return 301 $scheme://$http_host/phpadmin/;\n",
+            "    }\n\n",
+            "    location ^~ /phpadmin/ {\n",
+            "        proxy_pass http://127.0.0.1:888;\n",
+            "        proxy_set_header Host $http_host;\n",
+            "        proxy_set_header X-Real-IP $remote_addr;\n",
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n",
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n",
+            "    }\n\n",
+            "    location = /phpmyadmin {\n",
+            "        return 301 $scheme://$http_host/phpmyadmin/;\n",
+            "    }\n\n",
+            "    location ^~ /phpmyadmin/ {\n",
+            "        proxy_pass http://127.0.0.1:888;\n",
+            "        proxy_set_header Host $http_host;\n",
+            "        proxy_set_header X-Real-IP $remote_addr;\n",
+            "        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n",
+            "        proxy_set_header X-Forwarded-Proto $scheme;\n",
+            "    }"
+        );
 
-        let ipv6 = host_supports_ipv6();
-        let listen_80_v6 = if ipv6 { "    listen [::]:80;\n" } else { "" };
-        let listen_443_v6 = if ipv6 { "    listen [::]:443 ssl http2;\n" } else { "" };
         let quic_directives = if spec.http3_quic {
-            if ipv6 {
-                "    listen 443 quic;\n    listen [::]:443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n"
-            } else {
-                "    listen 443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n"
-            }
+            "    listen 443 quic;\n    listen [::]:443 quic;\n    add_header Alt-Svc 'h3=\":443\"; ma=86400' always;\n"
         } else {
             ""
         };
@@ -384,50 +399,16 @@ impl WebServerEngine for NginxEngine {
             let http_body = if spec.redirect_https {
                 "    location / {\n        return 301 https://$host$request_uri;\n    }".to_string()
             } else {
-                format!("{rate_limit_directive}{extra_locations}{route_block}")
+                format!("{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}")
             };
 
             format!(
-                "# Managed by FerrousPanel (NginxEngine) — {domain}\n\
-{rate_zone_header}server {{\n\
-    listen 80;\n\
-{listen_80_v6}    server_name {server_names};\n\
-\n\
-{acme_block}\n\
-\n\
-{http_body}\n\
-}}\n\
-\n\
-server {{\n\
-    listen 443 ssl http2;\n\
-{listen_443_v6}{quic_directives}    server_name {server_names};\n\
-\n\
-    ssl_certificate {cert_dir}/fullchain.pem;\n\
-    ssl_certificate_key {cert_dir}/privkey.pem;\n\
-    ssl_protocols TLSv1.2 TLSv1.3;\n\
-    ssl_prefer_server_ciphers on;\n\
-\n\
-    root {doc_root};\n\
-    server_tokens off;\n\
-\n\
-{rate_limit_directive}{extra_locations}{route_block}\n\
-}}\n",
+                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n    listen 80;\n    listen [::]:80;\n    server_name {server_names};\n\n{acme_block}\n\n{http_body}\n}}\n\nserver {{\n    listen 443 ssl http2;\n    listen [::]:443 ssl http2;\n{quic_directives}    server_name {server_names};\n\n    ssl_certificate {cert_dir}/fullchain.pem;\n    ssl_certificate_key {cert_dir}/privkey.pem;\n    ssl_protocols TLSv1.2 TLSv1.3;\n    ssl_prefer_server_ciphers on;\n\n    root {doc_root};\n    server_tokens off;\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
                 domain = spec.domain.as_str(),
             )
         } else {
             format!(
-                "# Managed by FerrousPanel (NginxEngine) — {domain}\n\
-{rate_zone_header}server {{\n\
-    listen 80;\n\
-{listen_80_v6}    server_name {server_names};\n\
-\n\
-    root {doc_root};\n\
-    server_tokens off;\n\
-\n\
-{acme_block}\n\
-\n\
-{rate_limit_directive}{extra_locations}{route_block}\n\
-}}\n",
+                "# Managed by FerrousPanel (NginxEngine) — {domain}\n{rate_zone_header}server {{\n    listen 80;\n    listen [::]:80;\n    server_name {server_names};\n\n    root {doc_root};\n    server_tokens off;\n\n{acme_block}\n\n{pma_block}\n\n{rate_limit_directive}{extra_locations}{route_block}\n}}\n",
                 domain = spec.domain.as_str(),
             )
         };
@@ -448,6 +429,21 @@ server {{\n\
                     "HTTP/3 QUIC is not supported by the installed Nginx binary (missing --with-http_v3_module). Disable http3Quic."
                         .to_string(),
                 ));
+            }
+            if matches!(spec.mode, SiteMode::PhpFpm { .. }) {
+                if let Some(nginx_root) = self.paths.sites_available.parent() {
+                    let snippet_path = nginx_root.join("snippets/fastcgi-php.conf");
+                    if !snippet_path.is_file() && nginx_root == Path::new("/etc/nginx") {
+                        let snippet_body = "# Managed by FerrousPanel — fallback FastCGI PHP snippet\n\
+fastcgi_split_path_info ^(.+?\\.php)(/.*)$;\n\
+try_files $fastcgi_script_name =404;\n\
+set $path_info $fastcgi_path_info;\n\
+fastcgi_param PATH_INFO $path_info;\n\
+fastcgi_index index.php;\n\
+include fastcgi.conf;\n";
+                        let _ = atomic_write_file(&snippet_path, snippet_body.as_bytes(), 0o644);
+                    }
+                }
             }
             let (file_snap, link_snap) = self.stage_site_unvalidated(spec)?;
 
@@ -605,36 +601,18 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: 
                 "try_files $uri $uri.html $uri/ =404;".to_string()
             };
             format!(
-                "    index {idx};\n\
-    location ~* \\.(?:mjs|js|css|wasm|woff2|woff|svg|webp|avif)$ {{\n\
-        expires 30d;\n\
-        add_header Cache-Control \"public, max-age=2592000\";\n\
-        add_header X-Content-Type-Options \"nosniff\" always;\n\
-        try_files $uri =404;\n\
-    }}\n\
-    location / {{\n\
-        {try_rule}\n\
-    }}"
+                "    index {idx};\n    location ~* \\.(?:mjs|js|css|wasm|woff2|woff|svg|webp|avif)$ {{\n        expires 30d;\n        add_header Cache-Control \"public, max-age=2592000\";\n        add_header X-Content-Type-Options \"nosniff\" always;\n        try_files $uri =404;\n    }}\n    location / {{\n        {try_rule}\n    }}"
             )
         }
         SiteMode::ReverseProxy { upstream } => {
             let url = upstream.http_url();
             let ws_block = if websocket_enabled {
-                "\n        proxy_set_header Upgrade $http_upgrade;\n\
-        proxy_set_header Connection \"upgrade\";\n\
-        proxy_read_timeout 3600s;"
+                "\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n        proxy_read_timeout 3600s;"
             } else {
                 ""
             };
             format!(
-                "    location / {{\n\
-        proxy_pass {url};\n\
-        proxy_http_version 1.1;\n\
-        proxy_set_header Host $host;\n\
-        proxy_set_header X-Real-IP $remote_addr;\n\
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
-        proxy_set_header X-Forwarded-Proto $scheme;{ws_block}\n\
-    }}"
+                "    location / {{\n        proxy_pass {url};\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;{ws_block}\n    }}"
             )
         }
         SiteMode::PhpFpm {
@@ -644,30 +622,9 @@ fn render_nginx_route_block(mode: &SiteMode, doc_root: &str, websocket_enabled: 
             let idx = index_file.as_str();
             let sock = php_version.socket_path();
             format!(
-                "    index {idx} index.html;\n\
-    location / {{\n\
-        try_files $uri $uri/ /{idx}?$query_string;\n\
-    }}\n\
-    location ~ \\.php$ {{\n\
-        include snippets/fastcgi-php.conf;\n\
-        fastcgi_param SCRIPT_FILENAME {doc_root}$fastcgi_script_name;\n\
-        fastcgi_pass unix:{sock};\n\
-    }}\n\
-    location ~ /\\.ht {{\n\
-        deny all;\n\
-    }}"
+                "    index {idx} index.html;\n    location / {{\n        try_files $uri $uri/ /{idx}?$query_string;\n    }}\n    location ~ \\.php$ {{\n        include snippets/fastcgi-php.conf;\n        fastcgi_param SCRIPT_FILENAME {doc_root}$fastcgi_script_name;\n        fastcgi_pass unix:{sock};\n    }}\n    location ~ /\\.ht {{\n        deny all;\n    }}"
             )
         }
         SiteMode::Unsupported => String::new(),
     }
 }
-
-/// Returns `false` only when Linux explicitly disables IPv6 (`disable_ipv6 == 1`),
-/// preventing `nginx -t` / bind failures on IPv4-only VPS nodes while preserving IPv6 listen directives elsewhere.
-fn host_supports_ipv6() -> bool {
-    match std::fs::read_to_string("/proc/sys/net/ipv6/conf/all/disable_ipv6") {
-        Ok(val) => val.trim() != "1",
-        Err(_) => true,
-    }
-}
-

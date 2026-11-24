@@ -99,6 +99,11 @@ fn render_wp_config_from_sample(
 if ( ( isset( $_SERVER['HTTP_X_FORWARDED_PROTO'] ) && strpos( $_SERVER['HTTP_X_FORWARDED_PROTO'], 'https' ) !== false )\n\
   || ( isset( $_SERVER['HTTP_CF_VISITOR'] ) && strpos( $_SERVER['HTTP_CF_VISITOR'], 'https' ) !== false ) ) {\n\
     $_SERVER['HTTPS'] = 'on';\n\
+}\n\
+if ( ! defined( 'WP_HOME' ) && ! defined( 'WP_SITEURL' ) && ! empty( $_SERVER['HTTP_HOST'] ) ) {\n\
+    $fp_scheme = ( ! empty( $_SERVER['HTTPS'] ) && $_SERVER['HTTPS'] !== 'off' ) ? 'https' : 'http';\n\
+    define( 'WP_HOME', $fp_scheme . '://' . $_SERVER['HTTP_HOST'] );\n\
+    define( 'WP_SITEURL', $fp_scheme . '://' . $_SERVER['HTTP_HOST'] );\n\
 }\n";
     if let Some(pos) = cfg.find("require_once") {
         cfg.insert_str(pos, proxy_https_snippet);

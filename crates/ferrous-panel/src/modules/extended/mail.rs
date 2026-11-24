@@ -736,7 +736,7 @@ pub async fn add_mail_domain(
     }
     let item = build_mail_domain_item(config, executor, &domain, 0).await?;
     mail.domains.insert(0, item);
-    sync_mail_virtual_files_live(config, &mail, executor, true).await?;
+    sync_mail_virtual_files_live(config, &mail, executor, false).await?;
     store.put_json(KV_MAIL_SERVER, &mail)?;
     Ok(mail)
 }

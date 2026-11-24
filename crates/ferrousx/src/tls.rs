@@ -105,14 +105,26 @@ impl DynamicSniResolver {
 
 impl ResolvesServerCert for DynamicSniResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let sni = client_hello
-            .server_name()?
+        let guard = self.certs.read().ok()?;
+        let Some(raw_sni) = client_hello.server_name() else {
+            return guard.values().next().cloned();
+        };
+        let sni = raw_sni
             .trim()
             .trim_end_matches('.')
             .to_ascii_lowercase();
-        let guard = self.certs.read().ok()?;
         if let Some(exact) = guard.get(&sni) {
             return Some(Arc::clone(exact));
+        }
+        if let Some(stripped) = sni.strip_prefix("www.") {
+            if let Some(cert) = guard.get(stripped) {
+                return Some(Arc::clone(cert));
+            }
+        } else {
+            let with_www = format!("www.{sni}");
+            if let Some(cert) = guard.get(&with_www) {
+                return Some(Arc::clone(cert));
+            }
         }
         if let Some((_, parent)) = sni.split_once('.') {
             if !parent.is_empty() {
@@ -122,7 +134,7 @@ impl ResolvesServerCert for DynamicSniResolver {
                 }
             }
         }
-        None
+        guard.values().next().cloned()
     }
 }
 

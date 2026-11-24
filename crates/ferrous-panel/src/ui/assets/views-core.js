@@ -44,7 +44,7 @@ export async function renderOverview(container, renderSeq = state.renderSeq) {
 
   const activeEngine = ws?.frontendEngine || ws?.frontend_engine || 'nginx';
   const loadAvg = Array.isArray(tel.loadAverage) ? tel.loadAverage.map((v) => Number(v).toFixed(2)).join(' / ') : '0.00 / 0.00 / 0.00';
-  const caps = state.capabilities?.capabilities || [];
+  const caps = state.capabilities?.capabilities || state.capabilities?.features || [];
 
   container.innerHTML = `
     <div class="page-head">
@@ -157,7 +157,7 @@ export async function renderOverview(container, renderSeq = state.renderSeq) {
               caps.length
                 ? caps.map((c) => `
                   <tr>
-                    <td><strong>${esc(c.label || c.id)}</strong></td>
+                    <td><strong>${esc(c.label || c.name || c.id)}</strong></td>
                     <td><span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span></td>
                     <td>${esc(c.reason || '—')}</td>
                     <td class="mono">${esc(c.fixHint || '—')}</td>
@@ -482,8 +482,8 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
             </div>
             <div class="field">
               <label class="checkbox-row">
-                <input type="checkbox" name="enableSsl" />
-                <span>Bật HTTPS / SSL ngay (yêu cầu tên miền đã trỏ DNS về máy chủ)</span>
+                <input type="checkbox" name="enableSsl" checked />
+                <span>Bật HTTPS / SSL ngay (tự động cấp Let's Encrypt hoặc chứng chỉ OpenSSL X.509 cho Cloudflare Full SSL)</span>
               </label>
             </div>
             <div id="oc-progress-note" class="muted" style="font-size:12px;margin-top:8px;display:none"></div>
@@ -619,7 +619,7 @@ function openSslManagerModal(app, container) {
           : (cert.status === 'expiring_soon' ? 'st-warn' : (cert.status === 'expired' ? 'st-err' : 'st-muted'));
 
         body.innerHTML = `
-          <div id="ssl-feedback"></div>
+          <div id="ssl-feedback" class="${info.notice ? 'alert-warn' : ''}">${info.notice ? esc(info.notice) : ''}</div>
 
           <div class="kv-grid" style="margin-bottom:14px">
             <div class="kv-item">
@@ -872,7 +872,7 @@ function openSslManagerModal(app, container) {
                 forceRenewal: fd.get('forceRenewal') === 'on',
                 skipDnsCheck: fd.get('skipDnsCheck') === 'on',
               }, { timeoutMs: 210000, keepAlive: true });
-              showOk(`Đã cấp & kích hoạt SSL Let's Encrypt thật cho ${info.domain}.`);
+              toast(info.notice || `Đã cấp & kích hoạt SSL Let's Encrypt thật cho ${info.domain}.`);
               paint();
               await renderApps(container);
             } catch (err) {
@@ -1328,7 +1328,7 @@ function openDeployModal(container) {
         </div>
       </div>
       <div class="row" style="margin:8px 0 14px">
-        <label class="checkbox-row"><input type="checkbox" name="sslEnabled" /><span>Tự động cấp SSL Let's Encrypt</span></label>
+        <label class="checkbox-row"><input type="checkbox" name="sslEnabled" checked /><span>Tự động cấp SSL / HTTPS</span></label>
         <label class="checkbox-row"><input type="checkbox" name="websocketEnabled" checked /><span>Hỗ trợ WebSocket</span></label>
         <label class="checkbox-row"><input type="checkbox" name="http3Quic" /><span>HTTP/3 QUIC</span></label>
       </div>

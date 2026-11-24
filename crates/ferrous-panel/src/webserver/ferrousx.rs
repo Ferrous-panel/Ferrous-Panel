@@ -528,14 +528,22 @@ index_file = \"{}\"\n\
 spa_fallback = {spa_fallback}\n",
                 index_file.as_str()
             ),
-            SiteMode::ReverseProxy { upstream } => format!(
-                "[handler]\n\
+            SiteMode::ReverseProxy { upstream } => {
+                let ws_line = if spec.websocket_enabled {
+                    "websocket = true\n"
+                } else {
+                    ""
+                };
+                format!(
+                    "[handler]\n\
 kind = \"reverse_proxy\"\n\
 upstream = \"{}\"\n\
 pass_host_header = true\n\
-forwarded_headers = true\n",
-                upstream.http_url()
-            ),
+forwarded_headers = true\n\
+{ws_line}",
+                    upstream.http_url()
+                )
+            }
             SiteMode::PhpFpm {
                 php_version,
                 index_file,

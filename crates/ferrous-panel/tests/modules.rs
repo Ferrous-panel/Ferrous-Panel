@@ -689,7 +689,9 @@ fn apps_systemd_lifecycle_config_live_http_and_501_stubs() -> Result<()> {
         ensure(unit_file_path.is_file(), "systemd .service unit must be written")?;
         let unit_text = std::fs::read_to_string(&unit_file_path)?;
         ensure(
-            unit_text.contains("MemoryMax=512M") && unit_text.contains("ExecStart=/usr/bin/node server.js"),
+            unit_text.contains("MemoryMax=512M")
+                && (unit_text.contains("ExecStart=/usr/bin/node server.js")
+                    || unit_text.contains("ExecStart=/usr/local/bin/bun server.js")),
             "systemd unit must include MemoryMax and ExecStart",
         )?;
 

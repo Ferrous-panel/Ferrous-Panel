@@ -659,21 +659,30 @@ impl SslManager {
         skip_dns_check: bool,
     ) -> BoxFuture<'a, Result<SiteSslStatus, PanelError>> {
         Box::pin(async move {
-            self.ensure_certbot_installed(auto_install_certbot).await?;
+            self.ensure_certbot_installed(
+                auto_install_certbot || self.executor.is_binary_available(AllowedBinary::AptGet),
+            )
+            .await?;
 
-            // Pre-check DNS A/AAAA resolution for primary domain and aliases before burning Let's Encrypt rate limit.
-            if !skip_dns_check {
+            // Pre-check DNS A/AAAA resolution for primary domain and aliases:
+            // keep only aliases that resolve in DNS so an unconfigured `www.` alias does not block
+            // issuing Let's Encrypt for the primary domain, and allow Certbot to attempt ACME HTTP-01
+            // even if local /etc/hosts maps the primary domain to 127.0.0.1.
+            let resolvable_aliases: Vec<Domain> = if skip_dns_check {
+                aliases.to_vec()
+            } else {
                 let preflight = self.check_dns_preflight(domain, aliases).await;
-                for item in &preflight {
-                    if !item.resolved {
-                        return Err(PanelError::Conflict(format!(
-                            "Kiểm tra DNS thất bại cho '{}': {}. Hãy trỏ bản ghi A/AAAA về IP máy chủ (hoặc đánh dấu 'Bỏ qua DNS Preflight' nếu dùng Split-DNS / Cloudflare) trước khi cấp Let's Encrypt.",
-                            item.domain,
-                            item.warning.as_deref().unwrap_or("chưa phân giải được")
-                        )));
-                    }
-                }
-            }
+                aliases
+                    .iter()
+                    .filter(|alias| {
+                        preflight
+                            .iter()
+                            .find(|item| item.domain == alias.as_str())
+                            .is_none_or(|item| item.resolved)
+                    })
+                    .cloned()
+                    .collect()
+            };
 
             let _ = self.ensure_acme_webroot_permissions()?;
 
@@ -727,7 +736,7 @@ impl SslManager {
                 }
             };
 
-            let mut owned_args = match self.build_certbot_args(domain, aliases, email) {
+            let mut owned_args = match self.build_certbot_args(domain, &resolvable_aliases, email) {
                 Ok(args) => args,
                 Err(err) => {
                     restore_backup();
@@ -938,9 +947,13 @@ impl SslManager {
             let days_str = days.to_string();
 
             let mut san_entries = vec![format!("DNS:{}", domain.as_str())];
+            if !domain.as_str().starts_with("www.") {
+                san_entries.push(format!("DNS:www.{}", domain.as_str()));
+            }
             for alias in aliases {
-                if alias.as_str() != domain.as_str() {
-                    san_entries.push(format!("DNS:{}", alias.as_str()));
+                let entry = format!("DNS:{}", alias.as_str());
+                if !san_entries.contains(&entry) {
+                    san_entries.push(entry);
                 }
             }
             let san_ext = format!("subjectAltName={}", san_entries.join(","));
@@ -979,6 +992,12 @@ impl SslManager {
                         &tmp_cert_str,
                         "-subj",
                         &subj,
+                        "-addext",
+                        "basicConstraints=critical,CA:FALSE",
+                        "-addext",
+                        "keyUsage=critical,digitalSignature,keyEncipherment",
+                        "-addext",
+                        "extendedKeyUsage=serverAuth",
                         "-addext",
                         &san_ext,
                     ],
@@ -1159,10 +1178,10 @@ WantedBy=timers.target\n"
                                 "LoadState" => load_state = val.to_string(),
                                 "UnitFileState" => unit_file_state = val.to_string(),
                                 "ActiveState" => active_state = val.to_string(),
-                                "NextElapseUSecRealtime" => {
-                                    if !val.is_empty() && val != "n/a" {
-                                        next_run = Some(val.to_string());
-                                    }
+                                "NextElapseUSecRealtime"
+                                    if !val.is_empty() && val != "n/a" =>
+                                {
+                                    next_run = Some(val.to_string());
                                 }
                                 _ => {}
                             }

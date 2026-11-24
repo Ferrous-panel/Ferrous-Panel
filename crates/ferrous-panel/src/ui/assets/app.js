@@ -97,7 +97,7 @@ export async function loadCapabilities(force = false) {
 }
 
 export function capOf(id) {
-  const list = state.capabilities?.capabilities || [];
+  const list = state.capabilities?.capabilities || state.capabilities?.features || [];
   return list.find((c) => c.id === id) || null;
 }
 
@@ -115,7 +115,7 @@ export function capBannerHtml(ids) {
     .map((c) => `
       <div class="cap-banner ${esc(c.status)}">
         <div class="cap-banner-head">
-          <strong>${esc(c.label || c.id)}</strong>
+          <strong>${esc(c.label || c.name || c.id)}</strong>
           <span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span>
         </div>
         <div>${esc(c.reason || 'Tính năng chưa sẵn sàng trên máy chủ này.')}</div>
