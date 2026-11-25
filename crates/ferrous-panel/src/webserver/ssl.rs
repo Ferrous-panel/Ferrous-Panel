@@ -138,12 +138,148 @@ impl SslManager {
         Ok((fullchain, privkey))
     }
 
-    /// Returns `true` when both `fullchain.pem` and `privkey.pem` exist on disk for `domain`.
+    /// Returns `true` when both `fullchain.pem` and `privkey.pem` exist on disk for `domain`
+    /// (reconciling Certbot `archive/<domain>` or `live/<domain>-0001` symlinks if needed).
     #[must_use]
     pub fn site_cert_ready(&self, domain: &Domain) -> bool {
-        self.site_cert_paths(domain)
+        if self
+            .site_cert_paths(domain)
             .map(|(cert, key)| cert.is_file() && key.is_file())
             .unwrap_or(false)
+        {
+            return true;
+        }
+        self.reconcile_letsencrypt_live_files(domain)
+    }
+
+    /// Reconciles `/etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem` when Certbot stored
+    /// valid certificates in `live/<domain>-0001` (lineage suffix) or `archive/<domain>/fullchainN.pem`
+    /// while `live/<domain>` was absent or previously overwritten.
+    pub fn reconcile_letsencrypt_live_files(&self, domain: &Domain) -> bool {
+        let Ok((dst_cert, dst_key)) = self.site_cert_paths(domain) else {
+            return false;
+        };
+        if dst_cert.is_file() && dst_key.is_file() {
+            return true;
+        }
+        let live_base = self.paths.letsencrypt_live.as_path();
+        let dom = domain.as_str();
+        let prefix = format!("{dom}-");
+
+        let mut candidate_pair: Option<(PathBuf, PathBuf)> = None;
+
+        // 1. Check `live/<domain>-*` directories (newest suffix first, e.g. -0002 before -0001).
+        if let Ok(entries) = std::fs::read_dir(live_base) {
+            let mut suffixed_dirs: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.starts_with(&prefix))
+                })
+                .collect();
+            suffixed_dirs.sort();
+            suffixed_dirs.reverse();
+            for dir in suffixed_dirs {
+                let c = dir.join("fullchain.pem");
+                let k = dir.join("privkey.pem");
+                if c.is_file() && k.is_file() {
+                    candidate_pair = Some((c, k));
+                    break;
+                }
+            }
+        }
+
+        // 2. Check `archive/<domain>` and `archive/<domain>-*` for highest-numbered fullchain<N>.pem + privkey<N>.pem.
+        if candidate_pair.is_none() {
+            if let Some(le_root) = live_base.parent() {
+                let archive_root = le_root.join("archive");
+                if let Ok(entries) = std::fs::read_dir(&archive_root) {
+                    let mut arch_dirs: Vec<PathBuf> = entries
+                        .flatten()
+                        .map(|e| e.path())
+                        .filter(|p| {
+                            p.is_dir()
+                                && p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .is_some_and(|n| n == dom || n.starts_with(&prefix))
+                        })
+                        .collect();
+                    arch_dirs.sort();
+                    arch_dirs.reverse();
+                    for dir in arch_dirs {
+                        if let Some(pair) = highest_numbered_archive_pair(&dir) {
+                            candidate_pair = Some(pair);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let Some((src_cert, src_key)) = candidate_pair else {
+            return false;
+        };
+
+        let canon_cert = std::fs::canonicalize(&src_cert).unwrap_or(src_cert);
+        let canon_key = std::fs::canonicalize(&src_key).unwrap_or(src_key);
+        let Some(target_dir) = dst_cert.parent() else {
+            return false;
+        };
+        if std::fs::create_dir_all(target_dir).is_err() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::set_permissions(target_dir, std::fs::Permissions::from_mode(0o755));
+        }
+        let _ = std::fs::remove_file(&dst_cert);
+        let _ = std::fs::remove_file(&dst_key);
+
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&canon_cert, &dst_cert).is_ok()
+            && std::os::unix::fs::symlink(&canon_key, &dst_key).is_ok();
+        #[cfg(not(unix))]
+        let linked = false;
+
+        if !linked {
+            let Ok(cert_bytes) = std::fs::read(&canon_cert) else {
+                return false;
+            };
+            let Ok(key_bytes) = std::fs::read(&canon_key) else {
+                return false;
+            };
+            if atomic_write_file(&dst_cert, &cert_bytes, 0o644).is_err()
+                || atomic_write_file(&dst_key, &key_bytes, 0o600).is_err()
+            {
+                return false;
+            }
+        } else {
+            // Also link cert.pem and chain.pem when restoring from archive/<domain>/fullchain<N>.pem so `certbot renew` stays valid.
+            #[cfg(unix)]
+            if let (Some(arch_dir), Some(fname)) = (
+                canon_cert.parent(),
+                canon_cert.file_name().and_then(|n| n.to_str()),
+            ) {
+                if let Some(num_suffix) = fname
+                    .strip_prefix("fullchain")
+                    .and_then(|s| s.strip_suffix(".pem"))
+                {
+                    for stem in ["cert", "chain"] {
+                        let extra_src = arch_dir.join(format!("{stem}{num_suffix}.pem"));
+                        let extra_dst = target_dir.join(format!("{stem}.pem"));
+                        if extra_src.is_file() && !extra_dst.exists() {
+                            let _ = std::fs::remove_file(&extra_dst);
+                            let _ = std::os::unix::fs::symlink(&extra_src, &extra_dst);
+                        }
+                    }
+                }
+            }
+        }
+
+        dst_cert.is_file() && dst_key.is_file()
     }
 
     /// Self-healing guard used before writing SSL vhosts: if the certificate pair is missing on a
@@ -198,6 +334,7 @@ impl SslManager {
         domain: &'a Domain,
     ) -> BoxFuture<'a, Result<SiteSslStatus, PanelError>> {
         Box::pin(async move {
+            let _ = self.reconcile_letsencrypt_live_files(domain);
             let (cert_path, key_path) = self.site_cert_paths(domain)?;
             let cert_str = cert_path.display().to_string();
             let key_str = key_path.display().to_string();
@@ -739,13 +876,16 @@ impl SslManager {
             let is_dangling_symlink =
                 cert_path.symlink_metadata().is_ok() && !cert_path.exists();
             let live_dir = cert_path.parent().map(|p| p.to_path_buf());
-            let renewal_missing = self
+            let le_root = self
                 .paths
                 .letsencrypt_live
                 .as_path()
                 .parent()
-                .map(|le_root| {
-                    let renewal_dir = le_root.join("renewal");
+                .map(|p| p.to_path_buf());
+            let renewal_missing = le_root
+                .as_ref()
+                .map(|root| {
+                    let renewal_dir = root.join("renewal");
                     renewal_dir.is_dir()
                         && !renewal_dir
                             .join(format!("{}.conf", domain.as_str()))
@@ -767,6 +907,23 @@ impl SslManager {
                 if let Some(ref parent) = live_dir {
                     let _ = std::fs::remove_dir_all(parent);
                 }
+                // If Certbot previously stored a real certificate in archive/<domain> or live/<domain>-0001,
+                // restore its symlinks into live/<domain> so Certbot sees a valid lineage.
+                if !self.reconcile_letsencrypt_live_files(domain) {
+                    // Otherwise remove any orphaned renewal/<domain>.conf or empty archive/<domain>
+                    // so Certbot does not exit 0 with "no action taken" or fail on an incomplete lineage.
+                    if let Some(ref root) = le_root {
+                        let renewal_conf =
+                            root.join("renewal").join(format!("{}.conf", domain.as_str()));
+                        let _ = std::fs::remove_file(&renewal_conf);
+                        let archive_dir = root.join("archive").join(domain.as_str());
+                        if highest_numbered_archive_pair(&archive_dir).is_none() {
+                            let _ = std::fs::remove_dir_all(&archive_dir);
+                        }
+                    }
+                }
+            } else {
+                let _ = self.reconcile_letsencrypt_live_files(domain);
             }
 
             let restore_backup = || {
@@ -792,7 +949,21 @@ impl SslManager {
             owned_args.push("--cert-name".to_string());
             owned_args.push(domain.as_str().to_string());
             owned_args.push("--expand".to_string());
-            if force_renewal {
+            let has_any_renewal_conf = le_root
+                .as_ref()
+                .and_then(|root| std::fs::read_dir(root.join("renewal")).ok())
+                .map(|entries| {
+                    let dom = domain.as_str();
+                    let pref = format!("{dom}-");
+                    entries.flatten().any(|e| {
+                        e.file_name()
+                            .to_str()
+                            .and_then(|n| n.strip_suffix(".conf"))
+                            .is_some_and(|stem| stem == dom || stem.starts_with(&pref))
+                    })
+                })
+                .unwrap_or(false);
+            if force_renewal || (!cert_path.is_file() && has_any_renewal_conf) {
                 owned_args.push("--force-renewal".to_string());
             } else {
                 owned_args.push("--keep-until-expiring".to_string());
@@ -811,22 +982,23 @@ impl SslManager {
                 }
             };
 
-            // Check if Certbot actually wrote valid certificate files even if a post-hook exited non-zero.
-            let cert_written_by_certbot = cert_path.is_file()
-                && key_path.is_file()
-                && cert_path
-                    .symlink_metadata()
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false);
+            // Reconcile in case Certbot wrote into `live/<domain>-0001` or updated `archive/<domain>`.
+            let _ = self.reconcile_letsencrypt_live_files(domain);
 
-            if !out.success && !cert_written_by_certbot {
+            let cert_present_after_certbot = cert_path.is_file() && key_path.is_file();
+
+            if !cert_present_after_certbot {
                 restore_backup();
                 let reason = if !out.stderr.trim().is_empty() {
                     out.stderr.trim().to_string()
                 } else if !out.stdout.trim().is_empty() {
                     out.stdout.trim().to_string()
                 } else {
-                    "certbot failed without diagnostic output".to_string()
+                    format!(
+                        "certbot exited ({:?}) without writing certificate files to {}",
+                        out.exit_code,
+                        cert_path.display()
+                    )
                 };
                 return Err(PanelError::CommandFailed {
                     binary: AllowedBinary::Certbot.label(),
@@ -850,7 +1022,19 @@ impl SslManager {
                 let _ = self.install_renewal_timer().await;
             }
 
-            self.read_cert_status(domain).await
+            let status = self.read_cert_status(domain).await?;
+            if !status.present {
+                restore_backup();
+                return Err(PanelError::CommandFailed {
+                    binary: AllowedBinary::Certbot.label(),
+                    exit_code: out.exit_code,
+                    stderr: format!(
+                        "certificate at {} could not be verified by OpenSSL after Certbot run",
+                        cert_path.display()
+                    ),
+                });
+            }
+            Ok(status)
         })
     }
 
@@ -1345,7 +1529,9 @@ pub fn parse_openssl_x509_output(
         .map(parse_openssl_gmt_time)
         .transpose()?
         .ok_or_else(|| {
-            PanelError::Internal("openssl x509 output did not contain valid notAfter timestamp".to_string())
+            PanelError::Validation(
+                "openssl x509 output did not contain valid notAfter timestamp".to_string(),
+            )
         })?;
 
     let days_remaining = (not_after_dt - now).num_days();
@@ -1376,6 +1562,37 @@ pub fn parse_openssl_x509_output(
     })
 }
 
+fn highest_numbered_archive_pair(archive_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let entries = std::fs::read_dir(archive_dir).ok()?;
+    let mut best: Option<(u32, PathBuf, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(num_str) = name
+            .strip_prefix("fullchain")
+            .and_then(|s| s.strip_suffix(".pem"))
+        else {
+            continue;
+        };
+        let Ok(num) = num_str.parse::<u32>() else {
+            continue;
+        };
+        let key_candidate = archive_dir.join(format!("privkey{num}.pem"));
+        if path.is_file() && key_candidate.is_file() {
+            let replace = match best {
+                Some((prev_num, _, _)) => num > prev_num,
+                None => true,
+            };
+            if replace {
+                best = Some((num, path, key_candidate));
+            }
+        }
+    }
+    best.map(|(_, c, k)| (c, k))
+}
+
 fn parse_openssl_gmt_time(raw: &str) -> Result<DateTime<Utc>, PanelError> {
     let normalized = raw
         .split_whitespace()
@@ -1389,7 +1606,7 @@ fn parse_openssl_gmt_time(raw: &str) -> Result<DateTime<Utc>, PanelError> {
     let naive = NaiveDateTime::parse_from_str(without_tz, "%b %e %H:%M:%S %Y")
         .or_else(|_| NaiveDateTime::parse_from_str(without_tz, "%b %d %H:%M:%S %Y"))
         .map_err(|_| {
-            PanelError::Internal(format!("unable to parse certificate timestamp: {raw}"))
+            PanelError::Validation(format!("unable to parse certificate timestamp: {raw}"))
         })?;
 
     Ok(naive.and_utc())

@@ -548,8 +548,10 @@ else
     echo -e "${CYAN}[*] Syncing source repository (${REPO_SLUG}@${GIT_BRANCH}) to ${SRC_DIR}...${NC}"
     mkdir -p "$(dirname "${SRC_DIR}")"
     if [ -d "${SRC_DIR}/.git" ]; then
-      git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
-      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+      git -C "${SRC_DIR}" fetch --depth 1 --force origin "${GIT_BRANCH}:refs/remotes/origin/${GIT_BRANCH}" || \
+        git -C "${SRC_DIR}" fetch --depth 1 origin "${GIT_BRANCH}"
+      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}" || \
+        git -C "${SRC_DIR}" reset --hard FETCH_HEAD
     else
       rm -rf "${SRC_DIR}"
       git clone --depth 1 --branch "${GIT_BRANCH}" "https://github.com/${REPO_SLUG}.git" "${SRC_DIR}"

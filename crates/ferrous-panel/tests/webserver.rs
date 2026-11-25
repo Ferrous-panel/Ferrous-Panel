@@ -972,6 +972,40 @@ subject=CN = example.com
     )?;
     ensure_eq(&parsed_expired.status, &SslCertState::Expired, "expired cert state")?;
 
+    // Verify Certbot lineage reconciliation (`archive/<domain>/fullchainN.pem` and `live/<domain>-0001/`)
+    let arch_dir = ws.path().join("letsencrypt/archive/wp.example.com");
+    std::fs::create_dir_all(&arch_dir)?;
+    std::fs::write(arch_dir.join("fullchain1.pem"), b"CERT_V1")?;
+    std::fs::write(arch_dir.join("privkey1.pem"), b"KEY_V1")?;
+    std::fs::write(arch_dir.join("fullchain2.pem"), b"CERT_V2")?;
+    std::fs::write(arch_dir.join("privkey2.pem"), b"KEY_V2")?;
+    let wp_dom = Domain::parse("wp.example.com")?;
+    ensure(
+        ssl.site_cert_ready(&wp_dom),
+        "site_cert_ready must reconcile archive/<domain>/fullchain2.pem into live/<domain>",
+    )?;
+    let (wp_cert, wp_key) = ssl.site_cert_paths(&wp_dom)?;
+    ensure_eq(
+        &std::fs::read(&wp_cert)?,
+        &b"CERT_V2".to_vec(),
+        "reconciled highest-numbered archive cert",
+    )?;
+    ensure_eq(
+        &std::fs::read(&wp_key)?,
+        &b"KEY_V2".to_vec(),
+        "reconciled highest-numbered archive key",
+    )?;
+
+    let suffixed_live = ws.path().join("letsencrypt/live/blog.example.com-0001");
+    std::fs::create_dir_all(&suffixed_live)?;
+    std::fs::write(suffixed_live.join("fullchain.pem"), b"CERT_0001")?;
+    std::fs::write(suffixed_live.join("privkey.pem"), b"KEY_0001")?;
+    let blog_dom = Domain::parse("blog.example.com")?;
+    ensure(
+        ssl.site_cert_ready(&blog_dom),
+        "site_cert_ready must reconcile live/<domain>-0001 into live/<domain>",
+    )?;
+
     Ok(())
 }
 

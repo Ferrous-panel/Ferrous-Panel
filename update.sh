@@ -1015,12 +1015,19 @@ ensure_native_rust_ui() {
 
 PANEL_BINARY_UPDATED=false
 if [ "$UPDATE_PANEL" = true ]; then
+  if [ "$PREBUILT_ONLY" = false ] && [ ! -d "${SRC_DIR}/.git" ] && command -v git >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+    echo -e "${BLUE}${BOLD}[*] Cloning FerrousPanel source (${REPO_SLUG}@${GIT_BRANCH}) into ${SRC_DIR}...${NC}"
+    mkdir -p "$(dirname "${SRC_DIR}")"
+    rm -rf "${SRC_DIR}"
+    git clone --depth 1 --branch "${GIT_BRANCH}" "https://github.com/${REPO_SLUG}.git" "${SRC_DIR}" || true
+  fi
   if [ "$PREBUILT_ONLY" = false ] && [ -d "${SRC_DIR}/.git" ] && command -v cargo >/dev/null 2>&1; then
     echo -e "${BLUE}${BOLD}[*] Fetching latest FerrousPanel (${REPO_SLUG}@${GIT_BRANCH})...${NC}"
     OLD_COMMIT="$(git -C "${SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
     INSTALLED_COMMIT="$(cat "${PANEL_COMMIT_FILE}" 2>/dev/null || echo '')"
-    git -C "${SRC_DIR}" fetch --depth 1 --quiet origin "${GIT_BRANCH}"
-    TARGET_COMMIT="$(git -C "${SRC_DIR}" rev-parse "origin/${GIT_BRANCH}" 2>/dev/null || echo '')"
+    git -C "${SRC_DIR}" fetch --depth 1 --force --quiet origin "${GIT_BRANCH}:refs/remotes/origin/${GIT_BRANCH}" || \
+      git -C "${SRC_DIR}" fetch --depth 1 --quiet origin "${GIT_BRANCH}"
+    TARGET_COMMIT="$(git -C "${SRC_DIR}" rev-parse "origin/${GIT_BRANCH}" 2>/dev/null || git -C "${SRC_DIR}" rev-parse FETCH_HEAD 2>/dev/null || echo '')"
 
     if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_PANEL}" ] && [ -n "${TARGET_COMMIT}" ] \
        && [ "${OLD_COMMIT}" = "${TARGET_COMMIT}" ] && [ "${INSTALLED_COMMIT}" = "${TARGET_COMMIT}" ]; then
@@ -1032,7 +1039,8 @@ if [ "$UPDATE_PANEL" = true ]; then
           UI_CHANGED=false
         fi
       fi
-      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}"
+      git -C "${SRC_DIR}" reset --hard "origin/${GIT_BRANCH}" >/dev/null 2>&1 || \
+        git -C "${SRC_DIR}" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
       ensure_native_rust_ui "${SRC_DIR}" "${UI_CHANGED}"
       ensure_swap_for_build
       configure_fast_cargo_env

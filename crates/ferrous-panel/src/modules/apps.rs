@@ -2442,23 +2442,9 @@ pub async fn install_app_ssl_letsencrypt(
         }
     }
 
-    let mut cert_files_present = webserver
-        .ssl
-        .site_cert_paths(&domain)
-        .map(|(c, k)| c.is_file() && k.is_file())
-        .unwrap_or(false);
-    if !cert_files_present
-        && config.is_production()
-        && webserver
-            .executor()
-            .is_binary_available(AllowedBinary::OpenSsl)
-    {
-        if let Ok(self_cert) = webserver.ssl.issue_self_signed(&domain, &aliases, 3650).await {
-            cert_files_present = self_cert.present;
-        }
-    }
+    let cert_files_present = webserver.ssl.site_cert_ready(&domain);
 
-    // Ensure the site vhost exists and serves `/.well-known/acme-challenge/` on port 80 and 443 before running Certbot.
+    // Ensure the site vhost exists and serves `/.well-known/acme-challenge/` on port 80 (and 443 if a cert already exists) before running Certbot.
     if aliases_changed {
         app.aliases = aliases.iter().map(|d| d.as_str().to_string()).collect();
     }
@@ -2489,7 +2475,7 @@ pub async fn install_app_ssl_letsencrypt(
         }
     }
 
-    match webserver
+    let issue_err = match webserver
         .ssl
         .issue_or_renew_letsencrypt_with_options(
             &domain,
@@ -2503,46 +2489,41 @@ pub async fn install_app_ssl_letsencrypt(
     {
         Ok(issued) if issued.present => {
             apply_app_ssl_vhost(&mut app, true, force_https, store, config, webserver).await?;
-            finalize_app_ssl_install(id, store, config, webserver).await
+            return finalize_app_ssl_install(id, store, config, webserver).await;
         }
-        Ok(issued) => Err(PanelError::Internal(format!(
+        Ok(issued) => PanelError::BadGateway(format!(
             "Certbot kết thúc nhưng không tìm thấy tệp chứng chỉ tại {}",
             issued.cert_path
-        ))),
-        Err(err) => {
-            if config.is_production()
-                && webserver
-                    .executor()
-                    .is_binary_available(AllowedBinary::OpenSsl)
-            {
-                let has_cert = webserver
-                    .ssl
-                    .site_cert_paths(&domain)
-                    .map(|(c, k)| c.is_file() && k.is_file())
-                    .unwrap_or(false);
-                let fallback_ready = if has_cert {
-                    true
-                } else {
-                    webserver
-                        .ssl
-                        .issue_self_signed(&domain, &aliases, 3650)
-                        .await
-                        .map(|s| s.present)
-                        .unwrap_or(false)
-                };
-                if fallback_ready {
-                    apply_app_ssl_vhost(&mut app, true, false, store, config, webserver).await?;
-                    let mut overview =
-                        finalize_app_ssl_install(id, store, config, webserver).await?;
-                    overview.notice = Some(format!(
-                        "Đã kích hoạt ngay HTTPS (cổng 443) với chứng chỉ OpenSSL X.509 (tương thích Cloudflare Full SSL & trình duyệt). Lưu ý Let's Encrypt ACME HTTP-01 chưa cấp được do: {err}"
-                    ));
-                    return Ok(overview);
-                }
-            }
-            Err(err)
+        )),
+        Err(err) => err,
+    };
+
+    if config.is_production()
+        && webserver
+            .executor()
+            .is_binary_available(AllowedBinary::OpenSsl)
+    {
+        let fallback_ready = if webserver.ssl.site_cert_ready(&domain) {
+            true
+        } else {
+            webserver
+                .ssl
+                .issue_self_signed(&domain, &aliases, 3650)
+                .await
+                .map(|s| s.present)
+                .unwrap_or(false)
+        };
+        if fallback_ready {
+            apply_app_ssl_vhost(&mut app, true, false, store, config, webserver).await?;
+            let mut overview = finalize_app_ssl_install(id, store, config, webserver).await?;
+            overview.notice = Some(format!(
+                "Đã kích hoạt ngay HTTPS (cổng 443) với chứng chỉ OpenSSL X.509 (tương thích Cloudflare Full SSL & trình duyệt). Lưu ý Let's Encrypt ACME HTTP-01 chưa cấp được do: {issue_err}"
+            ));
+            return Ok(overview);
         }
     }
+
+    Err(issue_err)
 }
 
 async fn finalize_app_ssl_install(
@@ -2577,7 +2558,7 @@ pub async fn install_app_ssl_custom(
         .install_custom_pem(&domain, fullchain_pem, private_key_pem)
         .await?;
     if !installed.present {
-        return Err(PanelError::Internal(
+        return Err(PanelError::Validation(
             "Không thể xác minh chứng chỉ vừa cài đặt trên đĩa.".to_string(),
         ));
     }
@@ -2605,7 +2586,7 @@ pub async fn install_app_ssl_self_signed(
         .issue_self_signed(&domain, &aliases, validity_days)
         .await?;
     if !installed.present {
-        return Err(PanelError::Internal(
+        return Err(PanelError::BadGateway(
             "OpenSSL tạo chứng chỉ Self-Signed thất bại.".to_string(),
         ));
     }
