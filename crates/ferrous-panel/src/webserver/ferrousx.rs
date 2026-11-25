@@ -159,19 +159,37 @@ impl FerrousxEngine {
         self.ensure_installed()?;
         let client = self.ipc_client();
         if client.socket_available() {
-            let resp = client.send_command(action, payload).await?;
-            if resp.success {
-                tracing::info!(
-                    action = %action,
-                    latency_us = resp.latency_us,
-                    "ferrousx UDS IPC action completed"
-                );
-                return Ok(());
+            match client.send_command(action, payload).await {
+                Ok(resp) if resp.success => {
+                    tracing::info!(
+                        action = %action,
+                        latency_us = resp.latency_us,
+                        "ferrousx UDS IPC action completed"
+                    );
+                    return Ok(());
+                }
+                Ok(resp) if !self.paths.use_system_ipc_env => {
+                    return Err(PanelError::Validation(format!(
+                        "ferrousx IPC '{action}' failed: {}",
+                        resp.message
+                    )));
+                }
+                Ok(resp) => {
+                    tracing::warn!(
+                        action = %action,
+                        message = %resp.message,
+                        "ferrousx IPC returned failure; falling back to SIGHUP reload"
+                    );
+                }
+                Err(err) if !self.paths.use_system_ipc_env => return Err(err),
+                Err(err) => {
+                    tracing::warn!(
+                        action = %action,
+                        error = %err,
+                        "ferrousx IPC socket unreachable; falling back to SIGHUP reload"
+                    );
+                }
             }
-            return Err(PanelError::Validation(format!(
-                "ferrousx IPC '{action}' failed: {}",
-                resp.message
-            )));
         }
         self.reload_via_sighup().await
     }

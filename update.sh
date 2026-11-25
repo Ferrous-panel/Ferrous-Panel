@@ -499,13 +499,160 @@ detect_public_ip() {
 VPS_PUBLIC_IP="$(detect_public_ip)"
 
 setup_phpmyadmin_proxy() {
-  # Pure-Rust FerrousAdmin (/phpadmin/) is built directly into ferrous-panel (Actix-Web on 127.0.0.1:888).
-  # Stop and disable any legacy PHP phpMyAdmin service so port 888 is exclusively owned by Rust ferrous-panel.
+  # Dual-Mode Database Studio:
+  #   1. /phpadmin/   -> Pure-Rust FerrousAdmin built into ferrous-panel (127.0.0.1:888)
+  #   2. /phpmyadmin/ -> Official phpMyAdmin (phpmyadmin.net) worker on 127.0.0.1:889, proxied via 127.0.0.1:888
   if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
     systemctl disable --now ferrous-pma.service 2>/dev/null || true
   fi
   rm -f /etc/systemd/system/ferrous-pma.service /etc/ferrousx/pma-router.php 2>/dev/null || true
-  systemctl daemon-reload 2>/dev/null || true
+
+  local pma_dir="/www/server/phpmyadmin"
+  local pma_router="/www/server/ferrous-pma-router.php"
+  local pma_tmp="/var/lib/phpmyadmin/tmp"
+  mkdir -p /www/server "${pma_tmp}"
+
+  local php_bin=""
+  for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
+    if [ -x "$cand" ]; then php_bin="$cand"; break; fi
+  done
+  if { [ -z "$php_bin" ] || ! "$php_bin" -m 2>/dev/null | grep -qi '^mysqli$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^mbstring$'; } && command -v apt-get >/dev/null 2>&1; then
+    echo -e "${CYAN}[*] Installing PHP CLI extensions (mysqli, mbstring, xml, zip, curl) for Official phpMyAdmin...${NC}"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
+    for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
+      if [ -x "$cand" ]; then php_bin="$cand"; break; fi
+    done
+  fi
+
+  if [ ! -f "${pma_dir}/index.php" ]; then
+    echo -e "${CYAN}[*] Downloading Official phpMyAdmin (v5.2.2) from phpmyadmin.net...${NC}"
+    mkdir -p "${pma_dir}"
+    local pma_tar="${TMP_DIR}/phpMyAdmin-official.tar.gz"
+    if curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
+      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://github.com/phpmyadmin/phpmyadmin/releases/download/RELEASE_5_2_2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
+      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz"; then
+      tar -xzf "${pma_tar}" --strip-components=1 -C "${pma_dir}" || true
+      rm -f "${pma_tar}"
+    fi
+  fi
+
+  if [ -f "${pma_dir}/index.php" ] && [ -n "$php_bin" ]; then
+    if [ ! -f "${pma_dir}/config.inc.php" ]; then
+      local bf_secret
+      bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecret32!')"
+      cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
+<?php
+declare(strict_types=1);
+\$cfg['blowfish_secret'] = '${bf_secret}';
+\$i = 1;
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = 'localhost';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+if (file_exists('/run/mysqld/mysqld.sock')) {
+    \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
+}
+\$i++;
+\$cfg['Servers'][\$i]['verbose'] = '127.0.0.1 (TCP)';
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['port'] = '3306';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['TempDir'] = '${pma_tmp}';
+\$cfg['ExecTimeLimit'] = 300;
+\$cfg['SendErrorReports'] = 'never';
+EOF_PMA_CFG
+      chmod 0640 "${pma_dir}/config.inc.php"
+    fi
+
+    cat > "${pma_router}" <<'EOF_PMA_ROUTER'
+<?php
+if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+    $_SERVER['SERVER_PORT'] = '443';
+}
+if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
+$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if ($uri === '/phpmyadmin') {
+    header('Location: /phpmyadmin/', true, 302);
+    exit;
+}
+if (strpos($uri, '/phpmyadmin/') !== 0) {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
+}
+$rel = substr($uri, strlen('/phpmyadmin'));
+if ($rel === '' || $rel === '/') {
+    $rel = '/index.php';
+}
+$base = realpath('/www/server/phpmyadmin');
+if ($base === false) {
+    http_response_code(503);
+    echo 'Official phpMyAdmin directory missing';
+    exit;
+}
+$candidate = $base . $rel;
+$real = realpath($candidate);
+if ($real === false || strpos($real, $base) !== 0) {
+    http_response_code(404);
+    echo 'Not Found';
+    exit;
+}
+if (is_dir($real)) {
+    $idx = $real . '/index.php';
+    if (is_file($idx)) {
+        $real = $idx;
+        $rel = rtrim($rel, '/') . '/index.php';
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
+}
+$ext = strtolower(pathinfo($real, PATHINFO_EXTENSION));
+if ($ext !== 'php') {
+    return false;
+}
+chdir(dirname($real));
+$_SERVER['SCRIPT_FILENAME'] = $real;
+$_SERVER['SCRIPT_NAME'] = '/phpmyadmin' . $rel;
+$_SERVER['PHP_SELF'] = '/phpmyadmin' . $rel;
+require $real;
+EOF_PMA_ROUTER
+    chmod 0644 "${pma_router}"
+    chown -R www-data:www-data "${pma_dir}" "${pma_tmp}" 2>/dev/null || true
+
+    cat > /etc/systemd/system/ferrous-phpmyadmin.service <<EOF_PMA_UNIT
+[Unit]
+Description=FerrousPanel Official phpMyAdmin Worker (127.0.0.1:889)
+After=network.target mariadb.service mysql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=${pma_dir}
+Environment=PHP_CLI_SERVER_WORKERS=4
+ExecStart=${php_bin} -S 127.0.0.1:889 -d upload_max_filesize=128M -d post_max_size=128M -d memory_limit=256M -d max_execution_time=300 -t /www/server ${pma_router}
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF_PMA_UNIT
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now ferrous-phpmyadmin.service >/dev/null 2>&1 || systemctl restart ferrous-phpmyadmin.service >/dev/null 2>&1 || true
+    echo -e "${GREEN}[+] Dual-Mode Database UI active: Official phpMyAdmin (/phpmyadmin/) + Panel FerrousAdmin (/phpadmin/).${NC}"
+  else
+    systemctl daemon-reload 2>/dev/null || true
+  fi
 }
 
 ensure_ferrousx_runtime_files() {
@@ -635,7 +782,7 @@ update_ferrousx_from_github() {
       fi
     ); then
       fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse FETCH_HEAD 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
-      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v3}"
+      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v4}"
       local fx_prev_sha
       fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
       if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_cache_tag}" ] && [ "${fx_prev_sha}" = "${fx_cache_tag}" ]; then
@@ -677,6 +824,9 @@ update_ferrousx_from_github() {
         (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
       fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" ]; then
+        if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
         if grep -q 'mut stream: up_stream,' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           echo -e "${CYAN}[*] Applying compatibility patch: fixing struct pattern mutability in upstream ferrousx-http/src/server.rs...${NC}"
           sed -i 's/mut stream: up_stream,/stream: mut up_stream,/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
@@ -776,9 +926,14 @@ update_ferrousx_from_github() {
         ' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
-      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ] && grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
-        echo -e "${CYAN}[*] Applying compatibility patch: allowing Certbot symlinked private keys (/etc/letsencrypt/live/*) in upstream ferrousx-bin/src/main.rs...${NC}"
-        sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ]; then
+        if grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: allowing Certbot symlinked private keys (/etc/letsencrypt/live/*) in upstream ferrousx-bin/src/main.rs...${NC}"
+          sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+        fi
+        if grep -q 'let certified = load_certified_key(cert_path, key_path)?;' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+          sed -i 's/let certified = load_certified_key(cert_path, key_path)?;/let Ok(certified) = load_certified_key(cert_path, key_path) else { warn!(domain = %vhost.server_name, "Skipping unreadable TLS certificate for vhost"); continue; };/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+        fi
       fi
       for _cfg_rs in "${FERROUSX_SRC_DIR}/crates/ferrousx-config/src/config.rs" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; do
         if [ -f "${_cfg_rs}" ] && grep -q 'Some(load_certified_key(&clean_cert, &clean_key)?)' "${_cfg_rs}"; then
@@ -1365,7 +1520,129 @@ fi
 
 if [ "$FORCE_NGINX" = true ] || systemctl is-active --quiet nginx.service 2>/dev/null; then
   update_nginx_engine
+else
+  setup_phpmyadmin_proxy
 fi
+
+auto_upgrade_self_signed_sites_to_letsencrypt() {
+  mkdir -p /www/acme/.well-known/acme-challenge
+  chmod 0755 /www /www/acme /www/acme/.well-known /www/acme/.well-known/acme-challenge 2>/dev/null || true
+
+  local site_domains=()
+  for f in /etc/ferrousx/sites/*.toml; do
+    [ -f "$f" ] || continue
+    local dom
+    dom="$(basename "$f" .toml)"
+    if [[ "$dom" == *.* ]] && [[ "$dom" != *.local ]] && [ "$dom" != "localhost" ]; then
+      site_domains+=("$dom")
+    fi
+  done
+  for f in /etc/nginx/sites-enabled/*.conf; do
+    [ -e "$f" ] || continue
+    local dom
+    dom="$(basename "$f" .conf)"
+    if [[ "$dom" == *.* ]] && [[ "$dom" != *.local ]] && [ "$dom" != "localhost" ] && [ "$dom" != "ferrous-default" ]; then
+      local seen=false
+      for d in "${site_domains[@]:-}"; do [ "$d" = "$dom" ] && seen=true; done
+      [ "$seen" = false ] && site_domains+=("$dom")
+    fi
+  done
+
+  [ "${#site_domains[@]}" -gt 0 ] || return 0
+
+  local upgraded_any=false
+  for dom in "${site_domains[@]}"; do
+    local cert_p="/etc/letsencrypt/live/${dom}/fullchain.pem"
+    local key_p="/etc/letsencrypt/live/${dom}/privkey.pem"
+    local need_le=false
+    if [ ! -f "$cert_p" ] || [ ! -f "$key_p" ]; then
+      need_le=true
+    elif command -v openssl >/dev/null 2>&1; then
+      local iss sub
+      iss="$(openssl x509 -in "$cert_p" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
+      sub="$(openssl x509 -in "$cert_p" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
+      if [ -n "$iss" ] && [ "$iss" = "$sub" ]; then
+        need_le=true
+      fi
+    fi
+
+    [ "$need_le" = true ] || continue
+
+    if ! command -v certbot >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+      echo -e "${CYAN}[*] Installing certbot for automatic Let's Encrypt SSL upgrade...${NC}"
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot >/dev/null 2>&1 || true
+    fi
+    command -v certbot >/dev/null 2>&1 || return 0
+
+    echo -e "${CYAN}[*] Upgrading SSL certificate for ${dom} to real Let's Encrypt CA...${NC}"
+    local bak_dir="${TMP_DIR}/ssl-bak-${dom}"
+    rm -rf "$bak_dir"
+    if [ -f "$cert_p" ] && [ -f "$key_p" ] && [ ! -L "$cert_p" ]; then
+      mkdir -p "$bak_dir"
+      cp -f "$cert_p" "$bak_dir/fullchain.pem"
+      cp -f "$key_p" "$bak_dir/privkey.pem"
+      rm -rf "/etc/letsencrypt/live/${dom}"
+    fi
+
+    if certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --webroot -w /www/acme -d "${dom}" --cert-name "${dom}" --expand --keep-until-expiring >/dev/null 2>&1; then
+      # Reconcile -0001 lineage if certbot wrote to a suffixed directory
+      if [ ! -f "$cert_p" ]; then
+        for alt in /etc/letsencrypt/live/"${dom}"-*; do
+          if [ -d "$alt" ] && [ -f "$alt/fullchain.pem" ] && [ -f "$alt/privkey.pem" ]; then
+            mkdir -p "/etc/letsencrypt/live/${dom}"
+            ln -sf "$(readlink -f "$alt/fullchain.pem")" "$cert_p"
+            ln -sf "$(readlink -f "$alt/privkey.pem")" "$key_p"
+            break
+          fi
+        done
+      fi
+      if [ -f "$cert_p" ] && [ -f "$key_p" ]; then
+        local real_c real_k
+        real_c="$(readlink -f "$cert_p" 2>/dev/null || echo "$cert_p")"
+        real_k="$(readlink -f "$key_p" 2>/dev/null || echo "$key_p")"
+        chmod 0600 "$real_k" 2>/dev/null || true
+        if [ -f "/etc/ferrousx/sites/${dom}.toml" ]; then
+          awk -v rc="$real_c" -v rk="$real_k" '
+            /^\[ssl\]/ { in_ssl=1; print; next }
+            /^\[/ { in_ssl=0 }
+            in_ssl && /^[[:space:]]*enabled[[:space:]]*=/ { print "enabled = true"; next }
+            in_ssl && /^[[:space:]]*cert_path[[:space:]]*=/ { print "cert_path = \"" rc "\""; next }
+            in_ssl && /^[[:space:]]*key_path[[:space:]]*=/ { print "key_path = \"" rk "\""; next }
+            { print }
+          ' "/etc/ferrousx/sites/${dom}.toml" > "/etc/ferrousx/sites/${dom}.toml.tmp" && \
+            chmod 0644 "/etc/ferrousx/sites/${dom}.toml.tmp" && \
+            mv -f "/etc/ferrousx/sites/${dom}.toml.tmp" "/etc/ferrousx/sites/${dom}.toml"
+        fi
+        upgraded_any=true
+        echo -e "${GREEN}[+] Issued trusted Let's Encrypt SSL certificate for https://${dom}${NC}"
+      elif [ -d "$bak_dir" ]; then
+        mkdir -p "/etc/letsencrypt/live/${dom}"
+        cp -f "$bak_dir/fullchain.pem" "$cert_p"
+        cp -f "$bak_dir/privkey.pem" "$key_p"
+        chmod 0600 "$key_p" 2>/dev/null || true
+      fi
+    elif [ -d "$bak_dir" ]; then
+      mkdir -p "/etc/letsencrypt/live/${dom}"
+      cp -f "$bak_dir/fullchain.pem" "$cert_p"
+      cp -f "$bak_dir/privkey.pem" "$key_p"
+      chmod 0600 "$key_p" 2>/dev/null || true
+      echo -e "${YELLOW}[!] Certbot HTTP-01 skipped for ${dom} (kept existing fallback SSL cert).${NC}"
+    fi
+  done
+
+  if [ "$upgraded_any" = true ]; then
+    if systemctl is-active --quiet ferrousx.service 2>/dev/null; then
+      systemctl restart ferrousx.service 2>/dev/null || true
+    fi
+    if systemctl is-active --quiet nginx.service 2>/dev/null && nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx.service 2>/dev/null || true
+    fi
+  fi
+}
+
+auto_upgrade_self_signed_sites_to_letsencrypt
 
 UPDATE_ELAPSED="$(( $(date +%s) - UPDATE_START_TS ))"
 echo -e "${GREEN}${BOLD}Update completed cleanly in ${UPDATE_ELAPSED}s. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"

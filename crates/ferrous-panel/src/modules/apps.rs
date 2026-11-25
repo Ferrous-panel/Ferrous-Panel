@@ -941,7 +941,7 @@ fn map_site_rules_to_spec(
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SystemdRuntimeMetrics {
     pub active: bool,
     pub sub_state: String,
@@ -1103,10 +1103,47 @@ async fn query_unit_metrics(
     Ok(parse_systemd_metrics(&out.stdout))
 }
 
+fn dir_size_cache() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::Instant, f64)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::Instant, f64)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn cached_dir_size_mb(path: &Path) -> f64 {
+    if let Ok(guard) = dir_size_cache().lock() {
+        if let Some(&(ts, size)) = guard.get(path) {
+            if ts.elapsed() < Duration::from_secs(60) {
+                return size;
+            }
+        }
+    }
+    let owned = path.to_path_buf();
+    let computed = tokio::task::spawn_blocking(move || dir_size_mb(&owned))
+        .await
+        .unwrap_or(0.0);
+    if let Ok(mut guard) = dir_size_cache().lock() {
+        if guard.len() > 256 {
+            guard.clear();
+        }
+        guard.insert(path.to_path_buf(), (std::time::Instant::now(), computed));
+    }
+    computed
+}
+
 pub async fn enrich_app(
+    app: ManagedApp,
+    config: &Config,
+    webserver: &WebServerManager,
+) -> ManagedApp {
+    enrich_app_with_engine_hint(app, config, webserver, None).await
+}
+
+async fn enrich_app_with_engine_hint(
     mut app: ManagedApp,
     config: &Config,
     webserver: &WebServerManager,
+    precomputed_engine_active: Option<bool>,
 ) -> ManagedApp {
     let unit_to_query = if is_php_runtime(app.framework) {
         php_fpm_from_tag(app.php_version).systemd_unit().to_string()
@@ -1125,6 +1162,14 @@ pub async fn enrich_app(
                 AppStatus::Stopped
             };
         }
+    } else if let Some(engine_active) = precomputed_engine_active {
+        app.pid = None;
+        app.memory_used_mb = 0;
+        app.status = if engine_active {
+            AppStatus::Running
+        } else {
+            AppStatus::Stopped
+        };
     } else if let Ok(cfg) = webserver.store.load_config() {
         let engine_active = match cfg.frontend_engine {
             EngineKind::Nginx => webserver.nginx.status().await.map(|s| s.active).unwrap_or(false),
@@ -1145,15 +1190,24 @@ pub async fn enrich_app(
     }
 
     if let Ok(safe_dir) = SafePath::under_root(&config.wwwroot, &app.working_dir) {
-        app.disk_used_mb = dir_size_mb(safe_dir.as_path());
+        app.disk_used_mb = cached_dir_size_mb(safe_dir.as_path()).await;
     }
 
     if let Ok(domain) = Domain::parse(&app.domain) {
         if let Ok(ssl) = webserver.ssl.read_cert_status(&domain).await {
             app.ssl_enabled = app.ssl_enabled && ssl.present;
-            app.ssl_issuer = ssl
-                .issuer
-                .unwrap_or_else(|| if ssl.present { "Let's Encrypt".to_string() } else { "None".to_string() });
+            let provider_tag = ssl.provider.as_deref().unwrap_or("");
+            app.ssl_issuer = if provider_tag == "Self-Signed" {
+                "Self-Signed (OpenSSL)".to_string()
+            } else {
+                ssl.issuer.unwrap_or_else(|| {
+                    if ssl.present {
+                        "Let's Encrypt".to_string()
+                    } else {
+                        "None".to_string()
+                    }
+                })
+            };
             app.ssl_expiry_days = match ssl.status {
                 SslCertState::Missing => 0,
                 _ => ssl.days_remaining.unwrap_or(0),
@@ -1170,42 +1224,87 @@ pub async fn list_apps(
     webserver: &WebServerManager,
 ) -> Result<Vec<ManagedApp>, PanelError> {
     let raw = store.list_apps()?;
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let engine_active = match webserver.store.load_config() {
+        Ok(cfg) => Some(match cfg.frontend_engine {
+            EngineKind::Nginx => webserver.nginx.status().await.map(|s| s.active).unwrap_or(false),
+            EngineKind::Ferrousx => webserver
+                .ferrousx
+                .status()
+                .await
+                .map(|s| s.active)
+                .unwrap_or(false),
+        }),
+        Err(_) => None,
+    };
+
+    let mut unit_cache: std::collections::HashMap<String, SystemdRuntimeMetrics> =
+        std::collections::HashMap::new();
     let mut enriched = Vec::with_capacity(raw.len());
     for mut app in raw {
-        if config.is_production()
-            && !app.ssl_enabled
-            && webserver
-                .executor()
-                .is_binary_available(AllowedBinary::OpenSsl)
-        {
-            if let Ok(domain) = Domain::parse(&app.domain) {
-                let has_cert = webserver
-                    .ssl
-                    .site_cert_paths(&domain)
-                    .map(|(c, k)| c.is_file() && k.is_file())
-                    .unwrap_or(false);
-                if !has_cert {
-                    let aliases = parse_app_aliases(&app).unwrap_or_default();
-                    if let Ok(issued) = webserver
-                        .ssl
-                        .issue_self_signed(&domain, &aliases, 3650)
-                        .await
-                    {
-                        if issued.present {
-                            let _ = apply_app_ssl_vhost(
-                                &mut app, false, false, store, config, webserver,
-                            )
-                            .await;
-                            let _ = apply_app_ssl_vhost(
-                                &mut app, true, false, store, config, webserver,
-                            )
-                            .await;
+        let unit_to_query = if is_php_runtime(app.framework) {
+            php_fpm_from_tag(app.php_version).systemd_unit().to_string()
+        } else {
+            app.systemd_unit.clone()
+        };
+        if !is_static_runtime(app.framework) && !unit_to_query.is_empty() {
+            let metrics = if let Some(m) = unit_cache.get(&unit_to_query) {
+                Some(m.clone())
+            } else if let Ok(m) =
+                query_unit_metrics(webserver.executor().as_ref(), &unit_to_query).await
+            {
+                unit_cache.insert(unit_to_query.clone(), m.clone());
+                Some(m)
+            } else {
+                None
+            };
+            if let Some(m) = metrics {
+                app.pid = m.pid;
+                app.memory_used_mb = m.memory_used_mb;
+                app.status = if m.active {
+                    AppStatus::Running
+                } else {
+                    AppStatus::Stopped
+                };
+            }
+        } else if let Some(active) = engine_active {
+            app.pid = None;
+            app.memory_used_mb = 0;
+            app.status = if active {
+                AppStatus::Running
+            } else {
+                AppStatus::Stopped
+            };
+        }
+
+        if let Ok(safe_dir) = SafePath::under_root(&config.wwwroot, &app.working_dir) {
+            app.disk_used_mb = cached_dir_size_mb(safe_dir.as_path()).await;
+        }
+
+        if let Ok(domain) = Domain::parse(&app.domain) {
+            if let Ok(ssl) = webserver.ssl.read_cert_status(&domain).await {
+                app.ssl_enabled = app.ssl_enabled && ssl.present;
+                let provider_tag = ssl.provider.as_deref().unwrap_or("");
+                app.ssl_issuer = if provider_tag == "Self-Signed" {
+                    "Self-Signed (OpenSSL)".to_string()
+                } else {
+                    ssl.issuer.unwrap_or_else(|| {
+                        if ssl.present {
+                            "Let's Encrypt".to_string()
+                        } else {
+                            "None".to_string()
                         }
-                    }
-                }
+                    })
+                };
+                app.ssl_expiry_days = match ssl.status {
+                    SslCertState::Missing => 0,
+                    _ => ssl.days_remaining.unwrap_or(0),
+                };
             }
         }
-        enriched.push(enrich_app(app, config, webserver).await);
+        enriched.push(app);
     }
     Ok(enriched)
 }
@@ -1422,11 +1521,25 @@ pub async fn deploy_app(
 
     // Build and apply web server site configuration (validates nginx -t / ferrousx-bin --check-config).
     // Never write ssl_certificate directives before the real PEM files exist on disk (prevents `nginx -t` failure).
-    let cert_ready = webserver
-        .ssl
-        .site_cert_paths(&domain)
-        .map(|(cert, key)| cert.is_file() && key.is_file())
-        .unwrap_or(false);
+    let existing_cert_status = webserver.ssl.read_cert_status(&domain).await.ok();
+    let cert_ready = existing_cert_status
+        .as_ref()
+        .map(|s| s.present)
+        .unwrap_or_else(|| {
+            webserver
+                .ssl
+                .site_cert_paths(&domain)
+                .map(|(cert, key)| cert.is_file() && key.is_file())
+                .unwrap_or(false)
+        });
+    let cert_needs_trusted_upgrade = !cert_ready
+        || existing_cert_status
+            .as_ref()
+            .map(|s| {
+                s.provider.as_deref() == Some("Self-Signed")
+                    || matches!(s.status, SslCertState::Missing | SslCertState::Expired)
+            })
+            .unwrap_or(false);
     let mut effective_ssl = req.ssl_enabled && cert_ready;
     let mut spec = build_site_spec_for_app(
         domain.clone(),
@@ -1467,20 +1580,33 @@ pub async fn deploy_app(
             return Err(err);
         }
     };
-    if !effective_ssl && (req.ssl_enabled || config.is_production()) {
+    if req.ssl_enabled && cert_needs_trusted_upgrade {
         let mut issued_le = false;
-        if req.ssl_enabled
-            && webserver
+        if config.is_production() {
+            let _ = webserver.ssl.ensure_acme_webroot_permissions();
+            let _ = webserver.reload_or_start_configured_engine().await;
+            ensure_ssl_firewall_ports(config, webserver).await;
+        }
+        if config.is_production()
+            || webserver
                 .executor()
                 .is_binary_available(AllowedBinary::Certbot)
         {
             match webserver
                 .ssl
-                .issue_certificate(&domain, &parsed_aliases, None)
+                .issue_or_renew_letsencrypt_with_options(
+                    &domain,
+                    &parsed_aliases,
+                    None,
+                    config.is_production(),
+                    false,
+                    false,
+                )
                 .await
             {
                 Ok(status) if status.present => {
                     spec.ssl_enabled = true;
+                    spec.redirect_https = true;
                     if let Ok(ssl_rendered) = webserver
                         .upsert_and_apply_site(&spec, preferred_engine)
                         .await
@@ -1510,9 +1636,8 @@ pub async fn deploy_app(
                 }
             }
         }
-        // In production, always ensure a real X.509 certificate exists via OpenSSL so both HTTP (80)
-        // and HTTPS (443) work immediately (compatible with Cloudflare Full SSL and browser HTTPS-First).
         if !issued_le
+            && !effective_ssl
             && config.is_production()
             && webserver
                 .executor()
@@ -1533,7 +1658,7 @@ pub async fn deploy_app(
                         rendered = ssl_rendered;
                         effective_ssl = true;
                         initial_logs.push(format!(
-                            "[{}] Enabled real HTTPS on port 443 with OpenSSL X.509 certificate for {} (compatible with Cloudflare Full SSL; re-run Let's Encrypt anytime)",
+                            "[{}] Enabled HTTPS on port 443 with OpenSSL X.509 certificate for {} (re-run Let's Encrypt once DNS points directly to VPS)",
                             Utc::now().to_rfc3339(),
                             domain.as_str()
                         ));
@@ -2091,18 +2216,23 @@ pub async fn update_site_settings(
     let next_rps = rate_limit_rps.unwrap_or(app.rate_limit_rps);
 
     if next_ssl {
-        let mut cert_ready = webserver
-            .ssl
-            .site_cert_paths(&domain)
-            .map(|(cert, key)| cert.is_file() && key.is_file())
-            .unwrap_or(false);
-        if !cert_ready
-            && webserver
-                .executor()
-                .is_binary_available(AllowedBinary::Certbot)
+        let existing_status = webserver.ssl.read_cert_status(&domain).await.ok();
+        let has_trusted_ca_cert = existing_status.as_ref().is_some_and(|st| {
+            st.present
+                && st.status != SslCertState::Expired
+                && st.provider.as_deref() != Some("Self-Signed")
+        });
+        let mut cert_ready = existing_status.as_ref().is_some_and(|st| st.present);
+
+        if !has_trusted_ca_cert
+            && (config.is_production()
+                || webserver
+                    .executor()
+                    .is_binary_available(AllowedBinary::Certbot))
         {
-            apply_app_ssl_vhost(&mut app, false, false, store, config, webserver).await?;
+            apply_app_ssl_vhost(&mut app, cert_ready, false, store, config, webserver).await?;
             if config.is_production() {
+                let _ = webserver.ssl.ensure_acme_webroot_permissions();
                 let _ = webserver.reload_or_start_configured_engine().await;
                 ensure_ssl_firewall_ports(config, webserver).await;
                 if let Err(err) = webserver
@@ -2119,10 +2249,19 @@ pub async fn update_site_settings(
             }
             if let Ok(issued) = webserver
                 .ssl
-                .issue_certificate(&domain, &aliases, None)
+                .issue_or_renew_letsencrypt_with_options(
+                    &domain,
+                    &aliases,
+                    None,
+                    config.is_production(),
+                    false,
+                    false,
+                )
                 .await
             {
-                cert_ready = issued.present;
+                if issued.present {
+                    cert_ready = true;
+                }
             }
         }
         if !cert_ready
@@ -2329,13 +2468,24 @@ pub async fn get_app_ssl_overview(
         .ok_or_else(|| PanelError::NotFound(format!("application '{id}' not found")))?;
     let domain = Domain::parse(&app.domain)?;
     let aliases = parse_app_aliases(&app)?;
-    let cert = webserver.ssl.read_cert_status(&domain).await?;
-    let dns_preflight = webserver.ssl.check_dns_preflight(&domain, &aliases).await;
-    let renewal_timer = webserver.ssl.renewal_timer_status().await;
+    let (cert_res, dns_preflight, renewal_timer) = tokio::join!(
+        webserver.ssl.read_cert_status(&domain),
+        webserver.ssl.check_dns_preflight(&domain, &aliases),
+        webserver.ssl.renewal_timer_status(),
+    );
+    let cert = cert_res?;
     let exec = webserver.executor();
     let engine = match webserver.store.load_config().map(|c| c.frontend_engine) {
         Ok(EngineKind::Ferrousx) => WebServerEngineType::FerrousX,
         _ => WebServerEngineType::Nginx,
+    };
+    let notice = if cert.present && cert.provider.as_deref() == Some("Self-Signed") {
+        Some(
+            "Website đang dùng chứng chỉ tự ký (Self-Signed) — Safari/Chrome sẽ cảnh báo nếu truy cập trực tiếp không qua Cloudflare Proxy. Hãy nhấn 'Cấp chứng chỉ Let's Encrypt' bên dưới để đổi sang chứng chỉ CA hợp lệ miễn phí."
+                .to_string(),
+        )
+    } else {
+        None
     };
 
     Ok(AppSslOverview {
@@ -2358,7 +2508,7 @@ pub async fn get_app_ssl_overview(
         cert,
         dns_preflight,
         renewal_timer,
-        notice: None,
+        notice,
     })
 }
 

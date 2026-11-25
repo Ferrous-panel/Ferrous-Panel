@@ -1,4 +1,16 @@
-use actix_web::{HttpRequest, HttpResponse};
+use crate::error::PanelError;
+use crate::state::AppState;
+use crate::system::cmd::AllowedBinary;
+use crate::webserver::{atomic_write_file, CommandExecutor};
+use actix_web::http::StatusCode;
+use actix_web::{web, HttpRequest, HttpResponse};
+use rand::rngs::OsRng;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 <html lang="vi" class="dark">
@@ -190,6 +202,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       <span class="badge badge-ok" id="engineStatus">Actix-Web + SQLite WAL + MariaDB + PostgreSQL</span>
     </div>
     <div class="row" id="headerActions">
+      <a href="/phpmyadmin/" style="font-size:12px;font-weight:600;padding:7px 12px;border-radius:7px;border:1px solid rgba(59,130,246,0.45);background:rgba(59,130,246,0.16);color:#93c5fd;text-decoration:none;">⇄ phpMyAdmin Chính thức (/phpmyadmin/) ↗</a>
       <span class="muted" id="userLabel"></span>
       <button type="button" id="btnRefresh" class="hidden">Làm mới</button>
       <button type="button" id="btnLogout" class="danger hidden">Đăng xuất</button>
@@ -1110,8 +1123,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 </body>
 </html>"##;
 
-/// Serves the standalone Pure-Rust FerrousAdmin SQL Studio (Zero PHP replacement for phpMyAdmin)
-/// at `/phpadmin`, `/phpadmin/`, `/phpmyadmin`, and `/phpmyadmin/`.
+/// Serves the standalone Pure-Rust FerrousAdmin SQL Studio (Panel custom DB UI) at `/phpadmin` and `/phpadmin/`.
 pub async fn serve_ferrous_admin(_req: HttpRequest) -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
@@ -1120,3 +1132,659 @@ pub async fn serve_ferrous_admin(_req: HttpRequest) -> HttpResponse {
         .insert_header(("Cache-Control", "no-store"))
         .body(FERROUS_ADMIN_HTML)
 }
+
+pub const OFFICIAL_PMA_DIR: &str = "/www/server/phpmyadmin";
+pub const OFFICIAL_PMA_ROUTER: &str = "/www/server/ferrous-pma-router.php";
+pub const OFFICIAL_PMA_TMP_DIR: &str = "/var/lib/phpmyadmin/tmp";
+pub const OFFICIAL_PMA_UNIT_NAME: &str = "ferrous-phpmyadmin.service";
+pub const OFFICIAL_PMA_UNIT_PATH: &str = "/etc/systemd/system/ferrous-phpmyadmin.service";
+pub const OFFICIAL_PMA_PORT: u16 = 889;
+pub const OFFICIAL_PMA_VERSION: &str = "5.2.2";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialPhpMyAdminStatus {
+    pub installed: bool,
+    pub running: bool,
+    pub version: String,
+    pub install_dir: String,
+    pub official_url: String,
+    pub custom_panel_url: String,
+}
+
+fn detect_installed_pma_version() -> String {
+    let pkg_json = Path::new(OFFICIAL_PMA_DIR).join("package.json");
+    if let Ok(raw) = std::fs::read_to_string(&pkg_json) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(v) = val.get("version").and_then(|x| x.as_str()) {
+                if !v.trim().is_empty() {
+                    return v.trim().to_string();
+                }
+            }
+        }
+    }
+    OFFICIAL_PMA_VERSION.to_string()
+}
+
+fn find_php_cli_binary_path() -> Option<&'static str> {
+    [
+        "/usr/bin/php8.3",
+        "/usr/bin/php8.2",
+        "/usr/bin/php8.4",
+        "/usr/bin/php8.1",
+        "/usr/bin/php",
+        "/usr/bin/php7.4",
+    ]
+    .into_iter()
+    .find(|candidate| Path::new(candidate).is_file())
+}
+
+async fn is_official_pma_port_open() -> bool {
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        TcpStream::connect(("127.0.0.1", OFFICIAL_PMA_PORT)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
+}
+
+pub async fn get_official_phpmyadmin_status() -> OfficialPhpMyAdminStatus {
+    let installed = Path::new(OFFICIAL_PMA_DIR).join("index.php").is_file();
+    let running = if installed {
+        is_official_pma_port_open().await
+    } else {
+        false
+    };
+    OfficialPhpMyAdminStatus {
+        installed,
+        running,
+        version: if installed {
+            detect_installed_pma_version()
+        } else {
+            OFFICIAL_PMA_VERSION.to_string()
+        },
+        install_dir: OFFICIAL_PMA_DIR.to_string(),
+        official_url: "/phpmyadmin/".to_string(),
+        custom_panel_url: "/phpadmin/".to_string(),
+    }
+}
+
+fn generate_blowfish_secret() -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^*()-_=+";
+    let mut bytes = [0u8; 32];
+    if OsRng.try_fill_bytes(&mut bytes).is_err() {
+        return "FerrousPanelOfficialPmaSecretKey!".to_string();
+    }
+    bytes
+        .iter()
+        .map(|&b| ALPHABET[(b as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+fn render_official_pma_config_inc(secret: &str) -> String {
+    format!(
+        "<?php\n\
+declare(strict_types=1);\n\
+$cfg['blowfish_secret'] = '{secret}';\n\
+$i = 0;\n\
+$i++;\n\
+$cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+$cfg['Servers'][$i]['host'] = 'localhost';\n\
+$cfg['Servers'][$i]['compress'] = false;\n\
+$cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
+if (file_exists('/run/mysqld/mysqld.sock')) {{\n\
+    $cfg['Servers'][$i]['socket'] = '/run/mysqld/mysqld.sock';\n\
+}}\n\
+$i++;\n\
+$cfg['Servers'][$i]['verbose'] = '127.0.0.1 (TCP)';\n\
+$cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+$cfg['Servers'][$i]['host'] = '127.0.0.1';\n\
+$cfg['Servers'][$i]['port'] = '3306';\n\
+$cfg['Servers'][$i]['compress'] = false;\n\
+$cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
+$cfg['UploadDir'] = '';\n\
+$cfg['SaveDir'] = '';\n\
+$cfg['TempDir'] = '{OFFICIAL_PMA_TMP_DIR}';\n\
+$cfg['ExecTimeLimit'] = 300;\n\
+$cfg['SendErrorReports'] = 'never';\n"
+    )
+}
+
+fn render_official_pma_router_php() -> &'static str {
+    r#"<?php
+if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+    $_SERVER['SERVER_PORT'] = '443';
+}
+if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
+$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if ($uri === '/phpmyadmin') {
+    header('Location: /phpmyadmin/', true, 302);
+    exit;
+}
+if (strpos($uri, '/phpmyadmin/') !== 0) {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
+}
+$rel = substr($uri, strlen('/phpmyadmin'));
+if ($rel === '' || $rel === '/') {
+    $rel = '/index.php';
+}
+$base = realpath('/www/server/phpmyadmin');
+if ($base === false) {
+    http_response_code(503);
+    echo 'Official phpMyAdmin directory missing';
+    exit;
+}
+$candidate = $base . $rel;
+$real = realpath($candidate);
+if ($real === false || strpos($real, $base) !== 0) {
+    http_response_code(404);
+    echo 'Not Found';
+    exit;
+}
+if (is_dir($real)) {
+    $idx = $real . '/index.php';
+    if (is_file($idx)) {
+        $real = $idx;
+        $rel = rtrim($rel, '/') . '/index.php';
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
+}
+$ext = strtolower(pathinfo($real, PATHINFO_EXTENSION));
+if ($ext !== 'php') {
+    return false;
+}
+chdir(dirname($real));
+$_SERVER['SCRIPT_FILENAME'] = $real;
+$_SERVER['SCRIPT_NAME'] = '/phpmyadmin' . $rel;
+$_SERVER['PHP_SELF'] = '/phpmyadmin' . $rel;
+require $real;
+"#
+}
+
+fn render_official_pma_systemd_unit(php_bin: &str) -> String {
+    format!(
+        "[Unit]\n\
+Description=FerrousPanel Official phpMyAdmin Worker (127.0.0.1:{OFFICIAL_PMA_PORT})\n\
+After=network.target mariadb.service mysql.service\n\
+\n\
+[Service]\n\
+Type=simple\n\
+User=www-data\n\
+Group=www-data\n\
+WorkingDirectory={OFFICIAL_PMA_DIR}\n\
+Environment=PHP_CLI_SERVER_WORKERS=4\n\
+ExecStart={php_bin} -S 127.0.0.1:{OFFICIAL_PMA_PORT} -d upload_max_filesize=128M -d post_max_size=128M -d memory_limit=256M -d max_execution_time=300 -t /www/server {OFFICIAL_PMA_ROUTER}\n\
+Restart=always\n\
+RestartSec=2\n\
+NoNewPrivileges=true\n\
+PrivateTmp=true\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target\n"
+    )
+}
+
+/// Downloads & configures Official phpMyAdmin from the official release archive (`phpmyadmin.net` / GitHub `phpmyadmin/phpmyadmin`)
+/// into `/www/server/phpmyadmin` and starts `ferrous-phpmyadmin.service` on `127.0.0.1:889`, while keeping
+/// FerrousAdmin (`/phpadmin/`) active in parallel.
+pub async fn install_or_repair_official_phpmyadmin(
+    executor: &dyn CommandExecutor,
+) -> Result<OfficialPhpMyAdminStatus, PanelError> {
+    let apt_timeout = Duration::from_secs(240);
+    let cmd_timeout = Duration::from_secs(90);
+
+    // 1. Ensure PHP CLI + required phpMyAdmin extensions (mysqli, mbstring, xml, zip, curl) are installed.
+    let needs_php_pkgs = find_php_cli_binary_path().is_none()
+        || !Path::new("/usr/share/php").exists()
+        || {
+            if let Ok(out) = executor
+                .run(AllowedBinary::Php83, &["-m"], Duration::from_secs(5))
+                .await
+            {
+                let lower = out.stdout.to_ascii_lowercase();
+                !lower.contains("mysqli") || !lower.contains("mbstring")
+            } else {
+                true
+            }
+        };
+
+    if needs_php_pkgs && executor.is_binary_available(AllowedBinary::AptGet) {
+        let _ = executor
+            .run(AllowedBinary::AptGet, &["update", "-qq"], apt_timeout)
+            .await;
+        let _ = executor
+            .run(
+                AllowedBinary::AptGet,
+                &[
+                    "install",
+                    "-y",
+                    "-qq",
+                    "php-cli",
+                    "php-mysql",
+                    "php-mbstring",
+                    "php-xml",
+                    "php-zip",
+                    "php-curl",
+                ],
+                apt_timeout,
+            )
+            .await;
+    }
+
+    let Some(php_bin) = find_php_cli_binary_path() else {
+        return Err(PanelError::Conflict(
+            "Chưa tìm thấy PHP CLI trên máy chủ — hãy cài PHP (ví dụ: sudo apt install -y php-cli php-mysql php-mbstring php-xml) trước khi kích hoạt phpMyAdmin chính thức."
+                .to_string(),
+        ));
+    };
+
+    // 2. Download Official phpMyAdmin archive if not yet present in /www/server/phpmyadmin/index.php.
+    let pma_dir = Path::new(OFFICIAL_PMA_DIR);
+    if !pma_dir.join("index.php").is_file() {
+        std::fs::create_dir_all(pma_dir)?;
+        let tmp_tar = std::env::temp_dir().join(format!(
+            "ferrous-official-phpmyadmin-{}.tar.gz",
+            std::process::id()
+        ));
+        let tmp_tar_str = tmp_tar.display().to_string();
+        let urls = [
+            "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",
+            "https://github.com/phpmyadmin/phpmyadmin/releases/download/RELEASE_5_2_2/phpMyAdmin-5.2.2-all-languages.tar.gz",
+            "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz",
+        ];
+        let mut downloaded = false;
+        for url in urls {
+            if let Ok(out) = executor
+                .run(
+                    AllowedBinary::Curl,
+                    &["-fsSL", "--connect-timeout", "15", "-o", &tmp_tar_str, url],
+                    cmd_timeout,
+                )
+                .await
+            {
+                if out.success && tmp_tar.is_file() {
+                    downloaded = true;
+                    break;
+                }
+            }
+        }
+        if !downloaded {
+            let _ = std::fs::remove_file(&tmp_tar);
+            return Err(PanelError::BadGateway(
+                "Không thể tải gói phpMyAdmin chính thức từ files.phpmyadmin.net / GitHub. Vui lòng kiểm tra kết nối mạng của VPS."
+                    .to_string(),
+            ));
+        }
+
+        let extract = executor
+            .run(
+                AllowedBinary::Tar,
+                &[
+                    "-xzf",
+                    &tmp_tar_str,
+                    "--strip-components=1",
+                    "-C",
+                    OFFICIAL_PMA_DIR,
+                ],
+                cmd_timeout,
+            )
+            .await;
+        let _ = std::fs::remove_file(&tmp_tar);
+        let extract_out = extract?;
+        if !extract_out.success || !pma_dir.join("index.php").is_file() {
+            return Err(PanelError::CommandFailed {
+                binary: AllowedBinary::Tar.label(),
+                exit_code: extract_out.exit_code,
+                stderr: extract_out.stderr,
+            });
+        }
+    }
+
+    // 3. Prepare tmp dir, config.inc.php, router, permissions, and systemd unit.
+    std::fs::create_dir_all(OFFICIAL_PMA_TMP_DIR)?;
+    let cfg_inc = pma_dir.join("config.inc.php");
+    if !cfg_inc.is_file() {
+        let secret = generate_blowfish_secret();
+        atomic_write_file(&cfg_inc, render_official_pma_config_inc(&secret).as_bytes(), 0o640)?;
+    }
+    atomic_write_file(
+        Path::new(OFFICIAL_PMA_ROUTER),
+        render_official_pma_router_php().as_bytes(),
+        0o644,
+    )?;
+
+    if executor.is_binary_available(AllowedBinary::Chown) {
+        let _ = executor
+            .run(
+                AllowedBinary::Chown,
+                &["-R", "www-data:www-data", OFFICIAL_PMA_DIR, OFFICIAL_PMA_TMP_DIR],
+                Duration::from_secs(20),
+            )
+            .await;
+    }
+
+    atomic_write_file(
+        Path::new(OFFICIAL_PMA_UNIT_PATH),
+        render_official_pma_systemd_unit(php_bin).as_bytes(),
+        0o644,
+    )?;
+
+    if executor.is_binary_available(AllowedBinary::Systemctl) {
+        let _ = executor
+            .run(AllowedBinary::Systemctl, &["daemon-reload"], Duration::from_secs(15))
+            .await;
+        let _ = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["enable", OFFICIAL_PMA_UNIT_NAME],
+                Duration::from_secs(15),
+            )
+            .await;
+        let _ = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["restart", OFFICIAL_PMA_UNIT_NAME],
+                Duration::from_secs(15),
+            )
+            .await;
+    }
+
+    for _ in 0..15 {
+        if is_official_pma_port_open().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(180)).await;
+    }
+
+    Ok(get_official_phpmyadmin_status().await)
+}
+
+pub async fn redirect_phpmyadmin_slash(req: HttpRequest) -> HttpResponse {
+    let qs = req.query_string();
+    let loc = if qs.is_empty() {
+        "/phpmyadmin/".to_string()
+    } else {
+        format!("/phpmyadmin/?{qs}")
+    };
+    HttpResponse::Found()
+        .insert_header(("Location", loc))
+        .insert_header(("Cache-Control", "no-store"))
+        .finish()
+}
+
+fn decode_chunked_body(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut pos = 0usize;
+    while pos < raw.len() {
+        let Some(rel_end) = raw[pos..].windows(2).position(|w| w == b"\r\n") else {
+            break;
+        };
+        let size_line = String::from_utf8_lossy(&raw[pos..pos + rel_end]);
+        let hex_part = size_line.split(';').next().unwrap_or("").trim();
+        let Ok(chunk_size) = usize::from_str_radix(hex_part, 16) else {
+            break;
+        };
+        pos += rel_end + 2;
+        if chunk_size == 0 {
+            break;
+        }
+        let end = pos.saturating_add(chunk_size).min(raw.len());
+        out.extend_from_slice(&raw[pos..end]);
+        pos = (end + 2).min(raw.len());
+    }
+    out
+}
+
+fn render_official_pma_launcher_html() -> &'static str {
+    r##"<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>phpMyAdmin Chính thức &amp; FerrousAdmin — FerrousPanel</title>
+  <style>
+    body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:#090d16; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px; }
+    .card { max-width:580px; width:100%; background:#111827; border:1px solid #1e293b; border-radius:14px; padding:26px; box-shadow:0 24px 48px rgba(0,0,0,.45); }
+    h1 { margin:0 0 8px; font-size:20px; }
+    p { margin:0 0 16px; color:#94a3b8; font-size:14px; line-height:1.55; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding:10px 16px; border-radius:9px; font-weight:600; font-size:13px; text-decoration:none; cursor:pointer; border:1px solid #334155; background:#1e293b; color:#e2e8f0; }
+    .btn-primary { background:#f97316; border-color:#ea580c; color:#fff; }
+    .btn-blue { background:rgba(59,130,246,.18); border-color:rgba(59,130,246,.45); color:#93c5fd; }
+    .code { font-family:ui-monospace,monospace; background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px 12px; font-size:12px; color:#cbd5e1; overflow-x:auto; }
+    #msg { margin-top:14px; font-size:13px; display:none; padding:10px 12px; border-radius:8px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Quản trị Cơ sở dữ liệu Kép (Dual-Mode)</h1>
+    <p>FerrousPanel hỗ trợ song song cả hai trình quản trị CSDL trên mọi tên miền và IP:</p>
+    <ul style="color:#cbd5e1;font-size:13.5px;line-height:1.7;padding-left:18px;margin:0 0 16px;">
+      <li><strong>phpMyAdmin Chính thức</strong> tại <code>/phpmyadmin/</code> (mã nguồn chính thức từ <code>phpmyadmin.net</code>)</li>
+      <li><strong>FerrousAdmin (Trang tuỳ chỉnh của Panel)</strong> tại <code>/phpadmin/</code> (100% Pure Rust, siêu tốc)</li>
+    </ul>
+    <p style="margin-bottom:8px;">Hiện tại dịch vụ <code>phpMyAdmin Chính thức</code> chưa được kích hoạt trên máy chủ này. Bạn có thể bấm nút cài tự động bên dưới (nếu đang đăng nhập Panel) hoặc chạy lệnh cập nhật:</p>
+    <div class="code">sudo fp update</div>
+    <div id="msg"></div>
+    <div class="actions">
+      <button type="button" class="btn btn-primary" id="btnInstallOfficial">Tải &amp; Kích hoạt phpMyAdmin Chính thức ngay</button>
+      <a href="/phpadmin/" class="btn btn-blue">Mở Trang CSDL Tuỳ chỉnh của Panel (/phpadmin/) →</a>
+    </div>
+  </div>
+  <script>
+    document.getElementById('btnInstallOfficial').addEventListener('click', async function () {
+      const btn = this;
+      const msg = document.getElementById('msg');
+      btn.disabled = true;
+      btn.textContent = 'Đang tải từ phpmyadmin.net & khởi chạy…';
+      msg.style.display = 'block';
+      msg.style.background = 'rgba(59,130,246,.14)';
+      msg.style.color = '#93c5fd';
+      msg.textContent = 'Đang cài đặt phpMyAdmin chính thức (khoảng 10–30 giây)…';
+      try {
+        const tok = sessionStorage.getItem('fp_token') || localStorage.getItem('fp_token') || '';
+        const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' };
+        if (tok) headers['Authorization'] = 'Bearer ' + tok;
+        const resp = await fetch('/api/databases/phpmyadmin/install', { method: 'POST', credentials: 'same-origin', headers, body: '{}' });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status + ' — Hãy đăng nhập Panel rồi vào mục Cơ sở dữ liệu để bấm Kích hoạt phpMyAdmin.'));
+        msg.style.background = 'rgba(16,185,129,.16)';
+        msg.style.color = '#6ee7b7';
+        msg.textContent = 'Đã cài đặt & khởi chạy phpMyAdmin chính thức! Đang tải trang…';
+        setTimeout(() => window.location.reload(), 600);
+      } catch (e) {
+        btn.disabled = false;
+        btn.textContent = 'Thử kích hoạt lại';
+        msg.style.background = 'rgba(239,68,68,.16)';
+        msg.style.color = '#fca5a5';
+        msg.textContent = e.message;
+      }
+    });
+  </script>
+</body>
+</html>"##
+}
+
+/// Reverse-proxies `/phpmyadmin/*` (all HTTP methods, cookies, sessions, SQL uploads/exports)
+/// to the Official phpMyAdmin worker on `127.0.0.1:889`, auto-starting the systemd unit if
+/// installed on disk, or serving the Dual-Mode 1-Click Launcher if not yet installed.
+pub async fn serve_official_phpmyadmin(
+    req: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let mut stream_opt = TcpStream::connect(("127.0.0.1", OFFICIAL_PMA_PORT)).await.ok();
+
+    if stream_opt.is_none()
+        && state.config.is_production()
+        && Path::new(OFFICIAL_PMA_DIR).join("index.php").is_file()
+        && state
+            .webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Systemctl)
+    {
+        let _ = state
+            .webserver
+            .executor()
+            .run(
+                AllowedBinary::Systemctl,
+                &["start", OFFICIAL_PMA_UNIT_NAME],
+                Duration::from_secs(8),
+            )
+            .await;
+        for _ in 0..8 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", OFFICIAL_PMA_PORT)).await {
+                stream_opt = Some(s);
+                break;
+            }
+        }
+    }
+
+    let Some(mut stream) = stream_opt else {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(render_official_pma_launcher_html());
+    };
+
+    let method = req.method().as_str();
+    let path = req.uri().path();
+    let target_uri = match req.uri().query() {
+        Some(q) if !q.is_empty() => format!("{path}?{q}"),
+        _ => path.to_string(),
+    };
+    let (host, scheme) = {
+        let conn_info = req.connection_info();
+        (
+            conn_info.host().to_string(),
+            conn_info.scheme().to_string(),
+        )
+    };
+
+    let mut raw_req = Vec::with_capacity(512 + body.len());
+    raw_req.extend_from_slice(format!("{method} {target_uri} HTTP/1.1\r\n").as_bytes());
+    raw_req.extend_from_slice(format!("Host: {host}\r\n").as_bytes());
+    raw_req.extend_from_slice(b"Connection: close\r\n");
+    raw_req.extend_from_slice(format!("X-Forwarded-Host: {host}\r\n").as_bytes());
+    raw_req.extend_from_slice(format!("X-Forwarded-Proto: {scheme}\r\n").as_bytes());
+
+    for (hname, hval) in req.headers() {
+        let lower = hname.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "host"
+                | "connection"
+                | "transfer-encoding"
+                | "content-length"
+                | "accept-encoding"
+                | "x-forwarded-host"
+                | "x-forwarded-proto"
+        ) {
+            continue;
+        }
+        if let Ok(v) = hval.to_str() {
+            if !v.contains('\r') && !v.contains('\n') {
+                raw_req.extend_from_slice(format!("{}: {v}\r\n", hname.as_str()).as_bytes());
+            }
+        }
+    }
+    raw_req.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    raw_req.extend_from_slice(&body);
+
+    if tokio::time::timeout(Duration::from_secs(60), stream.write_all(&raw_req))
+        .await
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .is_err()
+    {
+        return HttpResponse::BadGateway()
+            .content_type("text/plain; charset=utf-8")
+            .body("Failed to forward request to Official phpMyAdmin worker");
+    }
+
+    let mut resp_bytes = Vec::with_capacity(16 * 1024);
+    if tokio::time::timeout(Duration::from_secs(120), stream.read_to_end(&mut resp_bytes))
+        .await
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .is_err()
+    {
+        return HttpResponse::GatewayTimeout()
+            .content_type("text/plain; charset=utf-8")
+            .body("Official phpMyAdmin worker timed out");
+    }
+
+    let Some(hdr_end) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return HttpResponse::BadGateway()
+            .content_type("text/plain; charset=utf-8")
+            .body("Invalid upstream response from Official phpMyAdmin worker");
+    };
+
+    let header_text = String::from_utf8_lossy(&resp_bytes[..hdr_end]);
+    let raw_body = &resp_bytes[hdr_end + 4..];
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .and_then(|c| StatusCode::from_u16(c).ok())
+        .unwrap_or(StatusCode::OK);
+
+    let mut builder = HttpResponse::build(status_code);
+    let mut is_chunked = false;
+    let mut is_html = false;
+
+    for line in lines {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let key_trim = k.trim();
+        let val_trim = v.trim();
+        let lower = key_trim.to_ascii_lowercase();
+        if lower == "transfer-encoding" && val_trim.to_ascii_lowercase().contains("chunked") {
+            is_chunked = true;
+            continue;
+        }
+        if matches!(
+            lower.as_str(),
+            "connection" | "content-length" | "transfer-encoding" | "keep-alive"
+        ) {
+            continue;
+        }
+        if lower == "content-type" && val_trim.to_ascii_lowercase().contains("text/html") {
+            is_html = true;
+        }
+        builder.append_header((key_trim.to_string(), val_trim.to_string()));
+    }
+
+    let mut decoded_body = if is_chunked {
+        decode_chunked_body(raw_body)
+    } else {
+        raw_body.to_vec()
+    };
+
+    // Inject a subtle quick-switch pill in HTML pages so users can switch to Panel's custom DB UI (/phpadmin/) anytime.
+    if is_html && method != "HEAD" {
+        let badge = b"<a href=\"/phpadmin/\" style=\"position:fixed;bottom:12px;right:12px;z-index:99999;background:#0f172a;color:#fb923c;border:1px solid #f97316;padding:6px 12px;border-radius:999px;font:600 12px system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.35)\">\xE2\x87\x84 Trang CSDL Panel (/phpadmin/)</a></body>";
+        if let Some(pos) = decoded_body
+            .windows(7)
+            .rposition(|w| w.eq_ignore_ascii_case(b"</body>"))
+        {
+            decoded_body.splice(pos..pos + 7, badge.iter().copied());
+        }
+    }
+
+    builder.body(decoded_body)
+}
+

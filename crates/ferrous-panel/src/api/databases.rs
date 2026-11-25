@@ -458,3 +458,37 @@ pub async fn delete_database(
         .append_audit_log(Some(&actor), &ip, "database.delete", &format!("id={id}"))?;
     Ok(HttpResponse::Ok().json(dbs))
 }
+
+/// `GET /api/databases/phpmyadmin/status` — returns dual-mode status of Official phpMyAdmin (`/phpmyadmin/`) and Panel FerrousAdmin (`/phpadmin/`).
+pub async fn get_official_phpmyadmin_status(
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+    let status = crate::pma_web::get_official_phpmyadmin_status().await;
+    Ok(HttpResponse::Ok().json(status))
+}
+
+/// `POST /api/databases/phpmyadmin/install` — downloads & starts Official phpMyAdmin from phpmyadmin.net alongside FerrousAdmin (`/phpadmin/`).
+pub async fn install_official_phpmyadmin(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let status = crate::pma_web::install_or_repair_official_phpmyadmin(
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "database.phpmyadmin.install",
+        &format!("version={} running={}", status.version, status.running),
+    )?;
+    Ok(HttpResponse::Ok().json(status))
+}
+

@@ -749,11 +749,42 @@ fn clean_version_output(id: &str, raw: &str) -> String {
     trimmed.chars().take(64).collect()
 }
 
+type SoftwarePackagesCacheEntry = Option<(std::time::Instant, Vec<ServerPackageItem>)>;
+
+fn software_packages_cache() -> &'static std::sync::Mutex<SoftwarePackagesCacheEntry> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SoftwarePackagesCacheEntry>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn invalidate_software_packages_cache() {
+    if let Ok(mut guard) = software_packages_cache().lock() {
+        *guard = None;
+    }
+}
+
+fn binary_version_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, String>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub async fn list_software_packages(
     store: &ModuleStore,
     config: &Config,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<ServerPackageItem>, PanelError> {
+    if is_production_vps(config) {
+        if let Ok(guard) = software_packages_cache().lock() {
+            if let Some((ts, ref cached)) = *guard {
+                if ts.elapsed() < std::time::Duration::from_secs(25) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
     let defaults = default_software_packages(executor);
     let mut pkgs = if let Some(mut existing) = store.get_json::<Vec<ServerPackageItem>>(KV_SOFTWARE_PKGS)? {
         let mut merged = false;
@@ -778,12 +809,25 @@ pub async fn list_software_packages(
             if let Some(meta) = package_system_meta(&pkg.id) {
                 pkg.installed = executor.is_binary_available(meta.binary);
                 if pkg.installed {
-                    if let Some(ver) =
+                    let cached_ver = binary_version_cache()
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.get(&pkg.id).cloned());
+                    if let Some(v) = cached_ver {
+                        pkg.version = v;
+                    } else if let Some(ver) =
                         probe_binary_version_line(executor, meta.binary, meta.version_args).await
                     {
-                        pkg.version = clean_version_output(&pkg.id, &ver);
+                        let cleaned = clean_version_output(&pkg.id, &ver);
+                        if let Ok(mut g) = binary_version_cache().lock() {
+                            g.insert(pkg.id.clone(), cleaned.clone());
+                        }
+                        pkg.version = cleaned;
                     }
                 } else {
+                    if let Ok(mut g) = binary_version_cache().lock() {
+                        g.remove(&pkg.id);
+                    }
                     pkg.version = "not installed".to_string();
                 }
 
@@ -814,10 +858,7 @@ pub async fn list_software_packages(
                     } else {
                         0.0
                     };
-                    let live_logs = query_systemd_logs(executor, meta.systemd_unit, "15").await;
-                    if !live_logs.is_empty() {
-                        pkg.logs = live_logs;
-                    } else if !active {
+                    if !active {
                         pkg.logs.clear();
                     }
                 } else if !pkg.installed {
@@ -837,6 +878,9 @@ pub async fn list_software_packages(
             }
         }
         let _ = store.put_json(KV_SOFTWARE_PKGS, &pkgs);
+        if let Ok(mut guard) = software_packages_cache().lock() {
+            *guard = Some((std::time::Instant::now(), pkgs.clone()));
+        }
     }
 
     Ok(pkgs)
@@ -1227,7 +1271,18 @@ pub async fn software_package_action(
         }
     }
 
+    if prod {
+        if let Some(ref m) = meta {
+            if !m.is_cli_tool && !m.systemd_unit.is_empty() && pkg.installed {
+                let live_logs = query_systemd_logs(executor, m.systemd_unit, "15").await;
+                if !live_logs.is_empty() {
+                    pkg.logs = live_logs;
+                }
+            }
+        }
+    }
     store.put_json(KV_SOFTWARE_PKGS, &pkgs)?;
+    invalidate_software_packages_cache();
     Ok(pkgs)
 }
 
@@ -1352,5 +1407,6 @@ pub async fn save_software_package_config(
     ));
 
     store.put_json(KV_SOFTWARE_PKGS, &pkgs)?;
+    invalidate_software_packages_cache();
     Ok(pkgs)
 }

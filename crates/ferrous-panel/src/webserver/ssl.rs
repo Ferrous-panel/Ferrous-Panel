@@ -328,6 +328,7 @@ impl SslManager {
     }
 
     /// Reads real certificate status, issuer, subject, and expiration directly from disk via `openssl x509`.
+    /// Caches parsed metadata keyed by `(path, mtime, size)` for 60s so listing websites never spawns redundant subprocesses.
     /// Degrades gracefully to `Missing` if the certificate file is corrupt/unreadable so the SSL Manager UI stays usable.
     pub fn read_cert_status<'a>(
         &'a self,
@@ -354,8 +355,19 @@ impl SslManager {
                 sha256_fingerprint: None,
             };
 
-            if !cert_path.is_file() || !key_path.is_file() {
+            let Ok(cert_meta) = std::fs::metadata(&cert_path) else {
                 return Ok(missing_status());
+            };
+            if !cert_meta.is_file() || !key_path.is_file() {
+                return Ok(missing_status());
+            }
+
+            let cert_mtime = cert_meta.modified().ok();
+            let cert_len = cert_meta.len();
+            if let Some(mtime) = cert_mtime {
+                if let Some(cached) = lookup_cached_cert_status(&cert_path, mtime, cert_len) {
+                    return Ok(cached);
+                }
             }
 
             if !self.executor.is_binary_available(AllowedBinary::OpenSsl) {
@@ -415,7 +427,12 @@ impl SslManager {
             }
 
             match parse_openssl_x509_output(domain, &cert_str, &key_str, &out.stdout, Utc::now()) {
-                Ok(parsed) => Ok(parsed),
+                Ok(parsed) => {
+                    if let Some(mtime) = cert_mtime {
+                        store_cached_cert_status(&cert_path, mtime, cert_len, &parsed);
+                    }
+                    Ok(parsed)
+                }
                 Err(err) => {
                     tracing::warn!(
                         domain = %domain.as_str(),
@@ -1611,3 +1628,49 @@ fn parse_openssl_gmt_time(raw: &str) -> Result<DateTime<Utc>, PanelError> {
 
     Ok(naive.and_utc())
 }
+
+type CertCacheEntry = (
+    std::time::SystemTime,
+    u64,
+    std::time::Instant,
+    SiteSslStatus,
+);
+
+fn cert_status_cache() -> &'static std::sync::Mutex<std::collections::HashMap<PathBuf, CertCacheEntry>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, CertCacheEntry>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn lookup_cached_cert_status(
+    path: &Path,
+    mtime: std::time::SystemTime,
+    len: u64,
+) -> Option<SiteSslStatus> {
+    let guard = cert_status_cache().lock().ok()?;
+    let (cached_mtime, cached_len, ts, ref status) = *guard.get(path)?;
+    if cached_mtime == mtime && cached_len == len && ts.elapsed() < Duration::from_secs(60) {
+        Some(status.clone())
+    } else {
+        None
+    }
+}
+
+fn store_cached_cert_status(
+    path: &Path,
+    mtime: std::time::SystemTime,
+    len: u64,
+    status: &SiteSslStatus,
+) {
+    if let Ok(mut guard) = cert_status_cache().lock() {
+        if guard.len() > 512 {
+            guard.clear();
+        }
+        guard.insert(
+            path.to_path_buf(),
+            (mtime, len, std::time::Instant::now(), status.clone()),
+        );
+    }
+}
+

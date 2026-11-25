@@ -116,6 +116,14 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             web::put().to(databases::update_mysql_config),
         )
         .route(
+            "/databases/phpmyadmin/status",
+            web::get().to(databases::get_official_phpmyadmin_status),
+        )
+        .route(
+            "/databases/phpmyadmin/install",
+            web::post().to(databases::install_official_phpmyadmin),
+        )
+        .route(
             "/databases/{id}/password",
             web::put().to(databases::change_password),
         )
@@ -442,6 +450,14 @@ fn register_pma_api_routes(cfg: &mut web::ServiceConfig) {
         .route(
             "/databases/mysql-config",
             web::put().to(databases::update_mysql_config),
+        )
+        .route(
+            "/databases/phpmyadmin/status",
+            web::get().to(databases::get_official_phpmyadmin_status),
+        )
+        .route(
+            "/databases/phpmyadmin/install",
+            web::post().to(databases::install_official_phpmyadmin),
         )
         .route(
             "/databases/{id}/password",

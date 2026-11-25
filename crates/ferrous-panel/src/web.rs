@@ -97,13 +97,26 @@ async fn serve_asset_or_spa(req: HttpRequest, state: web::Data<AppState>) -> Htt
 }
 
 /// Registers Pure-Rust Native Panel UI (`/`, `/ui/*`), Pure-Rust FerrousAdmin (`/phpadmin/`),
-/// and SPA client-route fallback (e.g. `/panel`).
+/// Official phpMyAdmin reverse proxy (`/phpmyadmin/*`), and SPA client-route fallback (e.g. `/panel`).
 pub fn configure_web(cfg: &mut web::ServiceConfig) {
+    const PMA_UPLOAD_LIMIT: usize = 128 * 1024 * 1024;
     cfg.configure(configure_native_ui_assets)
         .service(web::resource("/").route(web::get().to(serve_index)))
         .service(web::resource("/phpadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
         .service(web::resource("/phpadmin/").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
-        .service(web::resource("/phpmyadmin").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
-        .service(web::resource("/phpmyadmin/").route(web::get().to(crate::pma_web::serve_ferrous_admin)))
+        .service(
+            web::resource("/phpmyadmin")
+                .route(web::get().to(crate::pma_web::redirect_phpmyadmin_slash)),
+        )
+        .service(
+            web::resource("/phpmyadmin/")
+                .app_data(web::PayloadConfig::new(PMA_UPLOAD_LIMIT))
+                .default_service(web::to(crate::pma_web::serve_official_phpmyadmin)),
+        )
+        .service(
+            web::resource("/phpmyadmin/{tail:.*}")
+                .app_data(web::PayloadConfig::new(PMA_UPLOAD_LIMIT))
+                .default_service(web::to(crate::pma_web::serve_official_phpmyadmin)),
+        )
         .service(web::resource("/{tail:.*}").route(web::get().to(serve_asset_or_spa)));
 }

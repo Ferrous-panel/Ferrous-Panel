@@ -381,12 +381,36 @@ fn require_command_ok(binary: &'static str, out: crate::system::cmd::CmdOutput) 
     })
 }
 
+type PhpVersionsCacheEntry = Option<(std::time::Instant, Vec<PhpVersionInstance>)>;
+
+fn php_versions_cache() -> &'static std::sync::Mutex<PhpVersionsCacheEntry> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<PhpVersionsCacheEntry>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn invalidate_php_versions_cache() {
+    if let Ok(mut guard) = php_versions_cache().lock() {
+        *guard = None;
+    }
+}
+
 pub async fn list_php_versions(
     store: &ModuleStore,
     config: &Config,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<PhpVersionInstance>, PanelError> {
     let prod = is_production_vps(config);
+    if prod {
+        if let Ok(guard) = php_versions_cache().lock() {
+            if let Some((ts, ref cached)) = *guard {
+                if ts.elapsed() < std::time::Duration::from_secs(25) {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+
     let mut list = if let Some(existing) = store.get_json::<Vec<PhpVersionInstance>>(KV_PHP_VERSIONS)? {
         existing
     } else {
@@ -408,17 +432,17 @@ pub async fn list_php_versions(
             inst.installed = installed;
 
             if installed {
-                // 1. Live full PHP version from php-fpm{ver} -v or php{ver} -v
-                let live_ver = if let Some(bin) = fpm_bin_enum {
+                // 1. Live full PHP version from php-fpm{ver} -v or lazy fallback php{ver} -v
+                let mut live_ver = if let Some(bin) = fpm_bin_enum {
                     probe_binary_version_line(executor, bin, &["-v"]).await
                 } else {
                     None
+                };
+                if live_ver.is_none() {
+                    if let Some(bin) = cli_bin_enum {
+                        live_ver = probe_binary_version_line(executor, bin, &["-v"]).await;
+                    }
                 }
-                .or(if let Some(bin) = cli_bin_enum {
-                    probe_binary_version_line(executor, bin, &["-v"]).await
-                } else {
-                    None
-                });
                 if let Some(ver_line) = live_ver {
                     inst.full_version = ver_line;
                 }
@@ -483,6 +507,9 @@ pub async fn list_php_versions(
             }
         }
         store.put_json(KV_PHP_VERSIONS, &list)?;
+        if let Ok(mut guard) = php_versions_cache().lock() {
+            *guard = Some((std::time::Instant::now(), list.clone()));
+        }
     }
 
     Ok(list)
@@ -682,6 +709,7 @@ pub async fn php_action(
     }
 
     store.put_json(KV_PHP_VERSIONS, &list)?;
+    invalidate_php_versions_cache();
     if prod {
         return list_php_versions(store, config, executor).await;
     }
@@ -868,6 +896,7 @@ pub async fn update_php_settings(
     }
 
     store.put_json(KV_PHP_VERSIONS, &list)?;
+    invalidate_php_versions_cache();
     Ok(list)
 }
 
@@ -990,6 +1019,7 @@ pub async fn toggle_php_extension(
 
     ext.enabled = target_enabled;
     store.put_json(KV_PHP_VERSIONS, &list)?;
+    invalidate_php_versions_cache();
     Ok(list)
 }
 

@@ -651,3 +651,101 @@ fn pure_rust_native_panel_ui_serves_without_nodejs_dist() -> Result<()> {
     })
 }
 
+#[test]
+fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
+    run_async(async {
+        let ws = TempWorkspace::new("dual-pma")?;
+        let (_cfg, state, password) = setup_test_state(&ws)?;
+        let app = init_service(App::new().configure(move |cfg| configure_app(cfg, state))).await;
+
+        // 1. /phpadmin/ serves Pure-Rust FerrousAdmin with switcher to /phpmyadmin/
+        let custom_req = TestRequest::get().uri("/phpadmin/").to_request();
+        let custom_resp = try_call_service(&app, custom_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /phpadmin/ failed: {e}"))?;
+        ensure_eq(&custom_resp.status(), &StatusCode::OK, "/phpadmin/ status")?;
+        let custom_html =
+            String::from_utf8_lossy(&read_body_bytes(custom_resp.into_body()).await?).to_string();
+        ensure(
+            custom_html.contains("FerrousAdmin") && custom_html.contains("/phpmyadmin/"),
+            "expected /phpadmin/ to render FerrousAdmin with switcher link to /phpmyadmin/",
+        )?;
+
+        // 2. /phpmyadmin redirects (302) to /phpmyadmin/
+        let redir_req = TestRequest::get().uri("/phpmyadmin").to_request();
+        let redir_resp = try_call_service(&app, redir_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /phpmyadmin failed: {e}"))?;
+        ensure_eq(&redir_resp.status(), &StatusCode::FOUND, "/phpmyadmin redirect")?;
+        let loc = redir_resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ensure_eq(&loc, &"/phpmyadmin/", "/phpmyadmin Location header")?;
+
+        // 3. /phpmyadmin/ renders either Official phpMyAdmin proxy or Dual-Mode Launcher with switcher back to /phpadmin/
+        let off_req = TestRequest::get().uri("/phpmyadmin/").to_request();
+        let off_resp = try_call_service(&app, off_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /phpmyadmin/ failed: {e}"))?;
+        let off_status = off_resp.status();
+        ensure(
+            off_status.is_success() || off_status.is_redirection(),
+            "expected /phpmyadmin/ to respond with 2xx or 3xx",
+        )?;
+        let off_html =
+            String::from_utf8_lossy(&read_body_bytes(off_resp.into_body()).await?).to_string();
+        if off_status == StatusCode::OK {
+            ensure(
+                off_html.contains("/phpadmin/") && off_html.contains("phpMyAdmin"),
+                "expected /phpmyadmin/ HTML to reference phpMyAdmin and switcher to /phpadmin/",
+            )?;
+        }
+
+        // 4. Authenticated GET /api/databases/phpmyadmin/status returns dual-mode URLs
+        let login_req = TestRequest::post()
+            .uri("/api/auth/login")
+            .set_json(json!({
+                "username": "admin_ferrous",
+                "password": password,
+                "rememberMe": false
+            }))
+            .to_request();
+        let login_resp = try_call_service(&app, login_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("login failed: {e}"))?;
+        let login_body: Value =
+            serde_json::from_slice(&read_body_bytes(login_resp.into_body()).await?)?;
+        let token = login_body["token"]
+            .as_str()
+            .context("missing session token")?;
+
+        let status_req = TestRequest::get()
+            .uri("/api/databases/phpmyadmin/status")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let status_resp = try_call_service(&app, status_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /api/databases/phpmyadmin/status failed: {e}"))?;
+        ensure_eq(
+            &status_resp.status(),
+            &StatusCode::OK,
+            "phpmyadmin status HTTP code",
+        )?;
+        let status_json: Value =
+            serde_json::from_slice(&read_body_bytes(status_resp.into_body()).await?)?;
+        ensure_eq(
+            &status_json["officialUrl"].as_str(),
+            &Some("/phpmyadmin/"),
+            "officialUrl",
+        )?;
+        ensure_eq(
+            &status_json["customPanelUrl"].as_str(),
+            &Some("/phpadmin/"),
+            "customPanelUrl",
+        )?;
+
+        Ok(())
+    })
+}

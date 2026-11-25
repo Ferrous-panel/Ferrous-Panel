@@ -347,6 +347,37 @@ export async function openJobDrawer(jobId) {
   }
 }
 
+const getApiCache = new Map();
+const inflightGetMap = new Map();
+const visitedRoutes = new Set();
+const GET_CACHE_TTL_MS = 15000;
+
+export function invalidateApiCache() {
+  getApiCache.clear();
+}
+
+function isCacheableGetPath(path, responseType, noCache) {
+  if (noCache || responseType !== 'json') return false;
+  if (
+    path.includes('/poll') ||
+    path.includes('/logs') ||
+    path.includes('download=1') ||
+    path.includes('refresh=1') ||
+    path.startsWith('/api/auth/')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function cloneCachedValue(val) {
+  if (val === null || typeof val !== 'object') return val;
+  if (typeof structuredClone === 'function') {
+    try { return structuredClone(val); } catch (_) {}
+  }
+  return JSON.parse(JSON.stringify(val));
+}
+
 export async function api(
   method,
   path,
@@ -359,148 +390,182 @@ export async function api(
     signal = null,
     keepAlive = false,
     retries = undefined,
+    noCache = false,
   } = {},
 ) {
   const upperMethod = String(method || 'GET').toUpperCase();
-  const maxRetries = typeof retries === 'number'
-    ? retries
-    : (upperMethod === 'GET' && !path.includes('/poll') ? 1 : 0);
+  const canCache = upperMethod === 'GET' && isCacheableGetPath(path, responseType, noCache);
 
-  let attempt = 0;
-  while (true) {
-    const headers = {
-      'Accept': responseType === 'blob' ? '*/*' : 'application/json',
-      'X-Requested-With': 'FerrousPanel-UI',
-    };
-    if (state.token) {
-      headers['Authorization'] = `Bearer ${state.token}`;
-      headers['X-FP-Session'] = state.token;
+  if (canCache) {
+    const hit = getApiCache.get(path);
+    if (hit && Date.now() - hit.ts < GET_CACHE_TTL_MS) {
+      return cloneCachedValue(hit.data);
     }
-
-    const reqCtrl = new AbortController();
-    let timedOut = false;
-    const viewSignal = (!keepAlive && upperMethod === 'GET' && !signal)
-      ? state.viewAbortController?.signal || null
-      : null;
-
-    const onExternalAbort = () => reqCtrl.abort('cancelled');
-    if (signal) {
-      if (signal.aborted) {
-        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
-        abortErr.isAbort = true;
-        throw abortErr;
-      }
-      signal.addEventListener('abort', onExternalAbort, { once: true });
+    if (!signal && inflightGetMap.has(path)) {
+      const shared = await inflightGetMap.get(path);
+      return cloneCachedValue(shared);
     }
-    if (viewSignal) {
-      if (viewSignal.aborted) {
-        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
-        abortErr.isAbort = true;
-        throw abortErr;
-      }
-      viewSignal.addEventListener('abort', onExternalAbort, { once: true });
-    }
+  }
 
-    const effectiveTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 35000;
-    const timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      reqCtrl.abort('timeout');
-    }, effectiveTimeout);
+  const runFetch = async () => {
+    const maxRetries = typeof retries === 'number'
+      ? retries
+      : (upperMethod === 'GET' && !path.includes('/poll') ? 1 : 0);
 
-    const init = {
-      method: upperMethod,
-      credentials: 'same-origin',
-      headers,
-      signal: reqCtrl.signal,
-    };
-    if (body !== undefined) {
-      if (rawBody) {
-        headers['Content-Type'] = contentType;
-        init.body = body;
-      } else {
-        headers['Content-Type'] = 'application/json';
-        init.body = JSON.stringify(body);
+    let attempt = 0;
+    while (true) {
+      const headers = {
+        'Accept': responseType === 'blob' ? '*/*' : 'application/json',
+        'X-Requested-With': 'FerrousPanel-UI',
+      };
+      if (state.token) {
+        headers['Authorization'] = `Bearer ${state.token}`;
+        headers['X-FP-Session'] = state.token;
       }
-    }
 
-    let resp;
-    try {
-      resp = await fetch(path, init);
-    } catch (fetchErr) {
-      clearTimeout(timeoutHandle);
-      if (signal) signal.removeEventListener('abort', onExternalAbort);
-      if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
+      const reqCtrl = new AbortController();
+      let timedOut = false;
+      const viewSignal = (!keepAlive && upperMethod === 'GET' && !signal)
+        ? state.viewAbortController?.signal || null
+        : null;
 
-      if (timedOut) {
-        const err = new Error(`Quá thời gian chờ phản hồi từ máy chủ (${Math.round(effectiveTimeout / 1000)}s).`);
-        err.isTimeout = true;
-        throw err;
+      const onExternalAbort = () => reqCtrl.abort('cancelled');
+      if (signal) {
+        if (signal.aborted) {
+          const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+          abortErr.isAbort = true;
+          throw abortErr;
+        }
+        signal.addEventListener('abort', onExternalAbort, { once: true });
       }
-      if (reqCtrl.signal.aborted || fetchErr?.name === 'AbortError') {
-        const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
-        abortErr.isAbort = true;
-        throw abortErr;
+      if (viewSignal) {
+        if (viewSignal.aborted) {
+          const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+          abortErr.isAbort = true;
+          throw abortErr;
+        }
+        viewSignal.addEventListener('abort', onExternalAbort, { once: true });
       }
-      if (attempt < maxRetries) {
+
+      const effectiveTimeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 35000;
+      const timeoutHandle = setTimeout(() => {
+        timedOut = true;
+        reqCtrl.abort('timeout');
+      }, effectiveTimeout);
+
+      const init = {
+        method: upperMethod,
+        credentials: 'same-origin',
+        headers,
+        signal: reqCtrl.signal,
+      };
+      if (body !== undefined) {
+        if (rawBody) {
+          headers['Content-Type'] = contentType;
+          init.body = body;
+        } else {
+          headers['Content-Type'] = 'application/json';
+          init.body = JSON.stringify(body);
+        }
+      }
+
+      let resp;
+      try {
+        resp = await fetch(path, init);
+      } catch (fetchErr) {
+        clearTimeout(timeoutHandle);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
+        if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
+
+        if (timedOut) {
+          const err = new Error(`Quá thời gian chờ phản hồi từ máy chủ (${Math.round(effectiveTimeout / 1000)}s).`);
+          err.isTimeout = true;
+          throw err;
+        }
+        if (reqCtrl.signal.aborted || fetchErr?.name === 'AbortError') {
+          const abortErr = new Error('Yêu cầu đã được hủy do chuyển trang.');
+          abortErr.isAbort = true;
+          throw abortErr;
+        }
+        if (attempt < maxRetries) {
+          attempt += 1;
+          await new Promise((r) => setTimeout(r, 350 * attempt));
+          continue;
+        }
+        throw new Error(`Lỗi kết nối mạng tới máy chủ: ${fetchErr?.message || 'NetworkError'}`);
+      } finally {
+        clearTimeout(timeoutHandle);
+        if (signal) signal.removeEventListener('abort', onExternalAbort);
+        if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
+      }
+
+      if (resp.status === 401 && path !== '/api/auth/login') {
+        clearRefreshTimer();
+        getApiCache.clear();
+        visitedRoutes.clear();
+        state.renderSeq += 1;
+        if (state.viewAbortController) {
+          state.viewAbortController.abort('unauthorized');
+          state.viewAbortController = null;
+        }
+        state.user = null;
+        state.token = '';
+        sessionStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem(TOKEN_KEY);
+        renderLogin('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+        throw new Error('Unauthorized');
+      }
+
+      if (attempt < maxRetries && [502, 503, 504].includes(resp.status)) {
         attempt += 1;
-        await new Promise((r) => setTimeout(r, 350 * attempt));
+        await new Promise((r) => setTimeout(r, 450 * attempt));
         continue;
       }
-      throw new Error(`Lỗi kết nối mạng tới máy chủ: ${fetchErr?.message || 'NetworkError'}`);
-    } finally {
-      clearTimeout(timeoutHandle);
-      if (signal) signal.removeEventListener('abort', onExternalAbort);
-      if (viewSignal) viewSignal.removeEventListener('abort', onExternalAbort);
-    }
 
-    if (resp.status === 401 && path !== '/api/auth/login') {
-      clearRefreshTimer();
-      state.renderSeq += 1;
-      if (state.viewAbortController) {
-        state.viewAbortController.abort('unauthorized');
-        state.viewAbortController = null;
+      const respContentType = resp.headers.get('content-type') || '';
+
+      if (responseType === 'blob') {
+        if (!resp.ok) {
+          const txt = await resp.text();
+          const err = new Error(formatHttpError(resp.status, respContentType, txt, null));
+          err.status = resp.status;
+          throw err;
+        }
+        return resp.blob();
       }
-      state.user = null;
-      state.token = '';
-      sessionStorage.removeItem(TOKEN_KEY);
-      localStorage.removeItem(TOKEN_KEY);
-      renderLogin('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-      throw new Error('Unauthorized');
-    }
 
-    if (attempt < maxRetries && [502, 503, 504].includes(resp.status)) {
-      attempt += 1;
-      await new Promise((r) => setTimeout(r, 450 * attempt));
-      continue;
-    }
-
-    const respContentType = resp.headers.get('content-type') || '';
-
-    if (responseType === 'blob') {
+      const text = await resp.text();
+      let data = null;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch (_) {
+        data = text;
+      }
       if (!resp.ok) {
-        const txt = await resp.text();
-        const err = new Error(formatHttpError(resp.status, respContentType, txt, null));
+        const msg = formatHttpError(resp.status, respContentType, text, data);
+        const err = new Error(msg);
         err.status = resp.status;
         throw err;
       }
-      return resp.blob();
+      if (upperMethod !== 'GET') {
+        getApiCache.clear();
+      } else if (canCache) {
+        if (getApiCache.size > 120) getApiCache.clear();
+        getApiCache.set(path, { ts: Date.now(), data: cloneCachedValue(data) });
+      }
+      return data;
     }
+  };
 
-    const text = await resp.text();
-    let data = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch (_) {
-      data = text;
-    }
-    if (!resp.ok) {
-      const msg = formatHttpError(resp.status, respContentType, text, data);
-      const err = new Error(msg);
-      err.status = resp.status;
-      throw err;
-    }
-    return data;
+  if (canCache && !signal) {
+    const p = runFetch().finally(() => {
+      inflightGetMap.delete(path);
+    });
+    inflightGetMap.set(path, p);
+    const out = await p;
+    return cloneCachedValue(out);
   }
+  return runFetch();
 }
 
 function applyTheme(theme) {
@@ -661,7 +726,9 @@ export async function renderCurrentView(forceCaps = false) {
 
   const container = document.getElementById('view-container');
   if (!container) return;
-  renderSkeleton(container);
+  if (!visitedRoutes.has(routeAtStart) || !container.children.length) {
+    renderSkeleton(container);
+  }
 
   try {
     await loadCapabilities(forceCaps);
@@ -712,6 +779,9 @@ export async function renderCurrentView(forceCaps = false) {
         break;
       default:
         await renderOverview(container, seq);
+    }
+    if (isActiveRender(seq, routeAtStart)) {
+      visitedRoutes.add(routeAtStart);
     }
   } catch (err) {
     if (!isActiveRender(seq, routeAtStart)) return;

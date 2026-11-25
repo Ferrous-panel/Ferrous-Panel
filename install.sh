@@ -623,6 +623,9 @@ else
         (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
       fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" ]; then
+        if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
         if grep -q 'mut stream: up_stream,' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           echo -e "${CYAN}[*] Applying compatibility patch: fixing struct pattern mutability in upstream ferrousx-http/src/server.rs...${NC}"
           sed -i 's/mut stream: up_stream,/stream: mut up_stream,/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
@@ -722,8 +725,13 @@ else
         ' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" && \
           mv "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/cli.rs"
       fi
-      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ] && grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
-        sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+      if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs" ]; then
+        if grep -q 'refusing to load symlinked private key' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+          sed -i 's/if meta\.file_type()\.is_symlink() {/if false \&\& meta.file_type().is_symlink() {/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+        fi
+        if grep -q 'let certified = load_certified_key(cert_path, key_path)?;' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"; then
+          sed -i 's/let certified = load_certified_key(cert_path, key_path)?;/let Ok(certified) = load_certified_key(cert_path, key_path) else { warn!(domain = %vhost.server_name, "Skipping unreadable TLS certificate for vhost"); continue; };/' "${FERROUSX_SRC_DIR}/crates/ferrousx-bin/src/main.rs"
+        fi
       fi
       for _cfg_rs in "${FERROUSX_SRC_DIR}/crates/ferrousx-config/src/config.rs" "${FERROUSX_SRC_DIR}/crates/ferrousx-core/src/config.rs"; do
         if [ -f "${_cfg_rs}" ] && grep -q 'validate_pem_cert_and_key_files(&clean_cert, &clean_key)?;' "${_cfg_rs}"; then
@@ -793,13 +801,155 @@ ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 # [5/7] Configure Active Web Server Engine (Nginx or FerrousX) & phpMyAdmin Proxy
 # ==============================================================================
 setup_phpmyadmin_proxy() {
-  # Pure-Rust FerrousAdmin (/phpadmin/) is built directly into ferrous-panel (Actix-Web on 127.0.0.1:888).
-  # Stop and disable any legacy PHP phpMyAdmin service so port 888 is exclusively owned by Rust ferrous-panel.
   if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
     systemctl disable --now ferrous-pma.service 2>/dev/null || true
   fi
   rm -f /etc/systemd/system/ferrous-pma.service /etc/ferrousx/pma-router.php 2>/dev/null || true
-  systemctl daemon-reload 2>/dev/null || true
+
+  local pma_dir="/www/server/phpmyadmin"
+  local pma_router="/www/server/ferrous-pma-router.php"
+  local pma_tmp="/var/lib/phpmyadmin/tmp"
+  mkdir -p /www/server "${pma_tmp}"
+
+  local php_bin=""
+  for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
+    if [ -x "$cand" ]; then php_bin="$cand"; break; fi
+  done
+  if { [ -z "$php_bin" ] || ! "$php_bin" -m 2>/dev/null | grep -qi '^mysqli$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^mbstring$'; } && command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
+    for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
+      if [ -x "$cand" ]; then php_bin="$cand"; break; fi
+    done
+  fi
+
+  if [ ! -f "${pma_dir}/index.php" ]; then
+    echo -e "${CYAN}[*] Downloading Official phpMyAdmin (v5.2.2) from phpmyadmin.net...${NC}"
+    mkdir -p "${pma_dir}"
+    local pma_tar="/tmp/phpMyAdmin-official-$$.tar.gz"
+    if curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
+      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://github.com/phpmyadmin/phpmyadmin/releases/download/RELEASE_5_2_2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
+      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz"; then
+      tar -xzf "${pma_tar}" --strip-components=1 -C "${pma_dir}" || true
+      rm -f "${pma_tar}"
+    fi
+  fi
+
+  if [ -f "${pma_dir}/index.php" ] && [ -n "$php_bin" ]; then
+    if [ ! -f "${pma_dir}/config.inc.php" ]; then
+      local bf_secret
+      bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecret32!')"
+      cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
+<?php
+declare(strict_types=1);
+\$cfg['blowfish_secret'] = '${bf_secret}';
+\$i = 1;
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = 'localhost';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+if (file_exists('/run/mysqld/mysqld.sock')) {
+    \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
+}
+\$i++;
+\$cfg['Servers'][\$i]['verbose'] = '127.0.0.1 (TCP)';
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['port'] = '3306';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['TempDir'] = '${pma_tmp}';
+\$cfg['ExecTimeLimit'] = 300;
+\$cfg['SendErrorReports'] = 'never';
+EOF_PMA_CFG
+      chmod 0640 "${pma_dir}/config.inc.php"
+    fi
+
+    cat > "${pma_router}" <<'EOF_PMA_ROUTER'
+<?php
+if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+    $_SERVER['HTTPS'] = 'on';
+    $_SERVER['SERVER_PORT'] = '443';
+}
+if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
+$uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if ($uri === '/phpmyadmin') {
+    header('Location: /phpmyadmin/', true, 302);
+    exit;
+}
+if (strpos($uri, '/phpmyadmin/') !== 0) {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
+}
+$rel = substr($uri, strlen('/phpmyadmin'));
+if ($rel === '' || $rel === '/') {
+    $rel = '/index.php';
+}
+$base = realpath('/www/server/phpmyadmin');
+if ($base === false) {
+    http_response_code(503);
+    echo 'Official phpMyAdmin directory missing';
+    exit;
+}
+$candidate = $base . $rel;
+$real = realpath($candidate);
+if ($real === false || strpos($real, $base) !== 0) {
+    http_response_code(404);
+    echo 'Not Found';
+    exit;
+}
+if (is_dir($real)) {
+    $idx = $real . '/index.php';
+    if (is_file($idx)) {
+        $real = $idx;
+        $rel = rtrim($rel, '/') . '/index.php';
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
+}
+$ext = strtolower(pathinfo($real, PATHINFO_EXTENSION));
+if ($ext !== 'php') {
+    return false;
+}
+chdir(dirname($real));
+$_SERVER['SCRIPT_FILENAME'] = $real;
+$_SERVER['SCRIPT_NAME'] = '/phpmyadmin' . $rel;
+$_SERVER['PHP_SELF'] = '/phpmyadmin' . $rel;
+require $real;
+EOF_PMA_ROUTER
+    chmod 0644 "${pma_router}"
+    chown -R www-data:www-data "${pma_dir}" "${pma_tmp}" 2>/dev/null || true
+
+    cat > /etc/systemd/system/ferrous-phpmyadmin.service <<EOF_PMA_UNIT
+[Unit]
+Description=FerrousPanel Official phpMyAdmin Worker (127.0.0.1:889)
+After=network.target mariadb.service mysql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=${pma_dir}
+Environment=PHP_CLI_SERVER_WORKERS=4
+ExecStart=${php_bin} -S 127.0.0.1:889 -d upload_max_filesize=128M -d post_max_size=128M -d memory_limit=256M -d max_execution_time=300 -t /www/server ${pma_router}
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF_PMA_UNIT
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now ferrous-phpmyadmin.service >/dev/null 2>&1 || true
+  else
+    systemctl daemon-reload 2>/dev/null || true
+  fi
 }
 
 if [ "$WEB_ENGINE" = "ferrousx" ]; then
