@@ -112,7 +112,7 @@ while [[ $# -gt 0 ]]; do
       FULL_LTO=true
       shift
       ;;
-    --force)
+    --force|--force-rebuild)
       FORCE_REBUILD=true
       shift
       ;;
