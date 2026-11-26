@@ -1731,7 +1731,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       <div class="page-head">
         <div>
           <h1 class="page-title">Cơ sở dữ liệu SQL — FerrousAdmin &amp; ${esc(pmaLabel)}</h1>
-          <p class="page-desc">Sử dụng song song cả <strong>Trang CSDL tuỳ chỉnh của Panel</strong> (<code>/phpadmin/</code>) lẫn <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code>).</p>
+          <p class="page-desc">Tự động đồng bộ 2 chiều giữa <strong>SQL của Panel</strong>, <strong>FerrousAdmin</strong> (<code>/phpadmin/</code>) và <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code> · tự động đăng nhập SSO khi mở từ Panel).</p>
         </div>
         <div class="row">
           <div class="tabs">
@@ -1740,6 +1740,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
             <button type="button" class="tab-btn ${activeDbTab === 'official' ? 'active' : ''}" id="db-tab-official">${esc(pmaLabel)} (/phpmyadmin/)</button>
             <button type="button" class="tab-btn ${activeDbTab === 'config' ? 'active' : ''}" id="db-tab-config">Cấu hình MySQL</button>
           </div>
+          <button type="button" class="btn btn-sm" id="db-sync-btn" title="Đồng bộ danh sách database giữa MariaDB/MySQL, Myphpadmin và Panel">Đồng bộ SQL</button>
           <a class="btn btn-sm" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">/phpadmin/ ↗</a>
           <a class="btn btn-sm" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">/phpmyadmin/ ↗</a>
           ${!officialRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pma">${officialInstalled ? `Khởi động ${esc(pmaLabel)}` : `Cài ${esc(pmaLabel)}`}</button>` : ''}
@@ -1870,12 +1871,41 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       `}
     `;
 
-    document.getElementById('db-tab-list')?.addEventListener('click', () => { activeDbTab = 'list'; draw(); });
+    const syncDatabasesNow = async (showToast = false) => {
+      try {
+        const [freshDbs, freshPma] = await Promise.all([
+          api('GET', '/api/databases', undefined, { noCache: true }),
+          api('GET', '/api/databases/phpmyadmin/status', undefined, { noCache: true }).catch(() => officialPma),
+        ]);
+        dbs = freshDbs;
+        if (freshPma) officialPma = freshPma;
+        if (!studioDbId && Array.isArray(dbs) && dbs[0]) {
+          studioDbId = dbs[0].id;
+        }
+        draw();
+        if (showToast) {
+          toast(`Đã đồng bộ ${Array.isArray(dbs) ? dbs.length : 0} cơ sở dữ liệu với ${pmaLabel}.`);
+        }
+      } catch (err) {
+        if (showToast) toast(err.message || 'Không thể đồng bộ SQL.', 'err');
+      }
+    };
+
+    document.getElementById('db-tab-list')?.addEventListener('click', async () => {
+      activeDbTab = 'list';
+      draw();
+      await syncDatabasesNow(false);
+    });
     document.getElementById('db-tab-studio')?.addEventListener('click', () => { activeDbTab = 'studio'; draw(); });
     document.getElementById('db-tab-official')?.addEventListener('click', () => { activeDbTab = 'official'; draw(); });
     document.getElementById('db-tab-config')?.addEventListener('click', () => { activeDbTab = 'config'; draw(); });
     document.getElementById('switch-to-official-tab')?.addEventListener('click', () => { activeDbTab = 'official'; draw(); });
-    document.getElementById('switch-to-panel-tab')?.addEventListener('click', () => { activeDbTab = 'studio'; draw(); });
+    document.getElementById('switch-to-panel-tab')?.addEventListener('click', async () => {
+      activeDbTab = 'studio';
+      draw();
+      await syncDatabasesNow(false);
+    });
+    document.getElementById('db-sync-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, () => syncDatabasesNow(true)));
     document.getElementById('pma-db-picker')?.addEventListener('change', (e) => {
       studioDbId = e.target.value;
       draw();

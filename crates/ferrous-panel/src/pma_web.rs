@@ -1233,9 +1233,21 @@ fn render_official_pma_config_inc(secret: &str) -> String {
         "<?php\n\
 declare(strict_types=1);\n\
 $cfg['blowfish_secret'] = '{secret}';\n\
+$ferrousSsoFile = '{sso_file}';\n\
+$ferrousSsoActive = !empty($_SERVER['HTTP_X_FERROUS_PMA_AUTH'])\n\
+    && $_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1'\n\
+    && is_readable($ferrousSsoFile);\n\
+$ferrousSsoPass = $ferrousSsoActive ? trim((string) @file_get_contents($ferrousSsoFile)) : '';\n\
 $i = 0;\n\
 $i++;\n\
-$cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+$cfg['Servers'][$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';\n\
+if ($ferrousSsoPass !== '') {{\n\
+    $cfg['Servers'][$i]['auth_type'] = 'config';\n\
+    $cfg['Servers'][$i]['user'] = 'fp_myphpadmin';\n\
+    $cfg['Servers'][$i]['password'] = $ferrousSsoPass;\n\
+}} else {{\n\
+    $cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+}}\n\
 $cfg['Servers'][$i]['host'] = 'localhost';\n\
 $cfg['Servers'][$i]['compress'] = false;\n\
 $cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
@@ -1243,8 +1255,14 @@ if (file_exists('/run/mysqld/mysqld.sock')) {{\n\
     $cfg['Servers'][$i]['socket'] = '/run/mysqld/mysqld.sock';\n\
 }}\n\
 $i++;\n\
-$cfg['Servers'][$i]['verbose'] = '127.0.0.1 (TCP)';\n\
-$cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+$cfg['Servers'][$i]['verbose'] = '127.0.0.1:3306 (TCP)';\n\
+if ($ferrousSsoPass !== '') {{\n\
+    $cfg['Servers'][$i]['auth_type'] = 'config';\n\
+    $cfg['Servers'][$i]['user'] = 'fp_myphpadmin';\n\
+    $cfg['Servers'][$i]['password'] = $ferrousSsoPass;\n\
+}} else {{\n\
+    $cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+}}\n\
 $cfg['Servers'][$i]['host'] = '127.0.0.1';\n\
 $cfg['Servers'][$i]['port'] = '3306';\n\
 $cfg['Servers'][$i]['compress'] = false;\n\
@@ -1254,7 +1272,8 @@ $cfg['SaveDir'] = '';\n\
 $cfg['TempDir'] = '{OFFICIAL_PMA_TMP_DIR}';\n\
 $cfg['AllowThirdPartyFraming'] = 'sameorigin';\n\
 $cfg['ExecTimeLimit'] = 300;\n\
-$cfg['SendErrorReports'] = 'never';\n"
+$cfg['SendErrorReports'] = 'never';\n",
+        sso_file = crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE
     )
 }
 
@@ -1364,10 +1383,14 @@ fn set_dir_mode(path: &str, mode: u32) {
 }
 
 fn ensure_config_allows_sameorigin_frame(cfg_inc: &Path) {
-    if let Ok(mut content) = std::fs::read_to_string(cfg_inc) {
-        if !content.contains("AllowThirdPartyFraming") {
-            content.push_str("\n$cfg['AllowThirdPartyFraming'] = 'sameorigin';\n");
-            let _ = atomic_write_file(cfg_inc, content.as_bytes(), 0o640);
+    if let Ok(content) = std::fs::read_to_string(cfg_inc) {
+        if !content.contains("HTTP_X_FERROUS_PMA_AUTH") {
+            let secret = generate_blowfish_secret();
+            let _ = atomic_write_file(
+                cfg_inc,
+                render_official_pma_config_inc(&secret).as_bytes(),
+                0o640,
+            );
         }
     }
 }
@@ -1557,11 +1580,28 @@ pub async fn install_or_repair_official_phpmyadmin(
         }
     }
 
-    // 3. Prepare tmp dir, config.inc.php, router, directory permissions, and systemd unit on 127.0.0.1:18889.
+    // 3. Prepare tmp dir, config.inc.php, router, directory permissions, SSO account, and systemd unit on 127.0.0.1:18889.
     std::fs::create_dir_all(OFFICIAL_PMA_TMP_DIR)?;
     set_dir_mode("/var/lib/phpmyadmin", 0o755);
     set_dir_mode(OFFICIAL_PMA_TMP_DIR, 0o770);
     set_dir_mode(OFFICIAL_PMA_DIR, 0o755);
+
+    let _ = crate::modules::databases::ensure_myphpadmin_sso_mysql_account(executor).await;
+    if executor.is_binary_available(AllowedBinary::Chown)
+        && Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
+    {
+        let _ = executor
+            .run(
+                AllowedBinary::Chown,
+                &[
+                    "root:www-data",
+                    crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE,
+                ],
+                Duration::from_secs(5),
+            )
+            .await;
+        set_dir_mode(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE, 0o640);
+    }
 
     let cfg_inc = pma_dir.join("config.inc.php");
     if !cfg_inc.is_file() {
@@ -1836,6 +1876,30 @@ fn render_official_pma_launcher_html(version: &str) -> String {
     template.replace("__PMA_NAME__", &display)
 }
 
+fn is_valid_panel_session_request(req: &HttpRequest, state: &AppState) -> bool {
+    let token_candidate = req
+        .cookie(crate::auth::middleware::SESSION_COOKIE_NAME)
+        .map(|c| c.value().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            req.headers()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().strip_prefix("Bearer "))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        });
+    let Some(token) = token_candidate else {
+        return false;
+    };
+    state
+        .auth_store
+        .verify_session(&token)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 /// Reverse-proxies `/phpmyadmin/*` (all HTTP methods, cookies, sessions, SQL uploads/exports)
 /// to the Myphpadmin worker on `127.0.0.1:18889`, auto-healing & auto-starting the systemd unit
 /// if installed on disk, or serving the Dual-Mode 1-Click Launcher if not yet installed.
@@ -1910,6 +1974,37 @@ pub async fn serve_official_phpmyadmin(
             .body(render_official_pma_launcher_html(&ver));
     };
 
+    let sso_authorized = is_valid_panel_session_request(&req, &state);
+    if sso_authorized
+        && state.config.is_production()
+        && !Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
+    {
+        let _ = crate::modules::databases::ensure_myphpadmin_sso_mysql_account(
+            state.webserver.executor().as_ref(),
+        )
+        .await;
+        if state
+            .webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Chown)
+            && Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
+        {
+            let _ = state
+                .webserver
+                .executor()
+                .run(
+                    AllowedBinary::Chown,
+                    &[
+                        "root:www-data",
+                        crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE,
+                    ],
+                    Duration::from_secs(5),
+                )
+                .await;
+            set_dir_mode(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE, 0o640);
+        }
+    }
+
     let method = req.method().as_str();
     let path = req.uri().path();
     let target_uri = match req.uri().query() {
@@ -1938,6 +2033,9 @@ pub async fn serve_official_phpmyadmin(
     raw_req.extend_from_slice(b"Connection: close\r\n");
     raw_req.extend_from_slice(format!("X-Forwarded-Host: {host}\r\n").as_bytes());
     raw_req.extend_from_slice(format!("X-Forwarded-Proto: {scheme}\r\n").as_bytes());
+    if sso_authorized {
+        raw_req.extend_from_slice(b"X-Ferrous-PMA-Auth: 1\r\n");
+    }
 
     for (hname, hval) in req.headers() {
         let lower = hname.as_str().to_ascii_lowercase();
@@ -1950,6 +2048,7 @@ pub async fn serve_official_phpmyadmin(
                 | "accept-encoding"
                 | "x-forwarded-host"
                 | "x-forwarded-proto"
+                | "x-ferrous-pma-auth"
         ) {
             continue;
         }

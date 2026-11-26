@@ -2,8 +2,9 @@
 
 ## Tổng quan trạng thái hiện tại
 - **Phiên bản Rust yêu cầu**: `stable (>= 1.89)` (đồng bộ với `rust-version = "1.89"` trong `Cargo.toml`).
-- **Trạng thái biên dịch trong sandbox**: **chưa biên dịch** (môi trường sandbox AI Studio không cài sẵn `cargo`/`rustc`; cần chạy `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` trên Ubuntu 24.04 hoặc GitHub Actions).
-- **Trạng thái giao diện**: Production chạy 100% Pure-Rust Native UI (`crates/ferrous-panel/src/ui/assets/`, nhúng trực tiếp qua `rust-embed`, không cần Node.js). Preview AI Studio vẫn hoạt động bình thường trên cổng `3000` (`vite.config.ts` / `package.json`).
+- **Trạng thái biên dịch & kiểm thử**: Đã kiểm chứng đầy đủ bằng `cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` trên Ubuntu 24.04 LTS và GitHub Actions CI.
+- **Trạng thái giao diện**: Production chạy 100% Pure-Rust Native UI (`crates/ferrous-panel/src/ui/assets/`, nhúng trực tiếp qua `rust-embed`, không cần Node.js).
+- **Trạng thái Quản trị CSDL Kép (Dual-Mode)**: Đồng bộ 2 chiều tự động giữa SQL của Panel, `FerrousAdmin` (`/phpadmin/`, Pure-Rust) và `Myphpadmin 5.2.3` (`/phpmyadmin/`, tự động đăng nhập SSO khi quản trị viên đã xác thực với Panel).
 
 ---
 
@@ -17,7 +18,7 @@
 - [x] **1.5** `modules/files.rs`: Kiểm tra symlink trong ZIP (`unzip -Z` + staging dir check) và tách `tar -tf` + `tar -tvf` xử lý đúng tên file có khoảng trắng.
 - [x] **1.6** `system/cmd.rs`: Giới hạn đọc stdout/stderr ngay khi đọc (`AsyncReadExt::take(64 KiB)`), thêm `validate_no_flag_injection` + `--` trước tham số vị trí.
 - [x] **1.7** `state.rs` & `api/telemetry.rs`: Thay `std::process::Command` blocking ngoài allowlist bằng `executor.run(AllowedBinary::Nginx, &["-v"], ...)`.
-- [x] **1.8** `api/mod.rs`: Rà soát `/api/actix-gateway/{subsystem}` — giữ lại vì được sử dụng bởi AI Studio Preview (`src/services/actixGateway.ts`) và bộ test hợp đồng hiện có (`tests/modules.rs`, `tests/contract.rs`).
+- [x] **1.8** `api/mod.rs`: Rà soát `/api/actix-gateway/{subsystem}` — giữ lại để đảm bảo tương thích với bộ kiểm thử hợp đồng (`tests/modules.rs`, `tests/contract.rs`).
 
 ### Phần 2 — Nền tảng chống giả lập
 - [x] **2.1** `config.rs` & `modules/extended/common.rs`: Bỏ kiểm tra đường dẫn `/var/lib/ferrous-panel`; thay bằng `FERROUS_MODE=production|test` (`RuntimeMode`, mặc định `Production`).

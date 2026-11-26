@@ -73,8 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/Ferrous-panel/Ferrous-Panel/main/un
    - Hardened `remote-download` SSRF defense: `--max-redirs 0`, `--proto-redir =http,https`, DNS pre-resolution + `--resolve` IP pinning, blocking RFC1918, loopback, CGNAT `100.64.0.0/10`, link-local/metadata `169.254.169.254`, IPv4-mapped IPv6 `::ffff:a.b.c.d`, and decimal/hex/octal obfuscated hosts.
    - Archive extraction validates both TAR (`tar -tf` + `tar -tvf`, space-safe filenames) and ZIP (`unzip -Z` + staging symlink check) against zip-slip and symlink attacks.
 
-6. **Databases (`MariaDB`, `PostgreSQL`, embedded `SQLite 3 WAL`)**
+6. **Databases (`MariaDB`, `PostgreSQL`, embedded `SQLite 3 WAL`) & Dual-Mode SQL Studio**
    - Provisions databases/users, schema inspection, SQL execution, and dumps via `mysql`/`psql` with credentials piped over `stdin` (never exposed on argv or logs) and pure-Rust SQLite management.
+   - **Dual-Mode Database Administration**: Runs Pure-Rust **FerrousAdmin** (`/phpadmin/`) and **Myphpadmin 5.2.3** (`/phpmyadmin/`) side by side with automatic two-way MariaDB schema discovery and Panel-authenticated Single Sign-On (SSO).
 
 7. **Firewall (`UFW`), Fail2ban & SSH Hardening (`/api/security*`, `/api/ssh*`)**
    - Real `ufw status numbered` readback and anti-lockout guard protecting active SSH and Panel ports unless confirmed (`?force=true`).

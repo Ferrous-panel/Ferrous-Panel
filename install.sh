@@ -851,15 +851,48 @@ setup_phpmyadmin_proxy() {
   fi
 
   if [ -f "${pma_dir}/index.php" ] && [ -n "$php_bin" ]; then
-    if [ ! -f "${pma_dir}/config.inc.php" ]; then
+    local sso_file="/etc/ferrous-panel/myphpadmin.sso.key"
+    mkdir -p /etc/ferrous-panel
+    if [ ! -f "${sso_file}" ] || [ ! -s "${sso_file}" ]; then
+      openssl rand -hex 16 2>/dev/null > "${sso_file}" || printf 'FerrousMyphpadminSsoSecretKey32x' > "${sso_file}"
+    fi
+    chown root:www-data "${sso_file}" 2>/dev/null || true
+    chmod 0640 "${sso_file}" 2>/dev/null || true
+    local sso_pw
+    sso_pw="$(tr -d '[:space:]' < "${sso_file}" 2>/dev/null || true)"
+    if [ -n "${sso_pw}" ] && command -v mysql >/dev/null 2>&1; then
+      mysql --batch --raw <<EOF_PMA_SSO >/dev/null 2>&1 || true
+CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}';
+CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}';
+ALTER USER 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}';
+ALTER USER 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}';
+GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'localhost' WITH GRANT OPTION;
+GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'127.0.0.1' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF_PMA_SSO
+    fi
+
+    if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "HTTP_X_FERROUS_PMA_AUTH" "${pma_dir}/config.inc.php" 2>/dev/null; then
       local bf_secret
       bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecretKey')"
       cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
 <?php
 declare(strict_types=1);
 \$cfg['blowfish_secret'] = '${bf_secret}';
+\$ferrousSsoFile = '${sso_file}';
+\$ferrousSsoActive = !empty(\$_SERVER['HTTP_X_FERROUS_PMA_AUTH'])
+    && \$_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1'
+    && is_readable(\$ferrousSsoFile);
+\$ferrousSsoPass = \$ferrousSsoActive ? trim((string) @file_get_contents(\$ferrousSsoFile)) : '';
 \$i = 1;
-\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';
+if (\$ferrousSsoPass !== '') {
+    \$cfg['Servers'][\$i]['auth_type'] = 'config';
+    \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
+    \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
+} else {
+    \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+}
 \$cfg['Servers'][\$i]['host'] = 'localhost';
 \$cfg['Servers'][\$i]['compress'] = false;
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
@@ -867,8 +900,14 @@ if (file_exists('/run/mysqld/mysqld.sock')) {
     \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
 }
 \$i++;
-\$cfg['Servers'][\$i]['verbose'] = '127.0.0.1 (TCP)';
-\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['verbose'] = '127.0.0.1:3306 (TCP)';
+if (\$ferrousSsoPass !== '') {
+    \$cfg['Servers'][\$i]['auth_type'] = 'config';
+    \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
+    \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
+} else {
+    \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+}
 \$cfg['Servers'][\$i]['host'] = '127.0.0.1';
 \$cfg['Servers'][\$i]['port'] = '3306';
 \$cfg['Servers'][\$i]['compress'] = false;
@@ -879,8 +918,6 @@ if (file_exists('/run/mysqld/mysqld.sock')) {
 \$cfg['SendErrorReports'] = 'never';
 EOF_PMA_CFG
       chmod 0640 "${pma_dir}/config.inc.php"
-    elif ! grep -q "AllowThirdPartyFraming" "${pma_dir}/config.inc.php" 2>/dev/null; then
-      printf "\n\$cfg['AllowThirdPartyFraming'] = 'sameorigin';\n" >> "${pma_dir}/config.inc.php"
     fi
 
     cat > "${pma_router}" <<'EOF_PMA_ROUTER'

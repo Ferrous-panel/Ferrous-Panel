@@ -348,6 +348,8 @@ impl CommandExecutor for MockExecutor {
                         && sql.contains("SUM(")
                     {
                         "size_mb\n12.34".to_string()
+                    } else if sql.contains("information_schema.SCHEMATA") {
+                        "SCHEMA_NAME\tDEFAULT_COLLATION_NAME\ninformation_schema\tutf8mb3_general_ci\nmysql\tutf8mb4_general_ci\n".to_string()
                     } else if sql.contains("information_schema.TABLES") {
                         "table_name\ttable_rows\tsize_kb\nusers\t15\t32.50".to_string()
                     } else if sql.contains("information_schema.COLUMNS") {

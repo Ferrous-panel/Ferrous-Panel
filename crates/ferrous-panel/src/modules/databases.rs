@@ -711,10 +711,134 @@ async fn query_db_connections(
     }
 }
 
+const MYPHPADMIN_SSO_USER: &str = "fp_myphpadmin";
+pub const MYPHPADMIN_SSO_PASS_FILE: &str = "/etc/ferrous-panel/myphpadmin.sso.key";
+
+fn is_system_mysql_schema(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "information_schema" | "performance_schema" | "mysql" | "sys" | "phpmyadmin" | "test"
+    )
+}
+
+/// Ensures a local-only MariaDB superuser (`fp_myphpadmin@localhost` / `127.0.0.1`) exists
+/// and stores its random 32-char credential in `/etc/ferrous-panel/myphpadmin.sso.key` (mode `0600`)
+/// so `Myphpadmin` automatically logs into the Panel's MariaDB instance when the administrator is
+/// authenticated to FerrousPanel (or falls back to standard cookie login otherwise).
+pub async fn ensure_myphpadmin_sso_mysql_account(
+    executor: &dyn CommandExecutor,
+) -> Option<(String, String)> {
+    if !executor.is_binary_available(AllowedBinary::Mysql) {
+        return None;
+    }
+    let key_path = Path::new(MYPHPADMIN_SSO_PASS_FILE);
+    let existing_pw = std::fs::read_to_string(key_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() >= 16 && !s.contains('\'') && !s.contains('\\'));
+
+    let sso_pw = existing_pw.unwrap_or_else(|| {
+        use rand::rngs::OsRng;
+        use rand::RngCore;
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut raw = [0u8; 32];
+        if OsRng.try_fill_bytes(&mut raw).is_err() {
+            return String::new();
+        }
+        let generated: String = raw
+            .iter()
+            .map(|&b| ALPHABET[(b as usize) % ALPHABET.len()] as char)
+            .collect();
+        if let Some(parent) = key_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = atomic_write_file(key_path, generated.as_bytes(), 0o600);
+        generated
+    });
+
+    if sso_pw.is_empty() {
+        return None;
+    }
+
+    let Ok(quser) = escape_mysql_literal(MYPHPADMIN_SSO_USER) else {
+        return None;
+    };
+    let Ok(qpw) = escape_mysql_literal(&sso_pw) else {
+        return None;
+    };
+    let grant_sql = format!(
+        "CREATE USER IF NOT EXISTS {quser}@'localhost' IDENTIFIED BY {qpw}; \
+         CREATE USER IF NOT EXISTS {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
+         ALTER USER {quser}@'localhost' IDENTIFIED BY {qpw}; \
+         ALTER USER {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
+         GRANT ALL PRIVILEGES ON *.* TO {quser}@'localhost' WITH GRANT OPTION; \
+         GRANT ALL PRIVILEGES ON *.* TO {quser}@'127.0.0.1' WITH GRANT OPTION; \
+         FLUSH PRIVILEGES;"
+    );
+    if run_mysql_stdin(executor, None, &grant_sql).await.is_ok() {
+        Some((MYPHPADMIN_SSO_USER.to_string(), sso_pw))
+    } else {
+        None
+    }
+}
+
+/// Automatically discovers user-created MariaDB schemas on the host (e.g. databases created inside
+/// `Myphpadmin` `/phpmyadmin/` or `wp-cli`) and registers them into `ModuleStore` so the Panel
+/// SQL list, `FerrousAdmin` (`/phpadmin/`), and `Myphpadmin` (`/phpmyadmin/`) stay 100% synchronized.
+async fn reconcile_live_mariadb_schemas_into_store(
+    store: &ModuleStore,
+    executor: &dyn CommandExecutor,
+) {
+    if !executor.is_binary_available(AllowedBinary::Mysql) {
+        return;
+    }
+    let sql = "SELECT SCHEMA_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME LIMIT 100;";
+    let Ok(out) = run_mysql(executor, None, sql).await else {
+        return;
+    };
+    let existing = store.list_databases().unwrap_or_default();
+    for line in out.stdout.lines().skip(1) {
+        let mut parts = line.split('\t');
+        let Some(raw_name) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if raw_name.is_empty() || is_system_mysql_schema(raw_name) {
+            continue;
+        }
+        let Ok(db_ident) = SqlIdentifier::parse(raw_name) else {
+            continue;
+        };
+        let already_tracked = existing
+            .iter()
+            .any(|m| m.name.eq_ignore_ascii_case(db_ident.as_str()));
+        if already_tracked {
+            continue;
+        }
+        let raw_collation = parts.next().map(str::trim).unwrap_or("utf8mb4_unicode_ci");
+        let collation = CollationName::parse(raw_collation)
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|_| "utf8mb4_unicode_ci".to_string());
+        let meta = ManagedDbMeta {
+            id: format!("db-{}-{}", DbEngineKind::MariaDb.id_prefix(), db_ident.as_str()),
+            name: db_ident.as_str().to_string(),
+            engine: DbEngineKind::MariaDb.label().to_string(),
+            host: "127.0.0.1".to_string(),
+            port: DbEngineKind::MariaDb.default_port(),
+            username: "root".to_string(),
+            collation,
+            linked_app_id: String::new(),
+            linked_app_name: String::new(),
+            created_at: Utc::now().to_rfc3339(),
+        };
+        let _ = store.insert_database(&meta);
+    }
+}
+
 pub async fn list_databases(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<SqlDatabase>, PanelError> {
+    reconcile_live_mariadb_schemas_into_store(store, executor).await;
     let metas = store.list_databases()?;
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
