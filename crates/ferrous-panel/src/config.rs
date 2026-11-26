@@ -126,6 +126,16 @@ impl Config {
             if default_cert.is_file() && default_key.is_file() {
                 return Some((default_cert, default_key));
             }
+            if let Some(ref dom) = self.custom_domain {
+                let d = dom.trim();
+                if !d.is_empty() && !d.contains('/') && !d.contains("..") {
+                    let le_cert = PathBuf::from(format!("/etc/letsencrypt/live/{d}/fullchain.pem"));
+                    let le_key = PathBuf::from(format!("/etc/letsencrypt/live/{d}/privkey.pem"));
+                    if le_cert.is_file() && le_key.is_file() {
+                        return Some((le_cert, le_key));
+                    }
+                }
+            }
         }
         None
     }

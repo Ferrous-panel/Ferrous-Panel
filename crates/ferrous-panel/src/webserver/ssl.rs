@@ -1040,15 +1040,23 @@ impl SslManager {
             }
 
             let status = self.read_cert_status(domain).await?;
-            if !status.present {
+            if !status.present || status.provider.as_deref() == Some("Self-Signed") {
                 restore_backup();
+                let reason = if !out.stderr.trim().is_empty() {
+                    out.stderr.trim().to_string()
+                } else if !out.stdout.trim().is_empty() {
+                    out.stdout.trim().to_string()
+                } else {
+                    format!(
+                        "certbot did not issue a CA-signed certificate for {} at {}",
+                        domain.as_str(),
+                        cert_path.display()
+                    )
+                };
                 return Err(PanelError::CommandFailed {
                     binary: AllowedBinary::Certbot.label(),
                     exit_code: out.exit_code,
-                    stderr: format!(
-                        "certificate at {} could not be verified by OpenSSL after Certbot run",
-                        cert_path.display()
-                    ),
+                    stderr: reason,
                 });
             }
             Ok(status)

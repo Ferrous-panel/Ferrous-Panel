@@ -696,6 +696,25 @@ fn is_panel_ssl_active(config: &Config, env_file: &Path) -> bool {
         && Path::new("/etc/ferrous-panel/ssl/privkey.pem").is_file()
 }
 
+fn sync_custom_domain_to_sqlite(config: &Config, domain: Option<&str>, ssl_enabled: Option<bool>) {
+    if let Ok(store) = crate::modules::ModuleStore::open(&config.db_path()) {
+        if let Ok(auth_store) = crate::auth::store::AuthStore::open(&config.db_path()) {
+            if let Ok(mut admin) =
+                crate::modules::extended::ssh_admin::load_panel_admin(&store, config, &auth_store)
+            {
+                admin.custom_domain = domain
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                if let Some(ssl) = ssl_enabled {
+                    admin.ssl_enabled = Some(ssl);
+                }
+                let _ = store.put_json("ext_panel_admin", &admin);
+            }
+        }
+    }
+}
+
 pub async fn issue_or_renew_panel_ssl(
     config: &Config,
     env_file: &Path,
@@ -719,6 +738,7 @@ pub async fn issue_or_renew_panel_ssl(
         upsert_env_var(env_file, "FERROUS_SECURE_COOKIE", "false")?;
         let _ = std::fs::remove_file(&panel_cert_dst);
         let _ = std::fs::remove_file(&panel_key_dst);
+        sync_custom_domain_to_sqlite(config, config.custom_domain.as_deref(), Some(false));
         if AllowedBinary::Systemctl.is_available() {
             let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
         }
@@ -735,11 +755,22 @@ pub async fn issue_or_renew_panel_ssl(
     }
 
     std::fs::create_dir_all(&panel_ssl_dir)?;
+    let sqlite_dom = crate::modules::ModuleStore::open(&config.db_path())
+        .ok()
+        .and_then(|s| {
+            s.get_json::<crate::api::contract::PanelAdminAccount>("ext_panel_admin")
+                .ok()
+                .flatten()
+        })
+        .and_then(|a| a.custom_domain)
+        .filter(|s| !s.trim().is_empty());
+
     let target_domain_raw = domain_override
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .or_else(|| read_env_key(env_file, "FERROUS_CUSTOM_DOMAIN"))
+        .or(sqlite_dom)
         .or_else(|| config.custom_domain.clone())
         .unwrap_or_default();
 
@@ -756,6 +787,7 @@ pub async fn issue_or_renew_panel_ssl(
             Domain::parse(target_domain_raw.trim()).map_err(|e| anyhow::anyhow!("{e}"))?;
         ensure_default_env_file(env_file, config)?;
         upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", valid_domain.as_str())?;
+        sync_custom_domain_to_sqlite(config, Some(valid_domain.as_str()), Some(true));
         display_target = valid_domain.as_str().to_string();
 
         if !force_self_signed {
@@ -772,19 +804,52 @@ pub async fn issue_or_renew_panel_ssl(
                 )
                 .await
             {
-                Ok(_) => {
+                Ok(st) if st.provider.as_deref() != Some("Self-Signed") => {
                     issued_provider = "Let's Encrypt (R3/E1)";
                 }
-                Err(le_err) => {
-                    eprintln!(
-                        "[!] Let's Encrypt issuance for '{}' could not complete right now ({le_err}); generating OpenSSL X.509 certificate for Panel HTTPS on port {active_port}...",
-                        valid_domain.as_str()
-                    );
-                    manager
-                        .ssl
-                        .issue_self_signed(&valid_domain, &[], 3650)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(_) | Err(_) => {
+                    // Fallback: try certbot standalone if port 80 is free, otherwise self-signed
+                    let mut standalone_ok = false;
+                    if AllowedBinary::Certbot.is_available() {
+                        let out = cmd::run(
+                            AllowedBinary::Certbot,
+                            &[
+                                "certonly",
+                                "--non-interactive",
+                                "--agree-tos",
+                                "--register-unsafely-without-email",
+                                "--standalone",
+                                "-d",
+                                valid_domain.as_str(),
+                                "--cert-name",
+                                valid_domain.as_str(),
+                                "--expand",
+                                "--force-renewal",
+                            ],
+                            Duration::from_secs(90),
+                        )
+                        .await;
+                        if out.map(|o| o.success).unwrap_or(false) {
+                            let _ = manager.ssl.reconcile_letsencrypt_live_files(&valid_domain);
+                            if let Ok(st) = manager.ssl.read_cert_status(&valid_domain).await {
+                                if st.present && st.provider.as_deref() != Some("Self-Signed") {
+                                    issued_provider = "Let's Encrypt (R3/E1)";
+                                    standalone_ok = true;
+                                }
+                            }
+                        }
+                    }
+                    if !standalone_ok {
+                        eprintln!(
+                            "[!] Let's Encrypt HTTP-01 challenge for '{}' could not complete right now (ensure port 80 is reachable and DNS A record points to this VPS); generating OpenSSL X.509 certificate for Panel HTTPS on port {active_port}...",
+                            valid_domain.as_str()
+                        );
+                        manager
+                            .ssl
+                            .issue_self_signed(&valid_domain, &[], 3650)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    }
                 }
             }
         } else {
@@ -843,6 +908,7 @@ pub async fn issue_or_renew_panel_ssl(
         if !out.success {
             bail!("openssl req -x509 failed: {}", out.stderr);
         }
+        sync_custom_domain_to_sqlite(config, None, Some(true));
     }
 
     ensure_default_env_file(env_file, config)?;
@@ -1310,6 +1376,7 @@ pub async fn run_fp_command(
                 || trimmed.eq_ignore_ascii_case("none")
             {
                 upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+                sync_custom_domain_to_sqlite(config, None, None);
                 if AllowedBinary::Systemctl.is_available() {
                     run_systemctl(&["restart", PANEL_SERVICE]).await?;
                 }
@@ -1320,6 +1387,7 @@ pub async fn run_fp_command(
             } else {
                 let valid_domain = Domain::parse(trimmed).map_err(|e| anyhow::anyhow!("{e}"))?;
                 upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", valid_domain.as_str())?;
+                sync_custom_domain_to_sqlite(config, Some(valid_domain.as_str()), None);
                 if AllowedBinary::Systemctl.is_available() {
                     run_systemctl(&["restart", PANEL_SERVICE]).await?;
                 }
@@ -1351,6 +1419,7 @@ pub async fn run_fp_command(
         }
         FpCommand::ClearDomain => {
             upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
+            sync_custom_domain_to_sqlite(config, None, None);
             if AllowedBinary::Systemctl.is_available() {
                 run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }

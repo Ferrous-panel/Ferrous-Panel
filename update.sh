@@ -60,6 +60,7 @@ FULL_LTO=false
 FORCE_REBUILD=false
 DO_ROLLBACK=false
 EXPLICIT_BIND=""
+EXPLICIT_DOMAIN=""
 PANEL_CONFIG_CHANGED=false
 
 usage() {
@@ -89,6 +90,7 @@ Options:
   --branch <BRANCH>            FerrousPanel Git branch (default: main)
   --version <TAG|latest>       GitHub Release tag for prebuilt binary (default: latest)
   --bind <IP>                  Set panel listen IP in panel.env (e.g. 0.0.0.0 for public IP, 127.0.0.1 for local-only)
+  --domain <DOMAIN>            Set panel custom domain in panel.env & auto-issue Let's Encrypt SSL on port :8443
   -h, --help                   Show this help message
 EOF_HELP
 }
@@ -181,6 +183,10 @@ while [[ $# -gt 0 ]]; do
         echo -e "${RED}[ERROR] --bind requires a valid IP address (e.g. 0.0.0.0 or 127.0.0.1).${NC}" >&2
         exit 1
       fi
+      shift 2
+      ;;
+    --domain)
+      EXPLICIT_DOMAIN="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -379,7 +385,8 @@ probe_panel_health() {
   local port="$2"
   local attempts="${3:-25}"
   for _ in $(seq 1 "${attempts}"); do
-    if curl -fsS --max-time 2 "http://${host}:${port}/api/health" >/dev/null 2>&1; then
+    if curl -fsS --max-time 2 "http://${host}:${port}/api/health" >/dev/null 2>&1 \
+      || curl -kfsS --max-time 2 "https://${host}:${port}/api/health" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.2
@@ -1430,12 +1437,70 @@ EOF_SVC
   ACTIVE_PANEL_ENTRANCE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_SECURITY_ENTRANCE=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
   ACTIVE_PANEL_ENTRANCE="${ACTIVE_PANEL_ENTRANCE:-/panel}"
   ACTIVE_PANEL_DOMAIN="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_CUSTOM_DOMAIN=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
+  if [ -n "${EXPLICIT_DOMAIN}" ]; then
+    ACTIVE_PANEL_DOMAIN="${EXPLICIT_DOMAIN}"
+    if grep -qE '^[[:space:]]*FERROUS_CUSTOM_DOMAIN=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      sed -i "s|^[[:space:]]*FERROUS_CUSTOM_DOMAIN=.*|FERROUS_CUSTOM_DOMAIN=${ACTIVE_PANEL_DOMAIN}|" /etc/ferrous-panel/panel.env
+    else
+      echo "FERROUS_CUSTOM_DOMAIN=${ACTIVE_PANEL_DOMAIN}" >> /etc/ferrous-panel/panel.env
+    fi
+    PANEL_CONFIG_CHANGED=true
+  fi
+
+  # Auto-recover FERROUS_CUSTOM_DOMAIN if blank in panel.env (from SQLite panel.db, /etc/ferrous-panel/ssl/fullchain.pem CN, or Let's Encrypt renewal/live dir)
+  if [ -z "${ACTIVE_PANEL_DOMAIN}" ]; then
+    if [ -f "${DATA_DIR}/panel.db" ] && command -v strings >/dev/null 2>&1; then
+      RECOVERED_DOM="$(strings "${DATA_DIR}/panel.db" 2>/dev/null | grep -oE '"customDomain":"[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"' | tail -n 1 | cut -d'"' -f4 || true)"
+      if [ -n "${RECOVERED_DOM}" ]; then
+        ACTIVE_PANEL_DOMAIN="${RECOVERED_DOM}"
+      fi
+    fi
+    if [ -z "${ACTIVE_PANEL_DOMAIN}" ] && [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && command -v openssl >/dev/null 2>&1; then
+      CERT_CN="$(openssl x509 -in /etc/ferrous-panel/ssl/fullchain.pem -noout -subject 2>/dev/null | sed -n 's/.*CN[[:space:]]*=[[:space:]]*\([a-zA-Z0-9.-]*\).*/\1/p' | head -n 1 || true)"
+      if [[ "${CERT_CN}" == *.* ]] && [[ "${CERT_CN}" != *.local ]] && [[ ! "${CERT_CN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        ACTIVE_PANEL_DOMAIN="${CERT_CN}"
+      fi
+    fi
+    if [ -z "${ACTIVE_PANEL_DOMAIN}" ] && [ -d "/etc/letsencrypt/live" ]; then
+      for _le_d in /etc/letsencrypt/live/*; do
+        [ -d "$_le_d" ] || continue
+        _cand="$(basename "$_le_d")"
+        _cand="${_cand%-000*}"
+        if [[ "$_cand" == *.* ]] && [[ "$_cand" != *.local ]] && [ ! -f "/etc/ferrousx/sites/${_cand}.toml" ] && [ ! -f "/etc/nginx/sites-enabled/${_cand}.conf" ]; then
+          ACTIVE_PANEL_DOMAIN="$_cand"
+          break
+        fi
+      done
+    fi
+    if [ -n "${ACTIVE_PANEL_DOMAIN}" ] && [ -f /etc/ferrous-panel/panel.env ]; then
+      if grep -qE '^[[:space:]]*FERROUS_CUSTOM_DOMAIN=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+        sed -i "s|^[[:space:]]*FERROUS_CUSTOM_DOMAIN=.*|FERROUS_CUSTOM_DOMAIN=${ACTIVE_PANEL_DOMAIN}|" /etc/ferrous-panel/panel.env
+      else
+        echo "FERROUS_CUSTOM_DOMAIN=${ACTIVE_PANEL_DOMAIN}" >> /etc/ferrous-panel/panel.env
+      fi
+      PANEL_CONFIG_CHANGED=true
+      echo -e "${GREEN}[+] Restored saved Panel Custom Domain: ${ACTIVE_PANEL_DOMAIN}${NC}"
+    fi
+  fi
+
   ACTIVE_SECURE_COOKIE="$(grep -E '^[[:space:]]*(export[[:space:]]+)?FERROUS_SECURE_COOKIE=' /etc/ferrous-panel/panel.env 2>/dev/null | tail -n 1 | cut -d= -f2 | tr -d '[:space:]\"'\''' || true)"
 
-  if [ -n "${ACTIVE_PANEL_DOMAIN}" ] && [ -f "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/fullchain.pem" ] && [ "${ACTIVE_SECURE_COOKIE}" != "true" ]; then
-    sed -i 's|^FERROUS_SECURE_COOKIE=.*|FERROUS_SECURE_COOKIE=true|' /etc/ferrous-panel/panel.env
-    ACTIVE_SECURE_COOKIE="true"
-    echo -e "${GREEN}[+] Enabled FERROUS_SECURE_COOKIE=true for HTTPS domain ${ACTIVE_PANEL_DOMAIN}.${NC}"
+  if [ -n "${ACTIVE_PANEL_DOMAIN}" ] && [ -f "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/fullchain.pem" ] && [ -f "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/privkey.pem" ]; then
+    mkdir -p /etc/ferrous-panel/ssl
+    cp -fL "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/fullchain.pem" /etc/ferrous-panel/ssl/fullchain.pem 2>/dev/null || true
+    cp -fL "/etc/letsencrypt/live/${ACTIVE_PANEL_DOMAIN}/privkey.pem" /etc/ferrous-panel/ssl/privkey.pem 2>/dev/null || true
+    chmod 0644 /etc/ferrous-panel/ssl/fullchain.pem 2>/dev/null || true
+    chmod 0600 /etc/ferrous-panel/ssl/privkey.pem 2>/dev/null || true
+    if ! grep -q '^FERROUS_SSL_CERT=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+      echo "FERROUS_SSL_CERT=/etc/ferrous-panel/ssl/fullchain.pem" >> /etc/ferrous-panel/panel.env
+      echo "FERROUS_SSL_KEY=/etc/ferrous-panel/ssl/privkey.pem" >> /etc/ferrous-panel/panel.env
+      PANEL_CONFIG_CHANGED=true
+    fi
+    if [ "${ACTIVE_SECURE_COOKIE}" != "true" ]; then
+      sed -i 's|^FERROUS_SECURE_COOKIE=.*|FERROUS_SECURE_COOKIE=true|' /etc/ferrous-panel/panel.env
+      ACTIVE_SECURE_COOKIE="true"
+      PANEL_CONFIG_CHANGED=true
+    fi
   elif [ "${ACTIVE_PANEL_BIND}" != "127.0.0.1" ] && [ "${ACTIVE_PANEL_BIND}" != "::1" ] && [ "${ACTIVE_SECURE_COOKIE}" != "true" ]; then
     echo -e "${YELLOW}[WARNING] CẢNH BÁO BẢO MẬT: Panel đang chạy HTTP không mã hóa trên ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} với FERROUS_SECURE_COOKIE=false.${NC}" >&2
   fi
@@ -1461,18 +1526,6 @@ EOF_SVC
     systemctl restart ferrous-panel.service 2>/dev/null || true
     if probe_panel_health "${PROBE_HOST}" "${ACTIVE_PANEL_PORT}" 25; then
       echo -e "${GREEN}[+] ferrous-panel.service is live on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (ports 80/443 reserved exclusively for websites).${NC}"
-      if [ "${ACTIVE_PANEL_BIND}" = "127.0.0.1" ] || [ "${ACTIVE_PANEL_BIND}" = "::1" ]; then
-        echo -e "${GREEN}[+] Panel URL (Local)    : http://127.0.0.1:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-        echo -e "${YELLOW}[!] Loopback-only mode   : Panel chi nghe tren ${ACTIVE_PANEL_BIND} (bao mat mac dinh). Truy cap truc tiep IP cong khai se bao tu choi ket noi.${NC}"
-        echo -e "${CYAN}[*] SSH Tunnel (Recommended): ssh -L ${ACTIVE_PANEL_PORT}:127.0.0.1:${ACTIVE_PANEL_PORT} root@${VPS_PUBLIC_IP}${NC}"
-        echo -e "${CYAN}[*] Open Public IP Access   : sudo fp bind 0.0.0.0${NC}"
-      else
-        echo -e "${GREEN}[+] Panel URL (Direct IP): http://${VPS_PUBLIC_IP}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-        if [ -n "${ACTIVE_PANEL_DOMAIN}" ]; then
-          echo -e "${CYAN}[*] Panel URL (Domain)   : http://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
-          echo -e "${YELLOW}[!] Cloudflare Note      : Keep '${ACTIVE_PANEL_DOMAIN}' on DNS-Only (Gray Cloud) to reach HTTP :${ACTIVE_PANEL_PORT}; Cloudflare Proxy (Orange Cloud) blocks plain HTTP on :8443.${NC}"
-        fi
-      fi
     else
       echo -e "${RED}[ERROR] ferrous-panel.service failed /api/health on ${PROBE_HOST}:${ACTIVE_PANEL_PORT} after update!${NC}" >&2
       journalctl -u ferrous-panel.service -n 20 --no-pager >&2 || true
@@ -1484,9 +1537,6 @@ EOF_SVC
     fi
   else
     echo -e "${GREEN}[+] ferrous-panel.service already active on ${ACTIVE_PANEL_BIND}:${ACTIVE_PANEL_PORT} (zero restart needed).${NC}"
-    if [ "${ACTIVE_PANEL_BIND}" = "127.0.0.1" ] || [ "${ACTIVE_PANEL_BIND}" = "::1" ]; then
-      echo -e "${YELLOW}[!] Loopback-only mode   : Panel chi nghe tren ${ACTIVE_PANEL_BIND}. Dung 'ssh -L ${ACTIVE_PANEL_PORT}:127.0.0.1:${ACTIVE_PANEL_PORT} root@${VPS_PUBLIC_IP}' hoac 'sudo fp bind 0.0.0.0'.${NC}"
-    fi
   fi
 fi
 
@@ -1619,17 +1669,37 @@ else
   setup_phpmyadmin_proxy
 fi
 
+# Ensure no legacy Nginx or FerrousX vhost proxies ports 80/443 to the Panel port (8443 / custom port)
+ACTIVE_PANEL_PORT="$(read_panel_env_key FERROUS_PORT "8443")"
+if [ -z "$ACTIVE_PANEL_PORT" ] || [ "$ACTIVE_PANEL_PORT" = "80" ] || [ "$ACTIVE_PANEL_PORT" = "443" ]; then
+  ACTIVE_PANEL_PORT="8443"
+fi
+ACTIVE_PANEL_ENTRANCE="$(read_panel_env_key FERROUS_SECURITY_ENTRANCE "/panel")"
+ACTIVE_PANEL_DOMAIN="$(read_panel_env_key FERROUS_CUSTOM_DOMAIN "")"
+for _vh in /etc/ferrousx/sites/*.toml /etc/nginx/sites-enabled/*.conf /etc/nginx/sites-available/*.conf; do
+  [ -f "$_vh" ] || continue
+  if grep -qE "127\.0\.0\.1:${ACTIVE_PANEL_PORT}|127\.0\.0\.1:8443" "$_vh" 2>/dev/null; then
+    echo -e "${CYAN}[*] Removing legacy port 80/443 panel reverse-proxy vhost ${_vh} (Panel runs exclusively on :${ACTIVE_PANEL_PORT})...${NC}"
+    rm -f "$_vh"
+  fi
+done
+
 auto_upgrade_self_signed_sites_to_letsencrypt() {
   mkdir -p /www/acme/.well-known/acme-challenge
   chmod 0755 /www /www/acme /www/acme/.well-known /www/acme/.well-known/acme-challenge 2>/dev/null || true
 
   local site_domains=()
+  if [ -n "${ACTIVE_PANEL_DOMAIN:-}" ] && [[ "${ACTIVE_PANEL_DOMAIN}" == *.* ]] && [[ "${ACTIVE_PANEL_DOMAIN}" != *.local ]] && [ "${ACTIVE_PANEL_DOMAIN}" != "localhost" ]; then
+    site_domains+=("${ACTIVE_PANEL_DOMAIN}")
+  fi
   for f in /etc/ferrousx/sites/*.toml; do
     [ -f "$f" ] || continue
     local dom
     dom="$(basename "$f" .toml)"
     if [[ "$dom" == *.* ]] && [[ "$dom" != *.local ]] && [ "$dom" != "localhost" ]; then
-      site_domains+=("$dom")
+      local seen=false
+      for d in "${site_domains[@]:-}"; do [ "$d" = "$dom" ] && seen=true; done
+      [ "$seen" = false ] && site_domains+=("$dom")
     fi
   done
   for f in /etc/nginx/sites-enabled/*.conf; do
@@ -1646,6 +1716,7 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
   [ "${#site_domains[@]}" -gt 0 ] || return 0
 
   local upgraded_any=false
+  local panel_ssl_upgraded=false
   for dom in "${site_domains[@]}"; do
     local cert_p="/etc/letsencrypt/live/${dom}/fullchain.pem"
     local key_p="/etc/letsencrypt/live/${dom}/privkey.pem"
@@ -1657,6 +1728,14 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
       iss="$(openssl x509 -in "$cert_p" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
       sub="$(openssl x509 -in "$cert_p" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
       if [ -n "$iss" ] && [ "$iss" = "$sub" ]; then
+        need_le=true
+      fi
+    fi
+    if [ "$dom" = "${ACTIVE_PANEL_DOMAIN:-}" ] && [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && command -v openssl >/dev/null 2>&1; then
+      local p_iss p_sub
+      p_iss="$(openssl x509 -in /etc/ferrous-panel/ssl/fullchain.pem -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
+      p_sub="$(openssl x509 -in /etc/ferrous-panel/ssl/fullchain.pem -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
+      if [ -n "$p_iss" ] && [ "$p_iss" = "$p_sub" ]; then
         need_le=true
       fi
     fi
@@ -1673,15 +1752,22 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
     echo -e "${CYAN}[*] Upgrading SSL certificate for ${dom} to real Let's Encrypt CA...${NC}"
     local bak_dir="${TMP_DIR}/ssl-bak-${dom}"
     rm -rf "$bak_dir"
-    if [ -f "$cert_p" ] && [ -f "$key_p" ] && [ ! -L "$cert_p" ]; then
-      mkdir -p "$bak_dir"
-      cp -f "$cert_p" "$bak_dir/fullchain.pem"
-      cp -f "$key_p" "$bak_dir/privkey.pem"
-      rm -rf "/etc/letsencrypt/live/${dom}"
+    if [ -f "$cert_p" ] && [ -f "$key_p" ]; then
+      local cur_iss cur_sub
+      cur_iss="$(openssl x509 -in "$cert_p" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
+      cur_sub="$(openssl x509 -in "$cert_p" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
+      if [ ! -L "$cert_p" ] || { [ -n "$cur_iss" ] && [ "$cur_iss" = "$cur_sub" ]; }; then
+        mkdir -p "$bak_dir"
+        cp -fL "$cert_p" "$bak_dir/fullchain.pem" 2>/dev/null || true
+        cp -fL "$key_p" "$bak_dir/privkey.pem" 2>/dev/null || true
+        rm -rf "/etc/letsencrypt/live/${dom}" "/etc/letsencrypt/archive/${dom}" "/etc/letsencrypt/renewal/${dom}.conf" 2>/dev/null || true
+      fi
     fi
 
     if certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
-      --webroot -w /www/acme -d "${dom}" --cert-name "${dom}" --expand --keep-until-expiring >/dev/null 2>&1; then
+      --webroot -w /www/acme -d "${dom}" --cert-name "${dom}" --expand --force-renewal >/dev/null 2>&1 \
+      || certbot certonly --non-interactive --agree-tos --register-unsafely-without-email \
+      --standalone -d "${dom}" --cert-name "${dom}" --expand --force-renewal >/dev/null 2>&1; then
       # Reconcile -0001 lineage if certbot wrote to a suffixed directory
       if [ ! -f "$cert_p" ]; then
         for alt in /etc/letsencrypt/live/"${dom}"-*; do
@@ -1710,6 +1796,25 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
             chmod 0644 "/etc/ferrousx/sites/${dom}.toml.tmp" && \
             mv -f "/etc/ferrousx/sites/${dom}.toml.tmp" "/etc/ferrousx/sites/${dom}.toml"
         fi
+        if [ "$dom" = "${ACTIVE_PANEL_DOMAIN:-}" ]; then
+          mkdir -p /etc/ferrous-panel/ssl
+          cp -f "$real_c" /etc/ferrous-panel/ssl/fullchain.pem
+          cp -f "$real_k" /etc/ferrous-panel/ssl/privkey.pem
+          chmod 0644 /etc/ferrous-panel/ssl/fullchain.pem
+          chmod 0600 /etc/ferrous-panel/ssl/privkey.pem
+          if grep -q '^FERROUS_SSL_CERT=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+            sed -i 's|^FERROUS_SSL_CERT=.*|FERROUS_SSL_CERT=/etc/ferrous-panel/ssl/fullchain.pem|' /etc/ferrous-panel/panel.env
+          else
+            echo "FERROUS_SSL_CERT=/etc/ferrous-panel/ssl/fullchain.pem" >> /etc/ferrous-panel/panel.env
+          fi
+          if grep -q '^FERROUS_SSL_KEY=' /etc/ferrous-panel/panel.env 2>/dev/null; then
+            sed -i 's|^FERROUS_SSL_KEY=.*|FERROUS_SSL_KEY=/etc/ferrous-panel/ssl/privkey.pem|' /etc/ferrous-panel/panel.env
+          else
+            echo "FERROUS_SSL_KEY=/etc/ferrous-panel/ssl/privkey.pem" >> /etc/ferrous-panel/panel.env
+          fi
+          sed -i 's|^FERROUS_SECURE_COOKIE=.*|FERROUS_SECURE_COOKIE=true|' /etc/ferrous-panel/panel.env
+          panel_ssl_upgraded=true
+        fi
         upgraded_any=true
         echo -e "${GREEN}[+] Issued trusted Let's Encrypt SSL certificate for https://${dom}${NC}"
       elif [ -d "$bak_dir" ]; then
@@ -1735,24 +1840,13 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
       systemctl reload nginx.service 2>/dev/null || true
     fi
   fi
+  if [ "$panel_ssl_upgraded" = true ]; then
+    systemctl restart ferrous-panel.service 2>/dev/null || true
+    echo -e "${GREEN}[+] Reloaded ferrous-panel.service with trusted Let's Encrypt SSL on https://${ACTIVE_PANEL_DOMAIN}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"
+  fi
 }
 
 auto_upgrade_self_signed_sites_to_letsencrypt
-
-# Ensure no legacy Nginx or FerrousX vhost proxies ports 80/443 to the Panel port (8443 / custom port)
-ACTIVE_PANEL_PORT="$(read_panel_env_key FERROUS_PORT "8443")"
-if [ -z "$ACTIVE_PANEL_PORT" ] || [ "$ACTIVE_PANEL_PORT" = "80" ] || [ "$ACTIVE_PANEL_PORT" = "443" ]; then
-  ACTIVE_PANEL_PORT="8443"
-fi
-ACTIVE_PANEL_ENTRANCE="$(read_panel_env_key FERROUS_SECURITY_ENTRANCE "/panel")"
-ACTIVE_PANEL_DOMAIN="$(read_panel_env_key FERROUS_CUSTOM_DOMAIN "")"
-for _vh in /etc/ferrousx/sites/*.toml /etc/nginx/sites-enabled/*.conf /etc/nginx/sites-available/*.conf; do
-  [ -f "$_vh" ] || continue
-  if grep -qE "127\.0\.0\.1:${ACTIVE_PANEL_PORT}|127\.0\.0\.1:8443" "$_vh" 2>/dev/null; then
-    echo -e "${CYAN}[*] Removing legacy port 80/443 panel reverse-proxy vhost ${_vh} (Panel runs exclusively on :${ACTIVE_PANEL_PORT})...${NC}"
-    rm -f "$_vh"
-  fi
-done
 
 PANEL_SCHEME="http"
 if [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && [ -f "/etc/ferrous-panel/ssl/privkey.pem" ]; then
@@ -1761,7 +1855,7 @@ fi
 
 UPDATE_ELAPSED="$(( $(date +%s) - UPDATE_START_TS ))"
 echo -e "${GREEN}${BOLD}Update completed cleanly in ${UPDATE_ELAPSED}s. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
-echo -e "${CYAN}Panel URL (Port ${ACTIVE_PANEL_PORT}): ${BOLD}${PANEL_SCHEME}://${ACTIVE_PANEL_DOMAIN:-${VPS_PUBLIC_IP}}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC} (Tip: run '${BOLD}sudo fp ssl${NC}' or '${BOLD}sudo fp 18${NC}' to issue/renew Panel SSL on :${ACTIVE_PANEL_PORT})${NC}"
+echo -e "${CYAN}Panel URL (Port ${ACTIVE_PANEL_PORT}): ${BOLD}${PANEL_SCHEME}://${ACTIVE_PANEL_DOMAIN:-${VPS_PUBLIC_IP}}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC} (Tip: run '${BOLD}sudo fp ssl ${ACTIVE_PANEL_DOMAIN:-<domain>}${NC}' or '${BOLD}sudo fp 18${NC}' to issue/renew Panel SSL on :${ACTIVE_PANEL_PORT})${NC}"
 if [ -x /usr/local/bin/bun ] || [ -x /usr/local/bin/tailwindcss ]; then
   echo -e "${CYAN}Zero-Node.js JS/CSS Toolchain: bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'missing') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'missing') (Node.js NOT required).${NC}"
 fi

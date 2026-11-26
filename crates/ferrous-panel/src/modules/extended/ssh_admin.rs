@@ -204,14 +204,23 @@ pub fn load_panel_admin(
     } else {
         admin.security_entrance = config.security_entrance.clone();
     }
-    if let Ok(raw_env) = std::fs::read_to_string(&env_file) {
-        if raw_env.lines().any(|l| l.trim_start().starts_with("FERROUS_CUSTOM_DOMAIN=")) {
-            admin.custom_domain = read_env_file_value(&env_file, "FERROUS_CUSTOM_DOMAIN");
-        } else if config.custom_domain.is_some() {
-            admin.custom_domain = config.custom_domain.clone();
-        }
-    } else if config.custom_domain.is_some() {
-        admin.custom_domain = config.custom_domain.clone();
+    let env_dom = read_env_file_value(&env_file, "FERROUS_CUSTOM_DOMAIN")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(dom) = env_dom {
+        admin.custom_domain = Some(dom);
+    } else if let Some(ref existing_dom) = admin.custom_domain.clone().filter(|s| !s.trim().is_empty()) {
+        // Sync persisted SQLite custom_domain back into panel.env if panel.env had an empty placeholder
+        let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", existing_dom.trim());
+    } else if let Some(ref cfg_dom) = config.custom_domain.clone().filter(|s| !s.trim().is_empty()) {
+        admin.custom_domain = Some(cfg_dom.trim().to_string());
+        let _ = upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", cfg_dom.trim());
+    }
+    if config.resolved_panel_ssl_paths().is_some()
+        || (Path::new("/etc/ferrous-panel/ssl/fullchain.pem").is_file()
+            && Path::new("/etc/ferrous-panel/ssl/privkey.pem").is_file())
+    {
+        admin.ssl_enabled = Some(true);
     }
     Ok(admin)
 }
