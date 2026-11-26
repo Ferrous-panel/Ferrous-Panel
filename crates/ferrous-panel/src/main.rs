@@ -25,6 +25,37 @@ fn init_tracing() {
         .try_init();
 }
 
+fn load_panel_rustls_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> anyhow::Result<rustls::ServerConfig> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cert_file = std::fs::File::open(cert_path)
+        .with_context(|| format!("failed to open panel SSL certificate {}", cert_path.display()))?;
+    let mut cert_reader = std::io::BufReader::new(cert_file);
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to parse PEM certs from {}", cert_path.display()))?;
+    if certs.is_empty() {
+        anyhow::bail!("no X.509 certificates found in {}", cert_path.display());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .with_context(|| format!("failed to open panel SSL private key {}", key_path.display()))?;
+    let mut key_reader = std::io::BufReader::new(key_file);
+    let private_key = rustls_pemfile::private_key(&mut key_reader)
+        .with_context(|| format!("failed to parse PEM private key from {}", key_path.display()))?
+        .ok_or_else(|| anyhow::anyhow!("no private key found in {}", key_path.display()))?;
+
+    let mut tls_cfg = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, private_key)
+        .with_context(|| "invalid panel TLS certificate/private key pair")?;
+    tls_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(tls_cfg)
+}
+
 async fn run_server(mut config: Config) -> anyhow::Result<()> {
     if config.port == 0 || is_reserved_website_port(config.port) {
         tracing::warn!(
@@ -34,6 +65,7 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         );
         config.port = DEFAULT_PANEL_PORT;
     }
+    let panel_ssl_paths = config.resolved_panel_ssl_paths();
     let bind_addr = config.bind.clone();
     let bind_port = config.port;
     let pma_port = config.pma_port;
@@ -145,16 +177,45 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         }
     };
 
-    let mut server = HttpServer::new(move || {
+    let base_server = HttpServer::new(move || {
         let app_state = shared_state.clone();
         App::new()
             .wrap(actix_web::middleware::Compress::default())
             .wrap(from_fn(security_headers_middleware))
             .configure(move |cfg| configure_app(cfg, app_state))
     })
-    .shutdown_timeout(5)
-    .listen(main_listener)
-    .with_context(|| format!("failed to attach listener on {bind_addr}:{bind_port}"))?;
+    .shutdown_timeout(5);
+
+    let mut server = match panel_ssl_paths {
+        Some((cert_path, key_path)) => match load_panel_rustls_config(&cert_path, &key_path) {
+            Ok(tls_cfg) => {
+                tracing::info!(
+                    bind = %bind_addr,
+                    port = bind_port,
+                    cert = %cert_path.display(),
+                    "native Rustls HTTPS enabled on panel port"
+                );
+                base_server
+                    .listen_rustls_0_23(main_listener, tls_cfg)
+                    .with_context(|| {
+                        format!("failed to attach HTTPS listener on {bind_addr}:{bind_port}")
+                    })?
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    cert = %cert_path.display(),
+                    "panel TLS certificate could not be loaded; falling back to HTTP on {bind_addr}:{bind_port}"
+                );
+                base_server
+                    .listen(main_listener)
+                    .with_context(|| format!("failed to attach listener on {bind_addr}:{bind_port}"))?
+            }
+        },
+        None => base_server
+            .listen(main_listener)
+            .with_context(|| format!("failed to attach listener on {bind_addr}:{bind_port}"))?,
+    };
 
     if let Some(listener) = pma_listener {
         server = server

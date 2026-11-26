@@ -129,6 +129,87 @@ fn ensure_engine_installed(
     Ok(())
 }
 
+/// On production VPS hosts (`/etc/ferrous-panel` present), automatically installs and starts
+/// `mariadb-server` or `postgresql` if the administrator creates a MariaDB or PostgreSQL database
+/// before the daemon package has been installed or started.
+async fn ensure_sql_engine_ready(
+    executor: &dyn CommandExecutor,
+    engine: DbEngineKind,
+) -> Result<(), PanelError> {
+    let Some(bin) = engine.binary() else {
+        return Ok(());
+    };
+    let is_prod_host = Path::new("/etc/ferrous-panel").is_dir();
+    if !executor.is_binary_available(bin) && is_prod_host && executor.is_binary_available(AllowedBinary::AptGet) {
+        let env = [("DEBIAN_FRONTEND", "noninteractive")];
+        let install_timeout = Duration::from_secs(240);
+        let _ = executor
+            .run_with_env(AllowedBinary::AptGet, &["update", "-qq"], &env, None, install_timeout)
+            .await;
+        match engine {
+            DbEngineKind::MariaDb => {
+                let _ = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["install", "-y", "-qq", "mariadb-server", "mariadb-client"],
+                        &env,
+                        None,
+                        install_timeout,
+                    )
+                    .await;
+            }
+            DbEngineKind::Postgres => {
+                let _ = executor
+                    .run_with_env(
+                        AllowedBinary::AptGet,
+                        &["install", "-y", "-qq", "postgresql", "postgresql-client"],
+                        &env,
+                        None,
+                        install_timeout,
+                    )
+                    .await;
+            }
+            DbEngineKind::Sqlite => {}
+        }
+    }
+    ensure_engine_installed(executor, engine)?;
+    if is_prod_host && executor.is_binary_available(AllowedBinary::Systemctl) {
+        let svc = match engine {
+            DbEngineKind::MariaDb => "mariadb",
+            DbEngineKind::Postgres => "postgresql",
+            DbEngineKind::Sqlite => return Ok(()),
+        };
+        let active = executor
+            .run(AllowedBinary::Systemctl, &["is-active", "--quiet", svc], DB_CMD_TIMEOUT)
+            .await
+            .map(|o| o.success)
+            .unwrap_or(false);
+        if !active {
+            let _ = executor
+                .run(AllowedBinary::Systemctl, &["enable", "--now", svc], DB_CMD_TIMEOUT)
+                .await;
+        }
+    }
+    Ok(())
+}
+
+fn generate_random_db_password() -> String {
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut raw = [0u8; 20];
+    if OsRng.try_fill_bytes(&mut raw).is_err() {
+        return "FpDbPass9x2Km7Qv4Lw1".to_string();
+    }
+    raw.iter()
+        .map(|&b| ALPHABET[(b as usize) % ALPHABET.len()] as char)
+        .collect()
+}
+
+fn should_use_runuser_postgres(executor: &dyn CommandExecutor) -> bool {
+    Path::new("/etc/postgresql").is_dir() && executor.is_binary_available(AllowedBinary::Runuser)
+}
+
 fn validate_db_password(raw: &str) -> Result<&str, PanelError> {
     if raw.is_empty() || raw.len() > 128 {
         return Err(PanelError::Validation(
@@ -389,9 +470,18 @@ async fn run_psql_internal(
     }
     args.push("-c");
     args.push(sql);
-    let out = executor
-        .run_with_env(AllowedBinary::Psql, &args, &[], None, DB_CMD_TIMEOUT)
-        .await?;
+    let out = if should_use_runuser_postgres(executor) {
+        let mut ru_args = Vec::with_capacity(args.len() + 4);
+        ru_args.extend_from_slice(&["-u", "postgres", "--", "psql"]);
+        ru_args.extend_from_slice(&args);
+        executor
+            .run_with_env(AllowedBinary::Runuser, &ru_args, &[], None, DB_CMD_TIMEOUT)
+            .await?
+    } else {
+        executor
+            .run_with_env(AllowedBinary::Psql, &args, &[], None, DB_CMD_TIMEOUT)
+            .await?
+    };
     if !out.success {
         return Err(PanelError::CommandFailed {
             binary: "psql",
@@ -444,9 +534,18 @@ async fn run_psql_stdin(
         args.push("-d");
         args.push("postgres");
     }
-    let out = executor
-        .run_with_stdin(AllowedBinary::Psql, &args, sql.as_bytes(), DB_CMD_TIMEOUT)
-        .await?;
+    let out = if should_use_runuser_postgres(executor) {
+        let mut ru_args = Vec::with_capacity(args.len() + 4);
+        ru_args.extend_from_slice(&["-u", "postgres", "--", "psql"]);
+        ru_args.extend_from_slice(&args);
+        executor
+            .run_with_stdin(AllowedBinary::Runuser, &ru_args, sql.as_bytes(), DB_CMD_TIMEOUT)
+            .await?
+    } else {
+        executor
+            .run_with_stdin(AllowedBinary::Psql, &args, sql.as_bytes(), DB_CMD_TIMEOUT)
+            .await?
+    };
     if !out.success {
         return Err(PanelError::CommandFailed {
             binary: "psql",
@@ -890,7 +989,7 @@ pub async fn create_database(
     linked_app_id: &str,
 ) -> Result<Vec<SqlDatabase>, PanelError> {
     let engine = DbEngineKind::parse(engine_raw)?;
-    ensure_engine_installed(executor, engine)?;
+    ensure_sql_engine_ready(executor, engine).await?;
 
     let db_ident = SqlIdentifier::parse(name_raw)?;
     let normalized_user = if username_raw.trim().is_empty() {
@@ -899,16 +998,39 @@ pub async fn create_database(
         username_raw.trim().to_string()
     };
     let user_ident = SqlIdentifier::parse(&normalized_user)?;
-    let default_collation = match engine {
-        DbEngineKind::MariaDb => "utf8mb4_unicode_ci",
-        DbEngineKind::Postgres => "en_US.UTF-8",
-        DbEngineKind::Sqlite => "UTF-8",
+    let trimmed_col = collation_raw.trim();
+    let effective_collation_str = match engine {
+        DbEngineKind::MariaDb => {
+            if trimmed_col.is_empty()
+                || trimmed_col.eq_ignore_ascii_case("UTF-8")
+                || trimmed_col.eq_ignore_ascii_case("utf8")
+                || trimmed_col.eq_ignore_ascii_case("en_US.UTF-8")
+                || trimmed_col.eq_ignore_ascii_case("C.UTF-8")
+            {
+                "utf8mb4_unicode_ci"
+            } else {
+                trimmed_col
+            }
+        }
+        DbEngineKind::Postgres => {
+            if trimmed_col.is_empty()
+                || trimmed_col.starts_with("utf8mb4")
+                || trimmed_col.starts_with("latin1")
+            {
+                "en_US.UTF-8"
+            } else {
+                trimmed_col
+            }
+        }
+        DbEngineKind::Sqlite => {
+            if trimmed_col.is_empty() {
+                "UTF-8"
+            } else {
+                trimmed_col
+            }
+        }
     };
-    let collation = CollationName::parse(if collation_raw.trim().is_empty() {
-        default_collation
-    } else {
-        collation_raw
-    })?;
+    let collation = CollationName::parse(effective_collation_str)?;
 
     match engine {
         DbEngineKind::Sqlite => {
@@ -925,12 +1047,15 @@ pub async fn create_database(
             )?;
         }
         DbEngineKind::MariaDb => {
-            let pw = password_raw.ok_or_else(|| {
-                PanelError::Validation(
-                    "password is required when creating a MariaDB/MySQL database user".to_string(),
-                )
-            })?;
-            let pw = validate_db_password(pw)?;
+            let generated_pw;
+            let raw_pw = match password_raw.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(p) => p,
+                None => {
+                    generated_pw = generate_random_db_password();
+                    generated_pw.as_str()
+                }
+            };
+            let pw = validate_db_password(raw_pw)?;
             let qdb = db_ident.quote_mysql();
             let quser = escape_mysql_literal(user_ident.as_str())?;
             let qpw = escape_mysql_literal(pw)?;
@@ -939,6 +1064,8 @@ pub async fn create_database(
                 "CREATE DATABASE IF NOT EXISTS {qdb} DEFAULT CHARACTER SET utf8mb4 COLLATE {col}; \
                  CREATE USER IF NOT EXISTS {quser}@'localhost' IDENTIFIED BY {qpw}; \
                  CREATE USER IF NOT EXISTS {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
+                 ALTER USER {quser}@'localhost' IDENTIFIED BY {qpw}; \
+                 ALTER USER {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
                  GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'localhost'; \
                  GRANT ALL PRIVILEGES ON {qdb}.* TO {quser}@'127.0.0.1'; \
                  FLUSH PRIVILEGES;"
@@ -946,22 +1073,34 @@ pub async fn create_database(
             run_mysql_stdin(executor, None, &sql).await?;
         }
         DbEngineKind::Postgres => {
-            let pw = password_raw.ok_or_else(|| {
-                PanelError::Validation(
-                    "password is required when creating a PostgreSQL database user".to_string(),
-                )
-            })?;
-            let pw = validate_db_password(pw)?;
+            let generated_pw;
+            let raw_pw = match password_raw.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(p) => p,
+                None => {
+                    generated_pw = generate_random_db_password();
+                    generated_pw.as_str()
+                }
+            };
+            let pw = validate_db_password(raw_pw)?;
             let qdb = db_ident.quote_postgres();
             let quser = user_ident.quote_postgres();
             let qpw = escape_postgres_literal(pw)?;
             let create_role_sql = format!(
-                "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = {}) THEN CREATE ROLE {quser} WITH LOGIN PASSWORD {qpw}; END IF; END $$;\n",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = {}) THEN CREATE ROLE {quser} WITH LOGIN PASSWORD {qpw}; ELSE ALTER ROLE {quser} WITH LOGIN PASSWORD {qpw}; END IF; END $$;\n",
                 escape_postgres_literal(user_ident.as_str())?
             );
             run_psql_stdin(executor, None, &create_role_sql).await?;
             let create_db_sql = format!("CREATE DATABASE {qdb} OWNER {quser};");
-            run_psql(executor, None, &create_db_sql).await?;
+            if let Err(err) = run_psql(executor, None, &create_db_sql).await {
+                let msg = err.to_string().to_ascii_lowercase();
+                if !msg.contains("already exists") {
+                    return Err(err);
+                }
+                let grant_sql = format!(
+                    "ALTER DATABASE {qdb} OWNER TO {quser}; GRANT ALL PRIVILEGES ON DATABASE {qdb} TO {quser};"
+                );
+                let _ = run_psql(executor, None, &grant_sql).await;
+            }
         }
     }
 
@@ -1486,14 +1625,33 @@ pub async fn export_database_sql(
                 ));
             }
             let dump_guard = build_temp_dump_path(store, &db_ident)?;
-            let out = executor
-                .run_to_file(
-                    AllowedBinary::PgDump,
-                    &["--clean", "--if-exists", db_ident.as_str()],
-                    &dump_guard.0,
-                    DB_DUMP_TIMEOUT,
-                )
-                .await?;
+            let out = if should_use_runuser_postgres(executor) {
+                executor
+                    .run_to_file(
+                        AllowedBinary::Runuser,
+                        &[
+                            "-u",
+                            "postgres",
+                            "--",
+                            "pg_dump",
+                            "--clean",
+                            "--if-exists",
+                            db_ident.as_str(),
+                        ],
+                        &dump_guard.0,
+                        DB_DUMP_TIMEOUT,
+                    )
+                    .await?
+            } else {
+                executor
+                    .run_to_file(
+                        AllowedBinary::PgDump,
+                        &["--clean", "--if-exists", db_ident.as_str()],
+                        &dump_guard.0,
+                        DB_DUMP_TIMEOUT,
+                    )
+                    .await?
+            };
             if !out.success {
                 return Err(PanelError::CommandFailed {
                     binary: "pg_dump",
@@ -1610,14 +1768,34 @@ pub async fn import_database_sql(
         }
         DbEngineKind::Postgres => {
             ensure_engine_installed(executor, engine)?;
-            let out = executor
-                .run_with_stdin(
-                    AllowedBinary::Psql,
-                    &["-v", "ON_ERROR_STOP=1", "-d", db_ident.as_str()],
-                    trimmed.as_bytes(),
-                    DB_DUMP_TIMEOUT,
-                )
-                .await?;
+            let out = if should_use_runuser_postgres(executor) {
+                executor
+                    .run_with_stdin(
+                        AllowedBinary::Runuser,
+                        &[
+                            "-u",
+                            "postgres",
+                            "--",
+                            "psql",
+                            "-v",
+                            "ON_ERROR_STOP=1",
+                            "-d",
+                            db_ident.as_str(),
+                        ],
+                        trimmed.as_bytes(),
+                        DB_DUMP_TIMEOUT,
+                    )
+                    .await?
+            } else {
+                executor
+                    .run_with_stdin(
+                        AllowedBinary::Psql,
+                        &["-v", "ON_ERROR_STOP=1", "-d", db_ident.as_str()],
+                        trimmed.as_bytes(),
+                        DB_DUMP_TIMEOUT,
+                    )
+                    .await?
+            };
             let elapsed_ms = ((start.elapsed().as_secs_f64() * 1000.0) * 100.0).round() / 100.0;
             if !out.success {
                 return Ok(SqlQueryResponse {

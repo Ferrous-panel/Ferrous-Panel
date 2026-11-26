@@ -14,7 +14,7 @@ repository = "https://github.com/Ferrous-panel/Ferrous-Panel"
 
 [workspace.dependencies]
 # Core Control Plane & HTTP Server (ferrous-panel)
-actix-web = "4.9"
+actix-web = { version = "4.9", features = ["rustls-0_23"] }
 anyhow = "1.0"
 argon2 = { version = "0.5", features = ["std"] }
 blake3 = "1.5"

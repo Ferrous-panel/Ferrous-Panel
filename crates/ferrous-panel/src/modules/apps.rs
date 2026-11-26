@@ -488,6 +488,62 @@ async fn run_zero_node_js_css_build(
         return logs;
     }
 
+    if is_php_runtime(framework)
+        && working_dir.join("composer.json").is_file()
+        && !working_dir.join("vendor/autoload.php").is_file()
+        && executor.is_binary_available(AllowedBinary::Composer)
+    {
+        logs.push(format!(
+            "[{now}] PHP Composer project detected: running `composer install --no-dev --optimize-autoloader`..."
+        ));
+        match executor
+            .run_with_env(
+                AllowedBinary::Composer,
+                &[
+                    "install",
+                    "--no-interaction",
+                    "--no-progress",
+                    "--prefer-dist",
+                    "--no-dev",
+                    "--optimize-autoloader",
+                ],
+                &[
+                    ("COMPOSER_ALLOW_SUPERUSER", "1"),
+                    ("PATH", "/usr/local/bin:/usr/bin:/bin"),
+                ],
+                Some(working_dir),
+                BUILD_TIMEOUT,
+            )
+            .await
+        {
+            Ok(out) if out.success => {
+                logs.push(format!(
+                    "[{}] `composer install` completed cleanly.",
+                    Utc::now().to_rfc3339()
+                ));
+            }
+            Ok(out) => {
+                let detail = if out.stderr.is_empty() {
+                    out.stdout
+                } else {
+                    out.stderr
+                };
+                logs.push(format!(
+                    "[{}] `composer install` exited ({:?}): {}",
+                    Utc::now().to_rfc3339(),
+                    out.exit_code,
+                    detail.chars().take(300).collect::<String>()
+                ));
+            }
+            Err(err) => {
+                logs.push(format!(
+                    "[{}] `composer install` error: {err}",
+                    Utc::now().to_rfc3339()
+                ));
+            }
+        }
+    }
+
     if !is_js_or_css_runtime(framework) {
         return logs;
     }
@@ -874,31 +930,354 @@ async fn verify_unit_active_or_journal(
     })
 }
 
-fn validate_git_repo_and_branch<'a>(
-    repo_raw: &'a str,
-    branch_raw: &'a str,
-) -> Result<(&'a str, &'a str), PanelError> {
-    let repo = validate_no_flag_injection(repo_raw, "gitRepoUrl")?;
-    if !repo.starts_with("https://") && !repo.starts_with("http://") {
+fn normalize_git_repo_and_branch(
+    repo_raw: &str,
+    branch_raw: &str,
+) -> Result<(String, Option<String>), PanelError> {
+    let trimmed = validate_no_flag_injection(repo_raw, "gitRepoUrl")?;
+    let mut url = trimmed.trim_end_matches('/').to_string();
+    let mut extracted_branch: Option<String> = None;
+
+    // Convert SSH `git@github.com:owner/repo.git` to `https://github.com/owner/repo.git`
+    if let Some(rest) = url.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            if !host.is_empty() && !path.is_empty() {
+                url = format!("https://{host}/{}", path.trim_start_matches('/'));
+            }
+        }
+    } else if let Some(rest) = url.strip_prefix("ssh://git@") {
+        if let Some((host, path)) = rest.split_once('/') {
+            if !host.is_empty() && !path.is_empty() {
+                let clean_host = host.split(':').next().unwrap_or(host);
+                url = format!("https://{clean_host}/{path}");
+            }
+        }
+    }
+
+    if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err(PanelError::Validation(
-            "gitRepoUrl must start with https:// or http://".to_string(),
+            "gitRepoUrl must start with https://, http://, or git@".to_string(),
         ));
     }
-    let branch = if branch_raw.trim().is_empty() {
-        "main"
+
+    // Handle browser URLs such as `https://github.com/owner/repo/tree/main` or `/blob/dev/...`
+    for marker in ["/-/tree/", "/tree/", "/-/blob/", "/blob/"] {
+        if let Some((base, tail)) = url.split_once(marker) {
+            let seg = tail.split('/').next().unwrap_or("").trim();
+            if !seg.is_empty() {
+                extracted_branch = Some(seg.to_string());
+            }
+            url = base.trim_end_matches('/').to_string();
+            break;
+        }
+    }
+
+    let explicit_branch = branch_raw.trim();
+    let branch_opt = if !explicit_branch.is_empty() {
+        let b = validate_no_flag_injection(explicit_branch, "gitBranch")?;
+        Some(b.to_string())
     } else {
-        validate_no_flag_injection(branch_raw, "gitBranch")?
+        extracted_branch
     };
-    if !branch
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/'))
-        || branch.contains("..")
+
+    if let Some(ref b) = branch_opt {
+        if !b
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'/'))
+            || b.contains("..")
+        {
+            return Err(PanelError::Validation(
+                "gitBranch contains invalid characters".to_string(),
+            ));
+        }
+    }
+
+    Ok((url, branch_opt))
+}
+
+async fn clone_or_sync_git_repository(
+    executor: &dyn CommandExecutor,
+    working_dir: &Path,
+    repo_raw: &str,
+    branch_raw: &str,
+    auto_install_git: bool,
+) -> Result<(String, String, String), PanelError> {
+    let (safe_repo, branch_opt) = normalize_git_repo_and_branch(repo_raw, branch_raw)?;
+    if !executor.is_binary_available(AllowedBinary::Git)
+        && auto_install_git
+        && executor.is_binary_available(AllowedBinary::AptGet)
     {
-        return Err(PanelError::Validation(
-            "gitBranch contains invalid characters".to_string(),
+        let noninteractive = [("DEBIAN_FRONTEND", "noninteractive")];
+        let _ = executor
+            .run_with_env(
+                AllowedBinary::AptGet,
+                &["update", "-qq"],
+                &noninteractive,
+                None,
+                BUILD_TIMEOUT,
+            )
+            .await;
+        let _ = executor
+            .run_with_env(
+                AllowedBinary::AptGet,
+                &["install", "-y", "-qq", "git", "ca-certificates"],
+                &noninteractive,
+                None,
+                BUILD_TIMEOUT,
+            )
+            .await;
+    }
+
+    if !executor.is_binary_available(AllowedBinary::Git) {
+        return Err(PanelError::Conflict(
+            "Chưa cài đặt `git` trên máy chủ (chạy: sudo apt-get install -y git).".to_string(),
         ));
     }
-    Ok((repo, branch))
+
+    std::fs::create_dir_all(working_dir)?;
+    let git_env = [("GIT_TERMINAL_PROMPT", "0")];
+
+    if working_dir.join(".git").exists() {
+        let _ = executor
+            .run_with_env(
+                AllowedBinary::Git,
+                &["remote", "set-url", "origin", "--", &safe_repo],
+                &git_env,
+                Some(working_dir),
+                SYSTEMD_TIMEOUT,
+            )
+            .await;
+
+        let target_branch = branch_opt.as_deref().unwrap_or("HEAD");
+        let pull_out = if let Some(ref b) = branch_opt {
+            let fetch = executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["fetch", "--depth", "1", "origin", b],
+                    &git_env,
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await?;
+            if fetch.success {
+                executor
+                    .run_with_env(
+                        AllowedBinary::Git,
+                        &["reset", "--hard", "FETCH_HEAD"],
+                        &git_env,
+                        Some(working_dir),
+                        SYSTEMD_TIMEOUT,
+                    )
+                    .await?
+            } else {
+                executor
+                    .run_with_env(
+                        AllowedBinary::Git,
+                        &["pull", "--ff-only", "--", "origin", b],
+                        &git_env,
+                        Some(working_dir),
+                        BUILD_TIMEOUT,
+                    )
+                    .await?
+            }
+        } else {
+            executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["pull", "--ff-only"],
+                    &git_env,
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await?
+        };
+        if !pull_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "git",
+                exit_code: pull_out.exit_code,
+                stderr: format!(
+                    "git pull failed for '{safe_repo}' (branch '{target_branch}'): {}",
+                    pull_out.stderr.trim()
+                ),
+            });
+        }
+        return Ok((
+            safe_repo.clone(),
+            target_branch.to_string(),
+            format!(
+                "[{}] Synced repository {safe_repo} (branch '{target_branch}')",
+                Utc::now().to_rfc3339()
+            ),
+        ));
+    }
+
+    let dir_empty = std::fs::read_dir(working_dir)
+        .map(|mut rd| rd.next().is_none())
+        .unwrap_or(true);
+
+    if dir_empty {
+        let dest_str = working_dir.display().to_string();
+        let mut clone_out = if let Some(ref b) = branch_opt {
+            executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &[
+                        "clone",
+                        "--depth",
+                        "1",
+                        "--branch",
+                        b,
+                        "--",
+                        &safe_repo,
+                        &dest_str,
+                    ],
+                    &git_env,
+                    None,
+                    BUILD_TIMEOUT,
+                )
+                .await?
+        } else {
+            executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["clone", "--depth", "1", "--", &safe_repo, &dest_str],
+                    &git_env,
+                    None,
+                    BUILD_TIMEOUT,
+                )
+                .await?
+        };
+
+        // If user left default branch 'main' on a repo whose default branch is 'master', retry without --branch
+        if !clone_out.success && branch_opt.is_some() {
+            let empty_after_fail = std::fs::read_dir(working_dir)
+                .map(|mut rd| rd.next().is_none())
+                .unwrap_or(true);
+            if empty_after_fail {
+                if let Ok(fallback_out) = executor
+                    .run_with_env(
+                        AllowedBinary::Git,
+                        &["clone", "--depth", "1", "--", &safe_repo, &dest_str],
+                        &git_env,
+                        None,
+                        BUILD_TIMEOUT,
+                    )
+                    .await
+                {
+                    if fallback_out.success {
+                        clone_out = fallback_out;
+                    }
+                }
+            }
+        }
+
+        if !clone_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "git",
+                exit_code: clone_out.exit_code,
+                stderr: format!(
+                    "git clone failed for '{safe_repo}': {}",
+                    clone_out.stderr.trim()
+                ),
+            });
+        }
+    } else {
+        // Directory already has placeholder files (e.g. index.html): initialize git in-place and reset to remote HEAD
+        let _ = executor
+            .run_with_env(AllowedBinary::Git, &["init"], &git_env, Some(working_dir), SYSTEMD_TIMEOUT)
+            .await;
+        let _ = executor
+            .run_with_env(
+                AllowedBinary::Git,
+                &["remote", "remove", "origin"],
+                &git_env,
+                Some(working_dir),
+                SYSTEMD_TIMEOUT,
+            )
+            .await;
+        let _ = executor
+            .run_with_env(
+                AllowedBinary::Git,
+                &["remote", "add", "origin", "--", &safe_repo],
+                &git_env,
+                Some(working_dir),
+                SYSTEMD_TIMEOUT,
+            )
+            .await;
+        let mut fetch_out = if let Some(ref b) = branch_opt {
+            executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["fetch", "--depth", "1", "origin", b],
+                    &git_env,
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await?
+        } else {
+            executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["fetch", "--depth", "1", "origin", "HEAD"],
+                    &git_env,
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await?
+        };
+        if !fetch_out.success && branch_opt.is_some() {
+            if let Ok(fb) = executor
+                .run_with_env(
+                    AllowedBinary::Git,
+                    &["fetch", "--depth", "1", "origin", "HEAD"],
+                    &git_env,
+                    Some(working_dir),
+                    BUILD_TIMEOUT,
+                )
+                .await
+            {
+                if fb.success {
+                    fetch_out = fb;
+                }
+            }
+        }
+        if !fetch_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "git",
+                exit_code: fetch_out.exit_code,
+                stderr: format!(
+                    "git fetch failed for '{safe_repo}': {}",
+                    fetch_out.stderr.trim()
+                ),
+            });
+        }
+        let reset_out = executor
+            .run_with_env(
+                AllowedBinary::Git,
+                &["reset", "--hard", "FETCH_HEAD"],
+                &git_env,
+                Some(working_dir),
+                SYSTEMD_TIMEOUT,
+            )
+            .await?;
+        if !reset_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: "git",
+                exit_code: reset_out.exit_code,
+                stderr: reset_out.stderr,
+            });
+        }
+    }
+
+    let effective_branch = branch_opt.unwrap_or_else(|| "default".to_string());
+    Ok((
+        safe_repo.clone(),
+        effective_branch.clone(),
+        format!(
+            "[{}] Cloned repository {safe_repo} (branch '{effective_branch}')",
+            Utc::now().to_rfc3339()
+        ),
+    ))
 }
 
 fn map_site_rules_to_spec(
@@ -1346,66 +1725,27 @@ pub async fn deploy_app(
 
     let mut initial_logs = Vec::new();
     let trimmed_repo = req.git_repo_url.trim();
+    let mut normalized_repo_url = trimmed_repo.to_string();
+    let mut normalized_branch_name = req.git_branch.trim().to_string();
     if !trimmed_repo.is_empty()
-        && !safe_working.as_path().join(".git").exists()
-        && webserver
-            .executor()
-            .is_binary_available(AllowedBinary::Git)
+        && (config.is_production()
+            || webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Git))
     {
-        let explicit_branch = !req.git_branch.trim().is_empty();
-        let (safe_repo, branch) = validate_git_repo_and_branch(trimmed_repo, &req.git_branch)?;
-        let dir_empty = std::fs::read_dir(safe_working.as_path())
-            .map(|mut rd| rd.next().is_none())
-            .unwrap_or(false);
-        if dir_empty {
-            let dest_str = safe_working.as_path().display().to_string();
-            let clone_out = if explicit_branch {
-                webserver
-                    .executor()
-                    .run(
-                        AllowedBinary::Git,
-                        &[
-                            "clone",
-                            "--depth",
-                            "1",
-                            "--branch",
-                            branch,
-                            "--",
-                            safe_repo,
-                            &dest_str,
-                        ],
-                        BUILD_TIMEOUT,
-                    )
-                    .await?
-            } else {
-                webserver
-                    .executor()
-                    .run(
-                        AllowedBinary::Git,
-                        &["clone", "--depth", "1", "--", safe_repo, &dest_str],
-                        BUILD_TIMEOUT,
-                    )
-                    .await?
-            };
-            if clone_out.success {
-                initial_logs.push(format!(
-                    "[{}] Cloned repository {} (branch '{}')",
-                    Utc::now().to_rfc3339(),
-                    safe_repo,
-                    if explicit_branch { branch } else { "default" }
-                ));
-            } else {
-                return Err(PanelError::CommandFailed {
-                    binary: "git",
-                    exit_code: clone_out.exit_code,
-                    stderr: format!(
-                        "git clone failed for '{safe_repo}' (branch '{}'): {}",
-                        if explicit_branch { branch } else { "default" },
-                        clone_out.stderr.trim()
-                    ),
-                });
-            }
+        let (clean_url, clean_branch, git_log) = clone_or_sync_git_repository(
+            webserver.executor().as_ref(),
+            safe_working.as_path(),
+            trimmed_repo,
+            &req.git_branch,
+            config.is_production(),
+        )
+        .await?;
+        normalized_repo_url = clean_url;
+        if clean_branch != "default" && clean_branch != "HEAD" {
+            normalized_branch_name = clean_branch;
         }
+        initial_logs.push(git_log);
     }
 
     // Run Zero-Node.js JS/TS/CSS or native Rust Cargo build if source exists.
@@ -1683,7 +2023,7 @@ pub async fn deploy_app(
             &req.db_engine,
             db_user,
             Some(&req.db_password),
-            "utf8mb4_unicode_ci",
+            "",
             &id,
         )
         .await
@@ -1752,8 +2092,8 @@ pub async fn deploy_app(
             None
         },
         backup_count: 0,
-        git_repo_url: req.git_repo_url,
-        git_branch: req.git_branch,
+        git_repo_url: normalized_repo_url,
+        git_branch: normalized_branch_name,
         build_script: String::new(),
         last_deploy_commit: "HEAD".to_string(),
         last_deploy_time: Utc::now().to_rfc3339(),
@@ -1916,73 +2256,60 @@ pub async fn git_deploy_app(
     let safe_working = SafePath::under_root(&config.wwwroot, &app.working_dir)?;
     std::fs::create_dir_all(safe_working.as_path())?;
 
-    let branch = if app.git_branch.trim().is_empty() {
-        "main"
-    } else {
-        app.git_branch.trim()
-    };
+    let branch = app.git_branch.trim().to_string();
 
-    if webserver
-        .executor()
-        .is_binary_available(AllowedBinary::Git)
-    {
-        if safe_working.as_path().join(".git").exists() {
-            let safe_branch = validate_no_flag_injection(branch, "gitBranch")?;
-            let pull_out = webserver
-                .executor()
-                .run_with_env(
-                    AllowedBinary::Git,
-                    &["pull", "--ff-only", "--", "origin", safe_branch],
-                    &[],
-                    Some(safe_working.as_path()),
-                    BUILD_TIMEOUT,
-                )
-                .await?;
-            if pull_out.success {
-                app.logs.push(format!(
-                    "[{}] git pull --ff-only origin {safe_branch} succeeded.",
-                    Utc::now().to_rfc3339()
-                ));
+    if !app.git_repo_url.trim().is_empty() || safe_working.as_path().join(".git").exists() {
+        if safe_working.as_path().join(".git").exists() && app.git_repo_url.trim().is_empty() {
+            let safe_branch = if branch.is_empty() {
+                "main"
             } else {
-                return Err(PanelError::CommandFailed {
-                    binary: "git",
-                    exit_code: pull_out.exit_code,
-                    stderr: pull_out.stderr,
-                });
-            }
-        } else if !app.git_repo_url.trim().is_empty() {
-            let (safe_repo, safe_branch) =
-                validate_git_repo_and_branch(&app.git_repo_url, branch)?;
-            let dir_empty = std::fs::read_dir(safe_working.as_path())
-                .map(|mut rd| rd.next().is_none())
-                .unwrap_or(false);
-            if dir_empty {
-                let dest_str = safe_working.as_path().display().to_string();
-                let clone_out = webserver
+                validate_no_flag_injection(&branch, "gitBranch")?
+            };
+            if webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Git)
+            {
+                let pull_out = webserver
                     .executor()
-                    .run(
+                    .run_with_env(
                         AllowedBinary::Git,
-                        &[
-                            "clone",
-                            "--depth",
-                            "1",
-                            "--branch",
-                            safe_branch,
-                            "--",
-                            safe_repo,
-                            &dest_str,
-                        ],
+                        &["pull", "--ff-only", "--", "origin", safe_branch],
+                        &[("GIT_TERMINAL_PROMPT", "0")],
+                        Some(safe_working.as_path()),
                         BUILD_TIMEOUT,
                     )
                     .await?;
-                if !clone_out.success {
+                if pull_out.success {
+                    app.logs.push(format!(
+                        "[{}] git pull --ff-only origin {safe_branch} succeeded.",
+                        Utc::now().to_rfc3339()
+                    ));
+                } else {
                     return Err(PanelError::CommandFailed {
                         binary: "git",
-                        exit_code: clone_out.exit_code,
-                        stderr: clone_out.stderr,
+                        exit_code: pull_out.exit_code,
+                        stderr: pull_out.stderr,
                     });
                 }
             }
+        } else if config.is_production()
+            || webserver
+                .executor()
+                .is_binary_available(AllowedBinary::Git)
+        {
+            let (clean_url, clean_branch, git_log) = clone_or_sync_git_repository(
+                webserver.executor().as_ref(),
+                safe_working.as_path(),
+                &app.git_repo_url,
+                &branch,
+                config.is_production(),
+            )
+            .await?;
+            app.git_repo_url = clean_url;
+            if clean_branch != "default" && clean_branch != "HEAD" {
+                app.git_branch = clean_branch;
+            }
+            app.logs.push(git_log);
         }
     }
 

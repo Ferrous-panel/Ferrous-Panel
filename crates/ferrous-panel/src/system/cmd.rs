@@ -92,6 +92,7 @@ pub enum AllowedBinary {
     Rndc,
     Python3,
     Go,
+    Runuser,
 }
 
 impl AllowedBinary {
@@ -177,6 +178,7 @@ impl AllowedBinary {
             Self::Rndc => "rndc",
             Self::Python3 => "python3",
             Self::Go => "go",
+            Self::Runuser => "runuser",
         }
     }
 
@@ -268,6 +270,7 @@ impl AllowedBinary {
             "rndc" => Some(Self::Rndc),
             "python3" => Some(Self::Python3),
             "go" => Some(Self::Go),
+            "runuser" => Some(Self::Runuser),
             _ => None,
         }
     }
@@ -354,6 +357,7 @@ impl AllowedBinary {
             Self::Rndc => &["/usr/sbin/rndc", "/usr/bin/rndc"],
             Self::Python3 => &["/usr/bin/python3", "/usr/local/bin/python3"],
             Self::Go => &["/usr/local/go/bin/go", "/usr/bin/go", "/usr/local/bin/go"],
+            Self::Runuser => &["/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser"],
         }
     }
 

@@ -623,6 +623,10 @@ else
         (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
       fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" ]; then
+        if grep -q 'if is_panel_request(req, &norm_path, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: keeping ports 80/443 dedicated to websites (Panel is served exclusively on :8443 / custom port)...${NC}"
+          sed -i 's/if is_panel_request(req, \&norm_path, cfg)/if false \&\& is_panel_request(req, \&norm_path, cfg)/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
         if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
@@ -1361,9 +1365,10 @@ if [ "${PANEL_BIND}" = "127.0.0.1" ] || [ "${PANEL_BIND}" = "::1" ]; then
   echo -e "  Panel Listen Addr : http://${PANEL_BIND}:${PANEL_PORT}${SECURITY_ENTRANCE} (local-only)"
   echo -e "  SSH Tunnel Access : ssh -N -L ${PANEL_PORT}:${HEALTH_PROBE_HOST}:${PANEL_PORT} root@${VPS_PUBLIC_IP}"
 else
-  echo -e "  Internet Panel URL: ${BOLD}http://${VPS_PUBLIC_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}${NC}"
+  echo -e "  Internet Panel URL: ${BOLD}http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}:${PANEL_PORT}${SECURITY_ENTRANCE}${NC}"
   echo -e "  Internal Panel URL: http://${VPS_LOCAL_IP}:${PANEL_PORT}${SECURITY_ENTRANCE}"
-  echo -e "  Rust SQL Admin    : http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}/phpadmin/ (100% Pure Rust on 127.0.0.1:888 · Zero PHP)"
+  echo -e "  Panel HTTPS / SSL : Run '${BOLD}sudo fp ssl ${CUSTOM_DOMAIN:-<panel-domain>}${NC}' (or 'sudo fp 18') to enable HTTPS on port :${PANEL_PORT}"
+  echo -e "  Rust SQL Admin    : http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}/phpadmin/ | Myphpadmin: http://${CUSTOM_DOMAIN:-${VPS_PUBLIC_IP}}/phpmyadmin/"
 fi
 echo -e "  Admin Username    : ${BOLD}${ADMIN_USER}${NC}"
 if [ -n "${GENERATED_PASS}" ] && [[ "${GENERATED_PASS}" != "(already"* ]]; then
@@ -1373,5 +1378,5 @@ else
 fi
 echo -e "  Credentials Hash  : ${DATA_DIR}/admin.credentials.json (mode 0600, Argon2id)"
 echo -e "  Panel Env Config  : ${ENV_FILE}"
-echo -e "  CLI Toolbox       : sudo fp        (or: sudo fp passwd / sudo fp username / sudo fp status)"
+echo -e "  CLI Toolbox       : sudo fp        (or: sudo fp ssl / sudo fp port / sudo fp passwd / sudo fp status)"
 echo -e "${GREEN}==============================================================================${NC}"

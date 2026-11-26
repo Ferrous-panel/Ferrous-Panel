@@ -781,11 +781,24 @@ export async function renderSettingsJobs(container) {
     </section>
 
     <section class="surface">
-      <div class="surface-head"><h2 class="surface-title">Cấu hình bảng điều khiển & Tài khoản quản trị</h2></div>
+      <div class="surface-head">
+        <div>
+          <h2 class="surface-title">Cấu hình bảng điều khiển, Cổng Panel (8443 / Custom) &amp; SSL</h2>
+          <div class="meta-line">
+            <span>Link Panel hiện tại: <strong class="mono">${esc((admin.sslEnabled ? 'https' : 'http') + '://' + (admin.customDomain || window.location.hostname || '127.0.0.1') + ':' + origPort + (admin.securityEntrance || '/panel'))}</strong></span>
+            <span>·</span>
+            <span>Cổng 80 &amp; 443 luôn dành 100% cho các Website</span>
+          </div>
+        </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button type="button" class="btn btn-sm btn-primary" id="panel-issue-ssl-btn">Cấp / Gia hạn SSL cho Link Panel (:${esc(origPort)})</button>
+          <button type="button" class="btn btn-sm" id="panel-self-ssl-btn">SSL Self-Signed (IP:${esc(origPort)})</button>
+        </div>
+      </div>
       <form id="panel-admin-form">
         <div class="form-grid">
           <div class="field">
-            <label>Cổng Panel (1–65535, cấm 80 & 443, mặc định 8443)</label>
+            <label>Cổng Panel (1–65535, cấm 80 &amp; 443, mặc định 8443)</label>
             <input class="input mono" name="panelPort" type="number" min="1" max="65535" value="${esc(origPort)}" required />
           </div>
           <div class="field">
@@ -793,7 +806,7 @@ export async function renderSettingsJobs(container) {
             <input class="input mono" name="securityEntrance" value="${esc(admin.securityEntrance || '/panel')}" />
           </div>
           <div class="field">
-            <label>Tên miền Panel tùy chỉnh (tùy chọn)</label>
+            <label>Tên miền Panel tùy chỉnh (luôn truy cập qua :${esc(origPort)})</label>
             <input class="input mono" name="customDomain" value="${esc(admin.customDomain || '')}" placeholder="panel.example.com" />
           </div>
           <div class="field">
@@ -805,8 +818,11 @@ export async function renderSettingsJobs(container) {
             <input class="input" name="adminPassword" type="password" placeholder="Tối thiểu 8 ký tự" />
           </div>
         </div>
+        <div class="meta-line" style="margin-top:8px">
+          <span>Lệnh CLI cấp SSL cho Panel: <code class="mono">sudo fp ssl ${esc(admin.customDomain || 'panel.example.com')}</code> hoặc <code class="mono">sudo fp 18</code></span>
+        </div>
         <div class="row" style="justify-content:flex-end;margin-top:8px">
-          <button type="submit" class="btn btn-primary" id="panel-admin-sub">Lưu & Áp dụng cấu hình</button>
+          <button type="submit" class="btn btn-primary" id="panel-admin-sub">Lưu &amp; Áp dụng cấu hình</button>
         </div>
       </form>
     </section>
@@ -966,6 +982,36 @@ export async function renderSettingsJobs(container) {
   container.querySelectorAll('[data-job-open]').forEach((b) => {
     b.addEventListener('click', () => openJobDrawer(b.dataset.jobOpen));
   });
+
+  const issuePanelSslBtn = document.getElementById('panel-issue-ssl-btn');
+  issuePanelSslBtn?.addEventListener('click', () => withBusy(issuePanelSslBtn, async () => {
+    const domInput = document.querySelector('#panel-admin-form input[name="customDomain"]');
+    const domVal = String(domInput?.value || admin.customDomain || '').trim();
+    try {
+      const res = await api('POST', '/api/panel-admin/cli-action', {
+        option: 18,
+        value: domVal,
+      }, { timeoutMs: 210000, keepAlive: true });
+      toast(res.output || `Đã cấp & bật HTTPS SSL cho Panel trên cổng :${origPort}.`);
+      await renderSettingsJobs(container);
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }));
+
+  const selfPanelSslBtn = document.getElementById('panel-self-ssl-btn');
+  selfPanelSslBtn?.addEventListener('click', () => withBusy(selfPanelSslBtn, async () => {
+    try {
+      const res = await api('POST', '/api/panel-admin/cli-action', {
+        option: 18,
+        value: 'self-signed',
+      }, { timeoutMs: 60000, keepAlive: true });
+      toast(res.output || `Đã tạo & bật HTTPS Self-Signed SSL cho Panel trên cổng :${origPort}.`);
+      await renderSettingsJobs(container);
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  }));
 
   document.getElementById('panel-admin-form')?.addEventListener('submit', async (e) => {
     e.preventDefault();

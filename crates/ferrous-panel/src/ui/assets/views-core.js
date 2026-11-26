@@ -1297,8 +1297,9 @@ function openSiteSettingsModal(app, container) {
 }
 
 function openDeployModal(container) {
-  openModal('Triển khai Website mới', `
+  openModal('Triển khai Website mới / Tự động Deploy bằng Link Git', `
     <form id="deploy-app-form">
+      <div id="deploy-app-err"></div>
       <div class="form-grid">
         <div class="field">
           <label>Tên hiển thị</label>
@@ -1319,30 +1320,87 @@ function openDeployModal(container) {
           <input class="input mono" name="internalPort" type="number" value="8080" min="1024" max="65535" />
         </div>
         <div class="field">
+          <label>Git Repository URL (tùy chọn — hỗ trợ HTTPS / SSH / link /tree/branch)</label>
+          <input class="input mono" name="gitRepoUrl" placeholder="https://github.com/org/repo.git" />
+        </div>
+        <div class="field">
+          <label>Nhánh Git (Branch — để trống = tự nhận main/master)</label>
+          <input class="input mono" name="gitBranch" placeholder="main" value="main" />
+        </div>
+        <div class="field">
+          <label>Thư mục chạy con (Subdirectory — tùy chọn, ví dụ: public / dist)</label>
+          <input class="input mono" name="runSubDir" placeholder="(để trống = thư mục gốc)" />
+        </div>
+        <div class="field">
           <label>Lệnh khởi chạy (tùy chọn)</label>
           <input class="input mono" name="execCommand" placeholder="bun run start" />
         </div>
-        <div class="field">
-          <label>Git Repository URL (tùy chọn)</label>
-          <input class="input mono" name="gitRepoUrl" placeholder="https://github.com/org/repo.git" />
+      </div>
+      <div class="surface-subtle" style="margin:10px 0;padding:10px 12px">
+        <label class="checkbox-row" style="margin-bottom:8px">
+          <input type="checkbox" name="createDatabase" id="deploy-create-db-chk" />
+          <span><strong>Tự động tạo Database đi kèm</strong> (MariaDB 11.4 / PostgreSQL 17 / SQLite 3)</span>
+        </label>
+        <div class="form-grid" id="deploy-db-fields" style="display:none">
+          <div class="field">
+            <label>Hệ quản trị SQL</label>
+            <select class="select" name="dbEngine">
+              <option value="MariaDB 11.4">MariaDB 11.4</option>
+              <option value="PostgreSQL 17">PostgreSQL 17</option>
+              <option value="SQLite 3 (WAL · Pure Rust)">SQLite 3 (WAL · Pure Rust)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Tên Database (để trống = tự đặt theo tên miền)</label>
+            <input class="input mono" name="dbName" placeholder="app_prod_db" />
+          </div>
+          <div class="field">
+            <label>Tài khoản DB (để trống = tự sinh)</label>
+            <input class="input mono" name="dbUser" placeholder="app_usr" />
+          </div>
+          <div class="field">
+            <label>Mật khẩu DB (để trống = tự sinh bảo mật)</label>
+            <input class="input mono" name="dbPassword" type="password" placeholder="Tự động tạo mật khẩu mạnh" />
+          </div>
         </div>
       </div>
-      <div class="row" style="margin:8px 0 14px">
+      <div class="row" style="margin:8px 0 14px;flex-wrap:wrap;gap:14px">
         <label class="checkbox-row"><input type="checkbox" name="sslEnabled" checked /><span>Tự động cấp SSL / HTTPS</span></label>
         <label class="checkbox-row"><input type="checkbox" name="websocketEnabled" checked /><span>Hỗ trợ WebSocket</span></label>
         <label class="checkbox-row"><input type="checkbox" name="http3Quic" /><span>HTTP/3 QUIC</span></label>
       </div>
+      <div id="deploy-progress-note" class="muted" style="font-size:12px;margin-bottom:10px;display:none"></div>
       <div class="row" style="justify-content:flex-end">
-        <button type="submit" class="btn btn-primary" id="deploy-submit-btn">Tạo & Triển khai</button>
+        <button type="submit" class="btn btn-primary" id="deploy-submit-btn">Tạo &amp; Triển khai</button>
       </div>
     </form>
   `, {
+    large: true,
     onMount(body) {
+      const dbChk = body.querySelector('#deploy-create-db-chk');
+      const dbBox = body.querySelector('#deploy-db-fields');
+      dbChk?.addEventListener('change', () => {
+        if (dbBox) dbBox.style.display = dbChk.checked ? 'grid' : 'none';
+      });
       body.querySelector('#deploy-app-form')?.addEventListener('submit', async (e) => {
         e.preventDefault();
         const sub = body.querySelector('#deploy-submit-btn');
+        const errBox = body.querySelector('#deploy-app-err');
+        const progNote = body.querySelector('#deploy-progress-note');
+        if (errBox) {
+          errBox.className = '';
+          errBox.textContent = '';
+        }
         await withBusy(sub, async () => {
           const fd = new FormData(e.target);
+          const gitRepoUrl = String(fd.get('gitRepoUrl') || '').trim();
+          const createDatabase = fd.get('createDatabase') === 'on';
+          if (progNote) {
+            progNote.style.display = 'block';
+            progNote.textContent = gitRepoUrl
+              ? 'Đang clone Git repository, tự động build tài nguyên (Bun/Tailwind/Composer/Cargo) và kích hoạt vhost...'
+              : 'Đang khởi tạo website, cấu hình vhost và dịch vụ...';
+          }
           try {
             await api('POST', '/api/apps', {
               name: String(fd.get('name') || '').trim(),
@@ -1351,7 +1409,7 @@ function openDeployModal(container) {
               aliases: [],
               internalPort: Number(fd.get('internalPort') || 8080),
               workingDir: '',
-              runSubDir: '',
+              runSubDir: String(fd.get('runSubDir') || '').trim(),
               execCommand: String(fd.get('execCommand') || '').trim(),
               workers: 1,
               memoryLimitMb: 256,
@@ -1359,20 +1417,25 @@ function openDeployModal(container) {
               http3Quic: fd.get('http3Quic') === 'on',
               websocketEnabled: fd.get('websocketEnabled') === 'on',
               rateLimitRps: 0,
-              createDatabase: false,
-              dbEngine: '',
-              dbName: '',
-              dbUser: '',
-              dbPassword: '',
+              createDatabase,
+              dbEngine: createDatabase ? String(fd.get('dbEngine') || 'MariaDB 11.4') : '',
+              dbName: createDatabase ? String(fd.get('dbName') || '').trim() : '',
+              dbUser: createDatabase ? String(fd.get('dbUser') || '').trim() : '',
+              dbPassword: createDatabase ? String(fd.get('dbPassword') || '').trim() : '',
               createFtp: false,
               ftpUser: '',
-              gitRepoUrl: String(fd.get('gitRepoUrl') || '').trim(),
-              gitBranch: 'main',
-            });
+              gitRepoUrl,
+              gitBranch: String(fd.get('gitBranch') || '').trim() || 'main',
+            }, { timeoutMs: 240000, keepAlive: true });
             closeModal();
-            toast('Đã triển khai website mới.');
+            toast(gitRepoUrl ? 'Đã clone Git repository, build & triển khai website thành công.' : 'Đã triển khai website mới.');
             await renderApps(container);
           } catch (err) {
+            if (progNote) progNote.style.display = 'none';
+            if (errBox) {
+              errBox.className = 'alert-err';
+              errBox.textContent = err.message || 'Triển khai thất bại.';
+            }
             toast(err.message, 'err');
           }
         });
@@ -2001,15 +2064,19 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           e.preventDefault();
           await withBusy(body.querySelector('#db-create-sub'), async () => {
             const fd = new FormData(e.target);
+            const engine = String(fd.get('engine') || 'SQLite 3 (WAL · Pure Rust)');
+            const defaultCollation = engine.toLowerCase().includes('mariadb') || engine.toLowerCase().includes('mysql')
+              ? 'utf8mb4_unicode_ci'
+              : (engine.toLowerCase().includes('postgres') ? 'en_US.UTF-8' : 'UTF-8');
             try {
               await api('POST', '/api/databases', {
                 name: String(fd.get('name') || '').trim(),
-                engine: String(fd.get('engine') || 'SQLite 3 (WAL · Pure Rust)'),
+                engine,
                 username: String(fd.get('username') || '').trim(),
                 password: String(fd.get('password') || '').trim() || null,
-                collation: 'UTF-8',
+                collation: defaultCollation,
                 linkedAppId: '',
-              });
+              }, { timeoutMs: 180000, keepAlive: true });
               closeModal();
               toast('Đã tạo database mới.');
               await renderDatabases(container);

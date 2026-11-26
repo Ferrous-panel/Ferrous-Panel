@@ -873,7 +873,7 @@ update_ferrousx_from_github() {
       fi
     ); then
       fx_target_sha="$(git -C "${FERROUSX_SRC_DIR}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse FETCH_HEAD 2>/dev/null || git -C "${FERROUSX_SRC_DIR}" rev-parse HEAD 2>/dev/null || echo '')"
-      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v4}"
+      local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v5}"
       local fx_prev_sha
       fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
       if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_cache_tag}" ] && [ "${fx_prev_sha}" = "${fx_cache_tag}" ]; then
@@ -915,6 +915,10 @@ update_ferrousx_from_github() {
         (cd "${FERROUSX_SRC_DIR}" && cargo generate-lockfile && cargo update -p quinn-proto --precise 0.11.9) || true
       fi
       if [ -f "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" ]; then
+        if grep -q 'if is_panel_request(req, &norm_path, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          echo -e "${CYAN}[*] Applying compatibility patch: keeping ports 80/443 dedicated to websites (Panel is served exclusively on :8443 / custom port)...${NC}"
+          sed -i 's/if is_panel_request(req, \&norm_path, cfg)/if false \&\& is_panel_request(req, \&norm_path, cfg)/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
         if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
@@ -1735,8 +1739,29 @@ auto_upgrade_self_signed_sites_to_letsencrypt() {
 
 auto_upgrade_self_signed_sites_to_letsencrypt
 
+# Ensure no legacy Nginx or FerrousX vhost proxies ports 80/443 to the Panel port (8443 / custom port)
+ACTIVE_PANEL_PORT="$(read_panel_env_key FERROUS_PORT "8443")"
+if [ -z "$ACTIVE_PANEL_PORT" ] || [ "$ACTIVE_PANEL_PORT" = "80" ] || [ "$ACTIVE_PANEL_PORT" = "443" ]; then
+  ACTIVE_PANEL_PORT="8443"
+fi
+ACTIVE_PANEL_ENTRANCE="$(read_panel_env_key FERROUS_SECURITY_ENTRANCE "/panel")"
+ACTIVE_PANEL_DOMAIN="$(read_panel_env_key FERROUS_CUSTOM_DOMAIN "")"
+for _vh in /etc/ferrousx/sites/*.toml /etc/nginx/sites-enabled/*.conf /etc/nginx/sites-available/*.conf; do
+  [ -f "$_vh" ] || continue
+  if grep -qE "127\.0\.0\.1:${ACTIVE_PANEL_PORT}|127\.0\.0\.1:8443" "$_vh" 2>/dev/null; then
+    echo -e "${CYAN}[*] Removing legacy port 80/443 panel reverse-proxy vhost ${_vh} (Panel runs exclusively on :${ACTIVE_PANEL_PORT})...${NC}"
+    rm -f "$_vh"
+  fi
+done
+
+PANEL_SCHEME="http"
+if [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && [ -f "/etc/ferrous-panel/ssl/privkey.pem" ]; then
+  PANEL_SCHEME="https"
+fi
+
 UPDATE_ELAPSED="$(( $(date +%s) - UPDATE_START_TS ))"
 echo -e "${GREEN}${BOLD}Update completed cleanly in ${UPDATE_ELAPSED}s. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
+echo -e "${CYAN}Panel URL (Port ${ACTIVE_PANEL_PORT}): ${BOLD}${PANEL_SCHEME}://${ACTIVE_PANEL_DOMAIN:-${VPS_PUBLIC_IP}}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC} (Tip: run '${BOLD}sudo fp ssl${NC}' or '${BOLD}sudo fp 18${NC}' to issue/renew Panel SSL on :${ACTIVE_PANEL_PORT})${NC}"
 if [ -x /usr/local/bin/bun ] || [ -x /usr/local/bin/tailwindcss ]; then
   echo -e "${CYAN}Zero-Node.js JS/CSS Toolchain: bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'missing') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'missing') (Node.js NOT required).${NC}"
 fi

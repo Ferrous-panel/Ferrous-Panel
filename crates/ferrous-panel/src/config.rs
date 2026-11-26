@@ -67,6 +67,14 @@ pub struct Config {
     #[arg(long, env = "FERROUS_CUSTOM_DOMAIN")]
     pub custom_domain: Option<String>,
 
+    /// Optional TLS certificate chain file (PEM) for native HTTPS on the panel port (e.g. 8443).
+    #[arg(long, env = "FERROUS_SSL_CERT")]
+    pub ssl_cert: Option<PathBuf>,
+
+    /// Optional TLS private key file (PEM) for native HTTPS on the panel port (e.g. 8443).
+    #[arg(long, env = "FERROUS_SSL_KEY")]
+    pub ssl_key: Option<PathBuf>,
+
     /// Reload active frontend web server engine (nginx or ferrousx) and exit (for certbot --deploy-hook).
     #[arg(long, default_value_t = false)]
     pub reload_webserver: bool,
@@ -104,6 +112,24 @@ impl Config {
         self.data_dir.join("admin.credentials.json")
     }
 
+    /// Resolves the active TLS certificate and private key paths for native HTTPS on the panel port.
+    #[must_use]
+    pub fn resolved_panel_ssl_paths(&self) -> Option<(PathBuf, PathBuf)> {
+        if let (Some(cert), Some(key)) = (&self.ssl_cert, &self.ssl_key) {
+            if cert.is_file() && key.is_file() {
+                return Some((cert.clone(), key.clone()));
+            }
+        }
+        if self.is_production() {
+            let default_cert = PathBuf::from("/etc/ferrous-panel/ssl/fullchain.pem");
+            let default_key = PathBuf::from("/etc/ferrous-panel/ssl/privkey.pem");
+            if default_cert.is_file() && default_key.is_file() {
+                return Some((default_cert, default_key));
+            }
+        }
+        None
+    }
+
     /// Returns true if `peer_ip` is explicitly allowlisted as a trusted reverse proxy.
     #[must_use]
     pub fn is_trusted_proxy(&self, peer_ip: &str) -> bool {
@@ -133,6 +159,8 @@ impl Config {
             secure_cookie: false,
             security_entrance: "/panel".to_string(),
             custom_domain: None,
+            ssl_cert: None,
+            ssl_key: None,
             reload_webserver: false,
             backups_dir,
             systemd_unit_dir,

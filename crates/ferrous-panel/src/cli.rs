@@ -161,6 +161,18 @@ pub enum FpCommand {
         #[arg(long, default_value_t = false)]
         rollback: bool,
     },
+    /// (18) Issue or renew native HTTPS / SSL certificate for the Web Panel URL on port 8443 (or custom port)
+    #[command(alias = "18")]
+    Ssl {
+        /// Optional panel domain (e.g. panel.example.com); if omitted, uses FERROUS_CUSTOM_DOMAIN or prompts interactively
+        domain: Option<String>,
+        /// Force OpenSSL X.509 self-signed certificate (for IP access or Cloudflare Full SSL)
+        #[arg(long, default_value_t = false)]
+        self_signed: bool,
+        /// Disable native HTTPS on the panel port and revert to plain HTTP
+        #[arg(long, default_value_t = false)]
+        disable: bool,
+    },
     /// (19) View or switch active frontend web server engine (nginx | ferrousx)
     #[command(alias = "19")]
     Webserver {
@@ -448,6 +460,20 @@ pub fn apply_env_file(cfg: &mut Config, env_path: &Path) {
                 cfg.secure_cookie =
                     matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
             }
+            "FERROUS_SSL_CERT" if !cli_flag_provided("--ssl-cert") => {
+                cfg.ssl_cert = if val.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(val))
+                };
+            }
+            "FERROUS_SSL_KEY" if !cli_flag_provided("--ssl-key") => {
+                cfg.ssl_key = if val.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(val))
+                };
+            }
             _ => {}
         }
     }
@@ -525,6 +551,20 @@ pub fn apply_default_env_files(cfg: &mut Config) {
                 "FERROUS_SECURE_COOKIE" if !cli_flag_provided("--secure-cookie") => {
                     cfg.secure_cookie =
                         matches!(val.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+                }
+                "FERROUS_SSL_CERT" if !cli_flag_provided("--ssl-cert") => {
+                    cfg.ssl_cert = if val.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(val))
+                    };
+                }
+                "FERROUS_SSL_KEY" if !cli_flag_provided("--ssl-key") => {
+                    cfg.ssl_key = if val.is_empty() {
+                        None
+                    } else {
+                        Some(PathBuf::from(val))
+                    };
                 }
                 _ => {}
             }
@@ -640,6 +680,198 @@ fn normalize_entrance(raw: &str) -> Result<String> {
     }
 }
 
+fn is_panel_ssl_active(config: &Config, env_file: &Path) -> bool {
+    if config.resolved_panel_ssl_paths().is_some() {
+        return true;
+    }
+    if let (Some(cert), Some(key)) = (
+        read_env_key(env_file, "FERROUS_SSL_CERT"),
+        read_env_key(env_file, "FERROUS_SSL_KEY"),
+    ) {
+        if Path::new(&cert).is_file() && Path::new(&key).is_file() {
+            return true;
+        }
+    }
+    Path::new("/etc/ferrous-panel/ssl/fullchain.pem").is_file()
+        && Path::new("/etc/ferrous-panel/ssl/privkey.pem").is_file()
+}
+
+pub async fn issue_or_renew_panel_ssl(
+    config: &Config,
+    env_file: &Path,
+    domain_override: Option<&str>,
+    force_self_signed: bool,
+    disable: bool,
+) -> Result<String> {
+    let active_port = if config.port == 0 || is_reserved_website_port(config.port) {
+        DEFAULT_PANEL_PORT
+    } else {
+        config.port
+    };
+    let panel_ssl_dir = PathBuf::from("/etc/ferrous-panel/ssl");
+    let panel_cert_dst = panel_ssl_dir.join("fullchain.pem");
+    let panel_key_dst = panel_ssl_dir.join("privkey.pem");
+
+    if disable {
+        ensure_default_env_file(env_file, config)?;
+        upsert_env_var(env_file, "FERROUS_SSL_CERT", "")?;
+        upsert_env_var(env_file, "FERROUS_SSL_KEY", "")?;
+        upsert_env_var(env_file, "FERROUS_SECURE_COOKIE", "false")?;
+        let _ = std::fs::remove_file(&panel_cert_dst);
+        let _ = std::fs::remove_file(&panel_key_dst);
+        if AllowedBinary::Systemctl.is_available() {
+            let _ = run_systemctl(&["restart", PANEL_SERVICE]).await;
+        }
+        let host = config
+            .custom_domain
+            .as_deref()
+            .filter(|d| !d.trim().is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| detect_display_host(env_file));
+        return Ok(format!(
+            "Disabled native Panel SSL and restarted {PANEL_SERVICE}.\n  Panel URL: http://{host}:{active_port}{}",
+            config.security_entrance
+        ));
+    }
+
+    std::fs::create_dir_all(&panel_ssl_dir)?;
+    let target_domain_raw = domain_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| read_env_key(env_file, "FERROUS_CUSTOM_DOMAIN"))
+        .or_else(|| config.custom_domain.clone())
+        .unwrap_or_default();
+
+    let hook_exe =
+        std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/ferrous-panel"));
+    let manager = WebServerManager::open_system(&config.db_path(), hook_exe)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut issued_provider = "OpenSSL X.509 Self-Signed";
+    let mut display_target = detect_display_host(env_file);
+
+    if !target_domain_raw.trim().is_empty() {
+        let valid_domain =
+            Domain::parse(target_domain_raw.trim()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        ensure_default_env_file(env_file, config)?;
+        upsert_env_var(env_file, "FERROUS_CUSTOM_DOMAIN", valid_domain.as_str())?;
+        display_target = valid_domain.as_str().to_string();
+
+        if !force_self_signed {
+            std::fs::create_dir_all("/www/acme/.well-known/acme-challenge")?;
+            match manager
+                .ssl
+                .issue_or_renew_letsencrypt_with_options(
+                    &valid_domain,
+                    &[],
+                    None,
+                    true,
+                    true,
+                    true,
+                )
+                .await
+            {
+                Ok(_) => {
+                    issued_provider = "Let's Encrypt (R3/E1)";
+                }
+                Err(le_err) => {
+                    eprintln!(
+                        "[!] Let's Encrypt issuance for '{}' could not complete right now ({le_err}); generating OpenSSL X.509 certificate for Panel HTTPS on port {active_port}...",
+                        valid_domain.as_str()
+                    );
+                    manager
+                        .ssl
+                        .issue_self_signed(&valid_domain, &[], 3650)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+            }
+        } else {
+            manager
+                .ssl
+                .issue_self_signed(&valid_domain, &[], 3650)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+
+        let (src_cert, src_key) = manager
+            .ssl
+            .site_cert_paths(&valid_domain)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cert_bytes = std::fs::read(&src_cert)
+            .with_context(|| format!("failed reading {}", src_cert.display()))?;
+        let key_bytes = std::fs::read(&src_key)
+            .with_context(|| format!("failed reading {}", src_key.display()))?;
+        atomic_write_file(&panel_cert_dst, &cert_bytes, 0o644)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        atomic_write_file(&panel_key_dst, &key_bytes, 0o600)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    } else {
+        if !AllowedBinary::OpenSsl.is_available() {
+            bail!("openssl binary is required to generate panel TLS certificate");
+        }
+        let cn = if display_target.starts_with('<') || display_target.is_empty() {
+            "ferrous-panel.local"
+        } else {
+            display_target.as_str()
+        };
+        let subj = format!("/CN={cn}/O=FerrousPanel");
+        let cert_str = panel_cert_dst.display().to_string();
+        let key_str = panel_key_dst.display().to_string();
+        let out = cmd::run(
+            AllowedBinary::OpenSsl,
+            &[
+                "req",
+                "-x509",
+                "-nodes",
+                "-newkey",
+                "rsa:2048",
+                "-days",
+                "3650",
+                "-subj",
+                &subj,
+                "-keyout",
+                &key_str,
+                "-out",
+                &cert_str,
+            ],
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if !out.success {
+            bail!("openssl req -x509 failed: {}", out.stderr);
+        }
+    }
+
+    ensure_default_env_file(env_file, config)?;
+    upsert_env_var(env_file, "FERROUS_PORT", &active_port.to_string())?;
+    upsert_env_var(
+        env_file,
+        "FERROUS_SSL_CERT",
+        &panel_cert_dst.display().to_string(),
+    )?;
+    upsert_env_var(
+        env_file,
+        "FERROUS_SSL_KEY",
+        &panel_key_dst.display().to_string(),
+    )?;
+    upsert_env_var(env_file, "FERROUS_SECURE_COOKIE", "true")?;
+    ensure_clean_panel_systemd_unit(env_file).await?;
+
+    if AllowedBinary::Systemctl.is_available() {
+        run_systemctl(&["restart", PANEL_SERVICE]).await?;
+    }
+
+    Ok(format!(
+        "Enabled native HTTPS ({issued_provider}) for FerrousPanel on port {active_port} (ports 80/443 remain 100% dedicated to websites).\n  Cert File : {}\n  Key File  : {}\n  Panel URL : https://{display_target}:{active_port}{}",
+        panel_cert_dst.display(),
+        panel_key_dst.display(),
+        config.security_entrance
+    ))
+}
+
 async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
     let creds_path = config.credentials_path();
     let (username, has_creds) = if creds_path.is_file() {
@@ -664,6 +896,8 @@ async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
     } else {
         config.port
     };
+    let ssl_active = is_panel_ssl_active(config, env_file);
+    let scheme = if ssl_active { "https" } else { "http" };
     let display_host = detect_display_host(env_file);
     let probe_host = match config.bind.trim() {
         "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1",
@@ -677,9 +911,10 @@ async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
     println!("  FERROUS-PANEL — RUNTIME STATUS (100% Pure Rust)");
     println!("======================================================================");
     println!(
-        "  Bind Address     : {}:{} ({})",
+        "  Bind Address     : {}:{} ({}, {})",
         config.bind,
         active_port,
+        if ssl_active { "HTTPS/TLS" } else { "HTTP" },
         if listening {
             "LISTENING"
         } else {
@@ -689,12 +924,12 @@ async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
     println!("  Security Entrance: {}", config.security_entrance);
     if config.bind == "127.0.0.1" || config.bind == "::1" {
         println!(
-            "  Panel URL (Local): http://{}:{}{}",
+            "  Panel URL (Local): {scheme}://{}:{}{}",
             config.bind, active_port, config.security_entrance
         );
     } else {
         println!(
-            "  Panel URL (IP)   : http://{display_host}:{active_port}{}",
+            "  Panel URL (IP)   : {scheme}://{display_host}:{active_port}{}",
             config.security_entrance
         );
     }
@@ -702,15 +937,19 @@ async fn print_status(config: &Config, env_file: &Path) -> Result<()> {
         if !dom.trim().is_empty() {
             println!("  Custom Domain    : {}", dom.trim());
             println!(
-                "  Panel URL (Domain): http://{}:{active_port}{}",
+                "  Panel URL (Domain): {scheme}://{}:{active_port}{}",
                 dom.trim(),
                 config.security_entrance
             );
             println!(
-                "  Cloudflare Note  : Set DNS record '{}' to DNS-Only (Gray Cloud) for HTTP :{active_port}; ports 80/443 are reserved strictly for websites.",
+                "  Panel SSL Tip    : Run `sudo fp ssl {}` (or `sudo fp 18`) to issue/renew HTTPS SSL on port :{active_port}. Ports 80/443 are reserved strictly for websites.",
                 dom.trim()
             );
         }
+    } else if !ssl_active {
+        println!(
+            "  Panel SSL Tip    : Run `sudo fp ssl` (or `sudo fp 18`) to issue/enable HTTPS SSL for the Panel on port :{active_port}."
+        );
     }
     println!("  Admin Username   : {username}");
     println!(
@@ -997,31 +1236,36 @@ pub async fn run_fp_command(
                 }
             }
 
+            let scheme = if is_panel_ssl_active(config, env_file) {
+                "https"
+            } else {
+                "http"
+            };
             println!(
                 "Updated FERROUS_PORT={valid_port} in {} and verified {PANEL_SERVICE} is listening on {effective_bind}:{valid_port}.",
                 env_file.display()
             );
             if effective_bind == "127.0.0.1" || effective_bind == "::1" {
                 println!(
-                    "  Panel URL (Local) : http://{effective_bind}:{valid_port}{}",
+                    "  Panel URL (Local) : {scheme}://{effective_bind}:{valid_port}{}",
                     config.security_entrance
                 );
                 println!("  Note: bind IP is local-only; run `sudo fp bind 0.0.0.0` to allow public access.");
             } else {
                 let host = detect_display_host(env_file);
                 println!(
-                    "  Panel URL (IP)    : http://{host}:{valid_port}{}",
+                    "  Panel URL (IP)    : {scheme}://{host}:{valid_port}{}",
                     config.security_entrance
                 );
                 if let Some(ref dom) = config.custom_domain {
                     if !dom.trim().is_empty() {
                         println!(
-                            "  Panel URL (Domain): http://{}:{valid_port}{}",
+                            "  Panel URL (Domain): {scheme}://{}:{valid_port}{}",
                             dom.trim(),
                             config.security_entrance
                         );
                         println!(
-                            "  Cloudflare Note   : Keep '{}' on DNS-Only (Gray Cloud) to reach HTTP :{valid_port}. Ports 80/443 are reserved strictly for websites.",
+                            "  Cloudflare Note   : Keep '{}' on DNS-Only (Gray Cloud) to reach {scheme}://:{valid_port}. Ports 80/443 are reserved strictly for websites.",
                             dom.trim()
                         );
                     }
@@ -1084,18 +1328,23 @@ pub async fn run_fp_command(
                 } else {
                     config.port
                 };
+                let scheme = if is_panel_ssl_active(config, env_file) {
+                    "https"
+                } else {
+                    "http"
+                };
                 println!(
                     "Updated FERROUS_CUSTOM_DOMAIN={} in {} and restarted {PANEL_SERVICE}.",
                     valid_domain.as_str(),
                     env_file.display()
                 );
                 println!(
-                    "  Panel URL: http://{}:{active_port}{}",
+                    "  Panel URL: {scheme}://{}:{active_port}{}",
                     valid_domain.as_str(),
                     config.security_entrance
                 );
                 println!(
-                    "  Note     : Keep '{}' on DNS-Only (Gray Cloud) if using Cloudflare; ports 80/443 are reserved strictly for websites.",
+                    "  Tip      : Run `sudo fp ssl {}` (or `sudo fp 18`) to issue/enable HTTPS SSL for this Panel URL on port :{active_port}.",
                     valid_domain.as_str()
                 );
             }
@@ -1136,6 +1385,11 @@ pub async fn run_fp_command(
             if AllowedBinary::Systemctl.is_available() {
                 run_systemctl(&["restart", PANEL_SERVICE]).await?;
             }
+            let scheme = if is_panel_ssl_active(config, env_file) {
+                "https"
+            } else {
+                "http"
+            };
             println!(
                 "Updated FERROUS_BIND={ip_str} in {} and restarted {PANEL_SERVICE}.",
                 env_file.display()
@@ -1143,7 +1397,7 @@ pub async fn run_fp_command(
             let public_host = detect_display_host(env_file);
             if parsed_ip.is_loopback() {
                 println!(
-                    "Local URL : http://127.0.0.1:{}{}",
+                    "Local URL : {scheme}://127.0.0.1:{}{}",
                     config.port, config.security_entrance
                 );
                 println!(
@@ -1151,14 +1405,14 @@ pub async fn run_fp_command(
                     config.port, config.port, public_host
                 );
             } else {
-                if !config.secure_cookie {
+                if !config.secure_cookie && scheme == "http" {
                     eprintln!(
-                        "[WARNING] CANH BAO BAO MAT: Panel dang chay HTTP khong ma hoa tren {ip_str}:{} (FERROUS_SECURE_COOKIE=false). Nen cau hinh HTTPS reverse proxy hoac quay lai 127.0.0.1.",
-                        config.port
+                        "[WARNING] Panel dang chay HTTP tren {ip_str}:{}. Chay `sudo fp ssl` (hoac `sudo fp 18`) de bat HTTPS/SSL tren cong {}.",
+                        config.port, config.port
                     );
                 }
                 println!(
-                    "Direct URL: http://{}:{}{}",
+                    "Direct URL: {scheme}://{}:{}{}",
                     public_host, config.port, config.security_entrance
                 );
                 println!(
@@ -1239,6 +1493,46 @@ pub async fn run_fp_command(
                     out.stderr
                 );
             }
+        }
+        FpCommand::Ssl {
+            domain,
+            self_signed,
+            disable,
+        } => {
+            let dom_input = if disable {
+                None
+            } else {
+                match domain {
+                    Some(d) => Some(d),
+                    None => {
+                        let current_dom = read_env_key(env_file, "FERROUS_CUSTOM_DOMAIN")
+                            .or_else(|| config.custom_domain.clone())
+                            .unwrap_or_default();
+                        if !current_dom.trim().is_empty() {
+                            Some(current_dom)
+                        } else {
+                            let raw = prompt_line(
+                                "Enter panel domain for Let's Encrypt SSL (or press Enter for Self-Signed SSL on IP:8443): ",
+                            )
+                            .unwrap_or_default();
+                            if raw.trim().is_empty() {
+                                None
+                            } else {
+                                Some(raw)
+                            }
+                        }
+                    }
+                }
+            };
+            let msg = issue_or_renew_panel_ssl(
+                config,
+                env_file,
+                dom_input.as_deref(),
+                self_signed,
+                disable,
+            )
+            .await?;
+            println!("{msg}");
         }
         FpCommand::Webserver { engine } => {
             let hook_exe = std::env::current_exe()
@@ -1428,8 +1722,8 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
     println!("  (6)  Change Admin username       (15) Check system service health");
     println!("  (7)  Change panel listening port (16) Show panel systemd logs");
     println!("  (8)  Change security entrance    (17) Update FerrousPanel (fast)");
-    println!("  (9)  Clear security entrance '/' (19) Show web engine status");
-    println!("  (0)  Exit");
+    println!("  (9)  Clear security entrance '/' (18) Issue/Renew SSL for Panel URL");
+    println!("  (0)  Exit                        (19) Show web engine status");
     println!("======================================================================");
 
     let choice = prompt_line("Select action [0-19]: ")?;
@@ -1457,6 +1751,11 @@ pub async fn run_interactive_menu(config: &Config, env_file: &Path) -> Result<()
             force: false,
             ferrousx: false,
             rollback: false,
+        },
+        "18" => FpCommand::Ssl {
+            domain: None,
+            self_signed: false,
+            disable: false,
         },
         "19" => FpCommand::Webserver { engine: None },
         other => {

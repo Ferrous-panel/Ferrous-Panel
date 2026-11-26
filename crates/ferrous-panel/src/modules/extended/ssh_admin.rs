@@ -1076,7 +1076,7 @@ async fn sync_panel_network_changes(
     config: &Config,
     executor: &dyn CommandExecutor,
     new_port: Option<u16>,
-    domain_changed: bool,
+    _domain_changed: bool,
 ) -> Result<(), PanelError> {
     if !is_production_vps(config) {
         return Ok(());
@@ -1102,22 +1102,6 @@ async fn sync_panel_network_changes(
                     },
                 });
             }
-        }
-    }
-    if domain_changed && executor.is_binary_available(AllowedBinary::FerrousxCtl) {
-        let out = executor
-            .run(AllowedBinary::FerrousxCtl, &["sync"], CMD_TIMEOUT)
-            .await?;
-        if !out.success {
-            return Err(PanelError::CommandFailed {
-                binary: "ferrousx-ctl",
-                exit_code: out.exit_code,
-                stderr: if out.stderr.is_empty() {
-                    out.stdout
-                } else {
-                    out.stderr
-                },
-            });
         }
     }
     Ok(())
@@ -1319,8 +1303,9 @@ pub async fn run_panel_cli_action(
                     upsert_env_var(&env_file, "FERROUS_PORT", &p.to_string())?;
                     sync_panel_network_changes(config, executor, Some(p), false).await?;
                     schedule_panel_service_restart(config);
+                    let scheme = if admin.ssl_enabled.unwrap_or(false) { "https" } else { "http" };
                     format!(
-                        "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: http://{}:{p}{}).",
+                        "Updated FERROUS_PORT={p} in panel.env, opened UFW port {p}/tcp, and scheduled ferrous-panel.service restart (URL: {scheme}://{}:{p}{}).",
                         detect_vps_server_host(config),
                         admin.security_entrance
                     )
@@ -1352,16 +1337,21 @@ pub async fn run_panel_cli_action(
             if raw.is_empty() || raw.eq_ignore_ascii_case("clear") || raw.eq_ignore_ascii_case("none") {
                 admin.custom_domain = None;
                 upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
-                sync_panel_network_changes(config, executor, None, true).await?;
                 schedule_panel_service_restart(config);
-                "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced reverse proxy.".to_string()
+                "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
             } else {
                 let valid = Domain::parse(raw)?;
                 admin.custom_domain = Some(valid.as_str().to_string());
                 upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", valid.as_str())?;
-                sync_panel_network_changes(config, executor, None, true).await?;
                 schedule_panel_service_restart(config);
-                format!("Updated FERROUS_CUSTOM_DOMAIN={} in panel.env and synced FerrousX.", valid.as_str())
+                let scheme = if admin.ssl_enabled.unwrap_or(false) { "https" } else { "http" };
+                format!(
+                    "Updated FERROUS_CUSTOM_DOMAIN={} in panel.env (Panel URL: {scheme}://{}:{}{}).",
+                    valid.as_str(),
+                    valid.as_str(),
+                    admin.panel_port,
+                    admin.security_entrance
+                )
             }
         }
         11 => {
@@ -1376,9 +1366,8 @@ pub async fn run_panel_cli_action(
         12 => {
             admin.custom_domain = None;
             upsert_env_var(&env_file, "FERROUS_CUSTOM_DOMAIN", "")?;
-            sync_panel_network_changes(config, executor, None, true).await?;
             schedule_panel_service_restart(config);
-            "Cleared FERROUS_CUSTOM_DOMAIN in panel.env and synced FerrousX.".to_string()
+            "Cleared FERROUS_CUSTOM_DOMAIN in panel.env.".to_string()
         }
         13 => {
             let raw = value.unwrap_or("").trim();
@@ -1443,6 +1432,47 @@ pub async fn run_panel_cli_action(
                 }
             } else {
                 "No systemd journal entries available in isolated mode.".to_string()
+            }
+        }
+        18 => {
+            let raw_val = value.unwrap_or("").trim();
+            let disable = raw_val.eq_ignore_ascii_case("disable") || raw_val.eq_ignore_ascii_case("off");
+            let self_signed = raw_val.eq_ignore_ascii_case("self-signed") || raw_val.eq_ignore_ascii_case("self");
+            let dom_override = if disable || self_signed || raw_val.is_empty() {
+                None
+            } else {
+                Some(raw_val)
+            };
+            if prod {
+                match crate::cli::issue_or_renew_panel_ssl(
+                    config,
+                    &env_file,
+                    dom_override,
+                    self_signed,
+                    disable,
+                )
+                .await
+                {
+                    Ok(msg) => {
+                        admin.ssl_enabled = Some(!disable);
+                        if let Some(d) = dom_override {
+                            if let Ok(valid) = Domain::parse(d) {
+                                admin.custom_domain = Some(valid.as_str().to_string());
+                            }
+                        }
+                        msg
+                    }
+                    Err(e) => return Err(PanelError::Conflict(format!("Panel SSL issuance failed: {e}"))),
+                }
+            } else {
+                admin.ssl_enabled = Some(!disable);
+                format!(
+                    "Simulated Panel SSL update on port {} (https://{}:{}{}).",
+                    admin.panel_port,
+                    admin.custom_domain.as_deref().unwrap_or("127.0.0.1"),
+                    admin.panel_port,
+                    admin.security_entrance
+                )
             }
         }
         19 => match webserver.overview().await {
