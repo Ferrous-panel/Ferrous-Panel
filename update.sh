@@ -501,7 +501,7 @@ VPS_PUBLIC_IP="$(detect_public_ip)"
 setup_phpmyadmin_proxy() {
   # Dual-Mode Database Studio:
   #   1. /phpadmin/   -> Pure-Rust FerrousAdmin built into ferrous-panel (127.0.0.1:888)
-  #   2. /phpmyadmin/ -> Official phpMyAdmin (phpmyadmin.net) worker on 127.0.0.1:889, proxied via 127.0.0.1:888
+  #   2. /phpmyadmin/ -> Myphpadmin 5.2.3 (phpmyadmin.net) worker on unprivileged 127.0.0.1:18889, proxied via 127.0.0.1:888
   if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
     systemctl disable --now ferrous-pma.service 2>/dev/null || true
   fi
@@ -510,28 +510,43 @@ setup_phpmyadmin_proxy() {
   local pma_dir="/www/server/phpmyadmin"
   local pma_router="/www/server/ferrous-pma-router.php"
   local pma_tmp="/var/lib/phpmyadmin/tmp"
+  local pma_port="18889"
   mkdir -p /www/server "${pma_tmp}"
+  chmod 0755 /www /www/server /var/lib/phpmyadmin 2>/dev/null || true
+  chmod 0770 "${pma_tmp}" 2>/dev/null || true
 
   local php_bin=""
-  for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
-    if [ -x "$cand" ]; then php_bin="$cand"; break; fi
+  local php_ver=""
+  for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.1 /usr/bin/php8.4 /usr/bin/php /usr/bin/php7.4; do
+    if [ -x "$cand" ]; then
+      php_bin="$cand"
+      case "$cand" in
+        /usr/bin/php[0-9].[0-9]) php_ver="${cand#/usr/bin/php}" ;;
+      esac
+      break
+    fi
   done
-  if { [ -z "$php_bin" ] || ! "$php_bin" -m 2>/dev/null | grep -qi '^mysqli$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^mbstring$'; } && command -v apt-get >/dev/null 2>&1; then
-    echo -e "${CYAN}[*] Installing PHP CLI extensions (mysqli, mbstring, xml, zip, curl) for Official phpMyAdmin...${NC}"
+  if { [ -z "$php_bin" ] || ! "$php_bin" -m 2>/dev/null | grep -qi '^mysqli$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^mbstring$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^xml$'; } && command -v apt-get >/dev/null 2>&1; then
+    echo -e "${CYAN}[*] Installing PHP CLI extensions (mysqli, mbstring, xml, zip, curl) for Myphpadmin 5.2.3...${NC}"
     DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
-    for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.4 /usr/bin/php8.1 /usr/bin/php /usr/bin/php7.4; do
+    if [ -n "$php_ver" ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+        "php${php_ver}-cli" "php${php_ver}-mysql" "php${php_ver}-mbstring" "php${php_ver}-xml" "php${php_ver}-zip" "php${php_ver}-curl" >/dev/null 2>&1 || true
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
+      php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
+    for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.1 /usr/bin/php8.4 /usr/bin/php /usr/bin/php7.4; do
       if [ -x "$cand" ]; then php_bin="$cand"; break; fi
     done
   fi
 
   if [ ! -f "${pma_dir}/index.php" ]; then
-    echo -e "${CYAN}[*] Downloading Official phpMyAdmin (v5.2.2) from phpmyadmin.net...${NC}"
+    echo -e "${CYAN}[*] Downloading Myphpadmin 5.2.3 from files.phpmyadmin.net...${NC}"
     mkdir -p "${pma_dir}"
     local pma_tar="${TMP_DIR}/phpMyAdmin-official.tar.gz"
-    if curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
-      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://github.com/phpmyadmin/phpmyadmin/releases/download/RELEASE_5_2_2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
-      || curl -fsSL --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz"; then
+    if curl -fsSL --retry 2 --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.3/phpMyAdmin-5.2.3-all-languages.tar.gz" \
+      || curl -fsSL --retry 2 --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz" \
+      || curl -fsSL --retry 2 --connect-timeout 15 -o "${pma_tar}" "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz"; then
       tar -xzf "${pma_tar}" --strip-components=1 -C "${pma_dir}" || true
       rm -f "${pma_tar}"
     fi
@@ -540,7 +555,7 @@ setup_phpmyadmin_proxy() {
   if [ -f "${pma_dir}/index.php" ] && [ -n "$php_bin" ]; then
     if [ ! -f "${pma_dir}/config.inc.php" ]; then
       local bf_secret
-      bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecret32!')"
+      bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecretKey')"
       cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
 <?php
 declare(strict_types=1);
@@ -561,10 +576,13 @@ if (file_exists('/run/mysqld/mysqld.sock')) {
 \$cfg['Servers'][\$i]['compress'] = false;
 \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
 \$cfg['TempDir'] = '${pma_tmp}';
+\$cfg['AllowThirdPartyFraming'] = 'sameorigin';
 \$cfg['ExecTimeLimit'] = 300;
 \$cfg['SendErrorReports'] = 'never';
 EOF_PMA_CFG
       chmod 0640 "${pma_dir}/config.inc.php"
+    elif ! grep -q "AllowThirdPartyFraming" "${pma_dir}/config.inc.php" 2>/dev/null; then
+      printf "\n\$cfg['AllowThirdPartyFraming'] = 'sameorigin';\n" >> "${pma_dir}/config.inc.php"
     fi
 
     cat > "${pma_router}" <<'EOF_PMA_ROUTER'
@@ -590,10 +608,25 @@ $rel = substr($uri, strlen('/phpmyadmin'));
 if ($rel === '' || $rel === '/') {
     $rel = '/index.php';
 }
+$blockedPrefixes = ['/setup', '/libraries', '/templates', '/vendor', '/sql', '/locale', '/.git', '/test'];
+$blockedFiles = ['/config.inc.php', '/config.sample.inc.php', '/composer.json', '/composer.lock', '/package.json', '/yarn.lock'];
+$relLower = strtolower($rel);
+foreach ($blockedPrefixes as $pfx) {
+    if ($relLower === $pfx || strpos($relLower, $pfx . '/') === 0) {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
+}
+if (in_array($relLower, $blockedFiles, true)) {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
+}
 $base = realpath('/www/server/phpmyadmin');
 if ($base === false) {
     http_response_code(503);
-    echo 'Official phpMyAdmin directory missing';
+    echo 'Myphpadmin directory missing';
     exit;
 }
 $candidate = $base . $rel;
@@ -625,11 +658,12 @@ $_SERVER['PHP_SELF'] = '/phpmyadmin' . $rel;
 require $real;
 EOF_PMA_ROUTER
     chmod 0644 "${pma_router}"
+    chmod 0755 "${pma_dir}" 2>/dev/null || true
     chown -R www-data:www-data "${pma_dir}" "${pma_tmp}" 2>/dev/null || true
 
     cat > /etc/systemd/system/ferrous-phpmyadmin.service <<EOF_PMA_UNIT
 [Unit]
-Description=FerrousPanel Official phpMyAdmin Worker (127.0.0.1:889)
+Description=FerrousPanel Myphpadmin Worker (127.0.0.1:${pma_port})
 After=network.target mariadb.service mysql.service
 
 [Service]
@@ -638,7 +672,7 @@ User=www-data
 Group=www-data
 WorkingDirectory=${pma_dir}
 Environment=PHP_CLI_SERVER_WORKERS=4
-ExecStart=${php_bin} -S 127.0.0.1:889 -d upload_max_filesize=128M -d post_max_size=128M -d memory_limit=256M -d max_execution_time=300 -t /www/server ${pma_router}
+ExecStart=${php_bin} -S 127.0.0.1:${pma_port} -d upload_max_filesize=128M -d post_max_size=128M -d memory_limit=256M -d max_execution_time=300 -t /www/server ${pma_router}
 Restart=always
 RestartSec=2
 NoNewPrivileges=true
@@ -648,8 +682,28 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF_PMA_UNIT
     systemctl daemon-reload 2>/dev/null || true
-    systemctl enable --now ferrous-phpmyadmin.service >/dev/null 2>&1 || systemctl restart ferrous-phpmyadmin.service >/dev/null 2>&1 || true
-    echo -e "${GREEN}[+] Dual-Mode Database UI active: Official phpMyAdmin (/phpmyadmin/) + Panel FerrousAdmin (/phpadmin/).${NC}"
+    systemctl enable ferrous-phpmyadmin.service >/dev/null 2>&1 || true
+    systemctl restart ferrous-phpmyadmin.service >/dev/null 2>&1 || true
+    local pma_ok=false
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+      if ss -tln 2>/dev/null | grep -q ":${pma_port}[[:space:]]"; then
+        pma_ok=true
+        break
+      fi
+      sleep 0.25
+    done
+    local pma_ver_label="5.2.3"
+    if [ -f "${pma_dir}/package.json" ]; then
+      local parsed_v
+      parsed_v="$(grep -m1 '"version"' "${pma_dir}/package.json" 2>/dev/null | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' || true)"
+      [ -n "$parsed_v" ] && pma_ver_label="$parsed_v"
+    fi
+    if [ "$pma_ok" = true ]; then
+      echo -e "${GREEN}[+] Dual-Mode Database UI active: Myphpadmin ${pma_ver_label} (/phpmyadmin/ -> 127.0.0.1:${pma_port}) + Panel FerrousAdmin (/phpadmin/).${NC}"
+    else
+      echo -e "${YELLOW}[!] ferrous-phpmyadmin.service did not listen on 127.0.0.1:${pma_port}; recent logs:${NC}"
+      journalctl -u ferrous-phpmyadmin.service -n 8 --no-pager 2>/dev/null || true
+    fi
   else
     systemctl daemon-reload 2>/dev/null || true
   fi

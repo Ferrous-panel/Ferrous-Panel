@@ -202,7 +202,7 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       <span class="badge badge-ok" id="engineStatus">Actix-Web + SQLite WAL + MariaDB + PostgreSQL</span>
     </div>
     <div class="row" id="headerActions">
-      <a href="/phpmyadmin/" style="font-size:12px;font-weight:600;padding:7px 12px;border-radius:7px;border:1px solid rgba(59,130,246,0.45);background:rgba(59,130,246,0.16);color:#93c5fd;text-decoration:none;">⇄ phpMyAdmin Chính thức (/phpmyadmin/) ↗</a>
+      <a href="/phpmyadmin/" style="font-size:12px;font-weight:600;padding:7px 12px;border-radius:7px;border:1px solid rgba(59,130,246,0.45);background:rgba(59,130,246,0.16);color:#93c5fd;text-decoration:none;">⇄ __PMA_DISPLAY_NAME__ (/phpmyadmin/) ↗</a>
       <span class="muted" id="userLabel"></span>
       <button type="button" id="btnRefresh" class="hidden">Làm mới</button>
       <button type="button" id="btnLogout" class="danger hidden">Đăng xuất</button>
@@ -1125,12 +1125,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 
 /// Serves the standalone Pure-Rust FerrousAdmin SQL Studio (Panel custom DB UI) at `/phpadmin` and `/phpadmin/`.
 pub async fn serve_ferrous_admin(_req: HttpRequest) -> HttpResponse {
+    let pma_label = format!("Myphpadmin {}", detect_installed_pma_version());
+    let body = FERROUS_ADMIN_HTML.replace("__PMA_DISPLAY_NAME__", &pma_label);
     HttpResponse::Ok()
         .content_type("text/html; charset=utf-8")
         .insert_header(("X-Frame-Options", "SAMEORIGIN"))
         .insert_header(("X-Content-Type-Options", "nosniff"))
         .insert_header(("Cache-Control", "no-store"))
-        .body(FERROUS_ADMIN_HTML)
+        .body(body)
 }
 
 pub const OFFICIAL_PMA_DIR: &str = "/www/server/phpmyadmin";
@@ -1138,8 +1140,9 @@ pub const OFFICIAL_PMA_ROUTER: &str = "/www/server/ferrous-pma-router.php";
 pub const OFFICIAL_PMA_TMP_DIR: &str = "/var/lib/phpmyadmin/tmp";
 pub const OFFICIAL_PMA_UNIT_NAME: &str = "ferrous-phpmyadmin.service";
 pub const OFFICIAL_PMA_UNIT_PATH: &str = "/etc/systemd/system/ferrous-phpmyadmin.service";
-pub const OFFICIAL_PMA_PORT: u16 = 889;
-pub const OFFICIAL_PMA_VERSION: &str = "5.2.2";
+/// Unprivileged loopback port (>= 1024) so `User=www-data` binds cleanly under `NoNewPrivileges=true`.
+pub const OFFICIAL_PMA_PORT: u16 = 18889;
+pub const OFFICIAL_PMA_VERSION: &str = "5.2.3";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1147,6 +1150,7 @@ pub struct OfficialPhpMyAdminStatus {
     pub installed: bool,
     pub running: bool,
     pub version: String,
+    pub display_name: String,
     pub install_dir: String,
     pub official_url: String,
     pub custom_panel_url: String,
@@ -1166,17 +1170,17 @@ fn detect_installed_pma_version() -> String {
     OFFICIAL_PMA_VERSION.to_string()
 }
 
-fn find_php_cli_binary_path() -> Option<&'static str> {
+fn find_php_cli_binary() -> Option<(AllowedBinary, &'static str, Option<&'static str>)> {
     [
-        "/usr/bin/php8.3",
-        "/usr/bin/php8.2",
-        "/usr/bin/php8.4",
-        "/usr/bin/php8.1",
-        "/usr/bin/php",
-        "/usr/bin/php7.4",
+        (AllowedBinary::Php83, "/usr/bin/php8.3", Some("8.3")),
+        (AllowedBinary::Php82, "/usr/bin/php8.2", Some("8.2")),
+        (AllowedBinary::Php81, "/usr/bin/php8.1", Some("8.1")),
+        (AllowedBinary::Php84, "/usr/bin/php8.4", Some("8.4")),
+        (AllowedBinary::Php83, "/usr/bin/php", None),
+        (AllowedBinary::Php74, "/usr/bin/php7.4", Some("7.4")),
     ]
     .into_iter()
-    .find(|candidate| Path::new(candidate).is_file())
+    .find(|(_, candidate, _)| Path::new(candidate).is_file())
 }
 
 async fn is_official_pma_port_open() -> bool {
@@ -1196,14 +1200,16 @@ pub async fn get_official_phpmyadmin_status() -> OfficialPhpMyAdminStatus {
     } else {
         false
     };
+    let version = if installed {
+        detect_installed_pma_version()
+    } else {
+        OFFICIAL_PMA_VERSION.to_string()
+    };
     OfficialPhpMyAdminStatus {
         installed,
         running,
-        version: if installed {
-            detect_installed_pma_version()
-        } else {
-            OFFICIAL_PMA_VERSION.to_string()
-        },
+        display_name: format!("Myphpadmin {version}"),
+        version,
         install_dir: OFFICIAL_PMA_DIR.to_string(),
         official_url: "/phpmyadmin/".to_string(),
         custom_panel_url: "/phpadmin/".to_string(),
@@ -1214,7 +1220,7 @@ fn generate_blowfish_secret() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^*()-_=+";
     let mut bytes = [0u8; 32];
     if OsRng.try_fill_bytes(&mut bytes).is_err() {
-        return "FerrousPanelOfficialPmaSecretKey!".to_string();
+        return "FerrousPanelOfficialPmaSecretKey".to_string();
     }
     bytes
         .iter()
@@ -1246,6 +1252,7 @@ $cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
 $cfg['UploadDir'] = '';\n\
 $cfg['SaveDir'] = '';\n\
 $cfg['TempDir'] = '{OFFICIAL_PMA_TMP_DIR}';\n\
+$cfg['AllowThirdPartyFraming'] = 'sameorigin';\n\
 $cfg['ExecTimeLimit'] = 300;\n\
 $cfg['SendErrorReports'] = 'never';\n"
     )
@@ -1274,10 +1281,25 @@ $rel = substr($uri, strlen('/phpmyadmin'));
 if ($rel === '' || $rel === '/') {
     $rel = '/index.php';
 }
+$blockedPrefixes = ['/setup', '/libraries', '/templates', '/vendor', '/sql', '/locale', '/.git', '/test'];
+$blockedFiles = ['/config.inc.php', '/config.sample.inc.php', '/composer.json', '/composer.lock', '/package.json', '/yarn.lock'];
+$relLower = strtolower($rel);
+foreach ($blockedPrefixes as $pfx) {
+    if ($relLower === $pfx || strpos($relLower, $pfx . '/') === 0) {
+        http_response_code(403);
+        echo 'Forbidden';
+        exit;
+    }
+}
+if (in_array($relLower, $blockedFiles, true)) {
+    http_response_code(403);
+    echo 'Forbidden';
+    exit;
+}
 $base = realpath('/www/server/phpmyadmin');
 if ($base === false) {
     http_response_code(503);
-    echo 'Official phpMyAdmin directory missing';
+    echo 'Myphpadmin directory missing';
     exit;
 }
 $candidate = $base . $rel;
@@ -1313,7 +1335,7 @@ require $real;
 fn render_official_pma_systemd_unit(php_bin: &str) -> String {
     format!(
         "[Unit]\n\
-Description=FerrousPanel Official phpMyAdmin Worker (127.0.0.1:{OFFICIAL_PMA_PORT})\n\
+Description=FerrousPanel Myphpadmin Worker (127.0.0.1:{OFFICIAL_PMA_PORT})\n\
 After=network.target mariadb.service mysql.service\n\
 \n\
 [Service]\n\
@@ -1333,96 +1355,182 @@ WantedBy=multi-user.target\n"
     )
 }
 
-/// Downloads & configures Official phpMyAdmin from the official release archive (`phpmyadmin.net` / GitHub `phpmyadmin/phpmyadmin`)
-/// into `/www/server/phpmyadmin` and starts `ferrous-phpmyadmin.service` on `127.0.0.1:889`, while keeping
-/// FerrousAdmin (`/phpadmin/`) active in parallel.
+fn set_dir_mode(path: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = Path::new(path);
+    if p.exists() {
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode));
+    }
+}
+
+fn ensure_config_allows_sameorigin_frame(cfg_inc: &Path) {
+    if let Ok(mut content) = std::fs::read_to_string(cfg_inc) {
+        if !content.contains("AllowThirdPartyFraming") {
+            content.push_str("\n$cfg['AllowThirdPartyFraming'] = 'sameorigin';\n");
+            let _ = atomic_write_file(cfg_inc, content.as_bytes(), 0o640);
+        }
+    }
+}
+
+/// Downloads & configures Myphpadmin from `files.phpmyadmin.net` into `/www/server/phpmyadmin`
+/// and starts `ferrous-phpmyadmin.service` on unprivileged loopback port `127.0.0.1:18889`,
+/// keeping FerrousAdmin (`/phpadmin/`) active in parallel.
 pub async fn install_or_repair_official_phpmyadmin(
     executor: &dyn CommandExecutor,
 ) -> Result<OfficialPhpMyAdminStatus, PanelError> {
     let apt_timeout = Duration::from_secs(240);
-    let cmd_timeout = Duration::from_secs(90);
+    let cmd_timeout = Duration::from_secs(120);
+    let noninteractive_env = [("DEBIAN_FRONTEND", "noninteractive")];
 
-    // 1. Ensure PHP CLI + required phpMyAdmin extensions (mysqli, mbstring, xml, zip, curl) are installed.
-    let needs_php_pkgs = find_php_cli_binary_path().is_none()
-        || !Path::new("/usr/share/php").exists()
-        || {
-            if let Ok(out) = executor
-                .run(AllowedBinary::Php83, &["-m"], Duration::from_secs(5))
-                .await
-            {
+    // 1. Ensure PHP CLI + required extensions (mysqli, mbstring, xml, zip, curl) are installed
+    // for the EXACT active PHP version (important on Ubuntu with Ondrej PPA where `php-mysql`
+    // may target a different default PHP version).
+    let detected_php = find_php_cli_binary();
+    let needs_php_pkgs = match detected_php {
+        None => true,
+        Some((bin, _, _)) => {
+            if let Ok(out) = executor.run(bin, &["-m"], Duration::from_secs(5)).await {
                 let lower = out.stdout.to_ascii_lowercase();
-                !lower.contains("mysqli") || !lower.contains("mbstring")
+                !lower.contains("mysqli")
+                    || !lower.contains("mbstring")
+                    || !lower.contains("xml")
             } else {
                 true
             }
-        };
+        }
+    };
 
     if needs_php_pkgs && executor.is_binary_available(AllowedBinary::AptGet) {
         let _ = executor
-            .run(AllowedBinary::AptGet, &["update", "-qq"], apt_timeout)
-            .await;
-        let _ = executor
-            .run(
+            .run_with_env(
                 AllowedBinary::AptGet,
-                &[
-                    "install",
-                    "-y",
-                    "-qq",
-                    "php-cli",
-                    "php-mysql",
-                    "php-mbstring",
-                    "php-xml",
-                    "php-zip",
-                    "php-curl",
-                ],
+                &["update", "-qq"],
+                &noninteractive_env,
+                None,
                 apt_timeout,
             )
             .await;
+
+        if let Some((_, _, Some(ver))) = detected_php {
+            let pkgs = [
+                format!("php{ver}-cli"),
+                format!("php{ver}-mysql"),
+                format!("php{ver}-mbstring"),
+                format!("php{ver}-xml"),
+                format!("php{ver}-zip"),
+                format!("php{ver}-curl"),
+            ];
+            let mut args: Vec<&str> = vec![
+                "install",
+                "-y",
+                "-qq",
+                "-o",
+                "Dpkg::Options::=--force-confdef",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+            ];
+            for p in &pkgs {
+                args.push(p.as_str());
+            }
+            let _ = executor
+                .run_with_env(
+                    AllowedBinary::AptGet,
+                    &args,
+                    &noninteractive_env,
+                    None,
+                    apt_timeout,
+                )
+                .await;
+        }
+
+        if find_php_cli_binary().is_none() || detected_php.and_then(|(_, _, v)| v).is_none() {
+            let _ = executor
+                .run_with_env(
+                    AllowedBinary::AptGet,
+                    &[
+                        "install",
+                        "-y",
+                        "-qq",
+                        "-o",
+                        "Dpkg::Options::=--force-confdef",
+                        "-o",
+                        "Dpkg::Options::=--force-confold",
+                        "php-cli",
+                        "php-mysql",
+                        "php-mbstring",
+                        "php-xml",
+                        "php-zip",
+                        "php-curl",
+                    ],
+                    &noninteractive_env,
+                    None,
+                    apt_timeout,
+                )
+                .await;
+        }
     }
 
-    let Some(php_bin) = find_php_cli_binary_path() else {
-        return Err(PanelError::Conflict(
-            "Chưa tìm thấy PHP CLI trên máy chủ — hãy cài PHP (ví dụ: sudo apt install -y php-cli php-mysql php-mbstring php-xml) trước khi kích hoạt phpMyAdmin chính thức."
-                .to_string(),
-        ));
+    let Some((_, php_bin, _)) = find_php_cli_binary() else {
+        return Err(PanelError::Conflict(format!(
+            "Chưa tìm thấy PHP CLI trên máy chủ — hãy cài PHP (ví dụ: sudo apt install -y php-cli php-mysql php-mbstring php-xml) trước khi kích hoạt Myphpadmin {OFFICIAL_PMA_VERSION}."
+        )));
     };
 
-    // 2. Download Official phpMyAdmin archive if not yet present in /www/server/phpmyadmin/index.php.
+    // 2. Download official phpMyAdmin release archive if not yet present in /www/server/phpmyadmin/index.php.
     let pma_dir = Path::new(OFFICIAL_PMA_DIR);
+    std::fs::create_dir_all("/www/server")?;
+    set_dir_mode("/www", 0o755);
+    set_dir_mode("/www/server", 0o755);
+
     if !pma_dir.join("index.php").is_file() {
         std::fs::create_dir_all(pma_dir)?;
         let tmp_tar = std::env::temp_dir().join(format!(
-            "ferrous-official-phpmyadmin-{}.tar.gz",
+            "ferrous-myphpadmin-{}.tar.gz",
             std::process::id()
         ));
         let tmp_tar_str = tmp_tar.display().to_string();
         let urls = [
+            "https://files.phpmyadmin.net/phpMyAdmin/5.2.3/phpMyAdmin-5.2.3-all-languages.tar.gz",
             "https://files.phpmyadmin.net/phpMyAdmin/5.2.2/phpMyAdmin-5.2.2-all-languages.tar.gz",
-            "https://github.com/phpmyadmin/phpmyadmin/releases/download/RELEASE_5_2_2/phpMyAdmin-5.2.2-all-languages.tar.gz",
             "https://files.phpmyadmin.net/phpMyAdmin/5.2.1/phpMyAdmin-5.2.1-all-languages.tar.gz",
         ];
         let mut downloaded = false;
+        let mut last_curl_err = String::new();
         for url in urls {
-            if let Ok(out) = executor
+            match executor
                 .run(
                     AllowedBinary::Curl,
-                    &["-fsSL", "--connect-timeout", "15", "-o", &tmp_tar_str, url],
+                    &[
+                        "-fsSL",
+                        "--retry",
+                        "2",
+                        "--connect-timeout",
+                        "15",
+                        "-o",
+                        &tmp_tar_str,
+                        url,
+                    ],
                     cmd_timeout,
                 )
                 .await
             {
-                if out.success && tmp_tar.is_file() {
+                Ok(out) if out.success && tmp_tar.is_file() => {
                     downloaded = true;
                     break;
+                }
+                Ok(out) => {
+                    last_curl_err = out.stderr;
+                }
+                Err(err) => {
+                    last_curl_err = err.to_string();
                 }
             }
         }
         if !downloaded {
             let _ = std::fs::remove_file(&tmp_tar);
-            return Err(PanelError::BadGateway(
-                "Không thể tải gói phpMyAdmin chính thức từ files.phpmyadmin.net / GitHub. Vui lòng kiểm tra kết nối mạng của VPS."
-                    .to_string(),
-            ));
+            return Err(PanelError::BadGateway(format!(
+                "Không thể tải gói Myphpadmin {OFFICIAL_PMA_VERSION} từ files.phpmyadmin.net ({last_curl_err}). Vui lòng kiểm tra kết nối mạng của VPS."
+            )));
         }
 
         let extract = executor
@@ -1449,12 +1557,18 @@ pub async fn install_or_repair_official_phpmyadmin(
         }
     }
 
-    // 3. Prepare tmp dir, config.inc.php, router, permissions, and systemd unit.
+    // 3. Prepare tmp dir, config.inc.php, router, directory permissions, and systemd unit on 127.0.0.1:18889.
     std::fs::create_dir_all(OFFICIAL_PMA_TMP_DIR)?;
+    set_dir_mode("/var/lib/phpmyadmin", 0o755);
+    set_dir_mode(OFFICIAL_PMA_TMP_DIR, 0o770);
+    set_dir_mode(OFFICIAL_PMA_DIR, 0o755);
+
     let cfg_inc = pma_dir.join("config.inc.php");
     if !cfg_inc.is_file() {
         let secret = generate_blowfish_secret();
         atomic_write_file(&cfg_inc, render_official_pma_config_inc(&secret).as_bytes(), 0o640)?;
+    } else {
+        ensure_config_allows_sameorigin_frame(&cfg_inc);
     }
     atomic_write_file(
         Path::new(OFFICIAL_PMA_ROUTER),
@@ -1466,7 +1580,12 @@ pub async fn install_or_repair_official_phpmyadmin(
         let _ = executor
             .run(
                 AllowedBinary::Chown,
-                &["-R", "www-data:www-data", OFFICIAL_PMA_DIR, OFFICIAL_PMA_TMP_DIR],
+                &[
+                    "-R",
+                    "www-data:www-data",
+                    OFFICIAL_PMA_DIR,
+                    OFFICIAL_PMA_TMP_DIR,
+                ],
                 Duration::from_secs(20),
             )
             .await;
@@ -1480,7 +1599,11 @@ pub async fn install_or_repair_official_phpmyadmin(
 
     if executor.is_binary_available(AllowedBinary::Systemctl) {
         let _ = executor
-            .run(AllowedBinary::Systemctl, &["daemon-reload"], Duration::from_secs(15))
+            .run(
+                AllowedBinary::Systemctl,
+                &["daemon-reload"],
+                Duration::from_secs(15),
+            )
             .await;
         let _ = executor
             .run(
@@ -1489,23 +1612,48 @@ pub async fn install_or_repair_official_phpmyadmin(
                 Duration::from_secs(15),
             )
             .await;
-        let _ = executor
+        let restart_out = executor
             .run(
                 AllowedBinary::Systemctl,
                 &["restart", OFFICIAL_PMA_UNIT_NAME],
-                Duration::from_secs(15),
+                Duration::from_secs(20),
             )
-            .await;
+            .await?;
+        if !restart_out.success {
+            return Err(PanelError::BadGateway(format!(
+                "Không thể khởi chạy {OFFICIAL_PMA_UNIT_NAME}: {}",
+                restart_out.stderr.trim()
+            )));
+        }
     }
 
-    for _ in 0..15 {
+    for _ in 0..25 {
         if is_official_pma_port_open().await {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(180)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    Ok(get_official_phpmyadmin_status().await)
+    let status = get_official_phpmyadmin_status().await;
+    if !status.running && executor.is_binary_available(AllowedBinary::Journalctl) {
+        let detail = executor
+            .run(
+                AllowedBinary::Journalctl,
+                &["-u", OFFICIAL_PMA_UNIT_NAME, "-n", "12", "--no-pager"],
+                Duration::from_secs(5),
+            )
+            .await
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        return Err(PanelError::BadGateway(format!(
+            "Dịch vụ {} ({}) đã ghi cấu hình nhưng chưa mở cổng 127.0.0.1:{OFFICIAL_PMA_PORT}. Nhật ký: {}",
+            status.display_name,
+            OFFICIAL_PMA_UNIT_NAME,
+            detail.trim()
+        )));
+    }
+
+    Ok(status)
 }
 
 pub async fn redirect_phpmyadmin_slash(req: HttpRequest) -> HttpResponse {
@@ -1544,14 +1692,16 @@ fn decode_chunked_body(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-fn render_official_pma_launcher_html() -> &'static str {
-    r##"<!DOCTYPE html>
+fn render_official_pma_launcher_html(version: &str) -> String {
+    let display = format!("Myphpadmin {version}");
+    let template = r##"<!DOCTYPE html>
 <html lang="vi" class="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>phpMyAdmin Chính thức &amp; FerrousAdmin — FerrousPanel</title>
+  <title>__PMA_NAME__ &amp; FerrousAdmin — FerrousPanel</title>
   <style>
+    * { box-sizing: border-box; }
     body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:#090d16; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px; }
     .card { max-width:580px; width:100%; background:#111827; border:1px solid #1e293b; border-radius:14px; padding:26px; box-shadow:0 24px 48px rgba(0,0,0,.45); }
     h1 { margin:0 0 8px; font-size:20px; }
@@ -1561,7 +1711,10 @@ fn render_official_pma_launcher_html() -> &'static str {
     .btn-primary { background:#f97316; border-color:#ea580c; color:#fff; }
     .btn-blue { background:rgba(59,130,246,.18); border-color:rgba(59,130,246,.45); color:#93c5fd; }
     .code { font-family:ui-monospace,monospace; background:#020617; border:1px solid #1e293b; border-radius:8px; padding:10px 12px; font-size:12px; color:#cbd5e1; overflow-x:auto; }
-    #msg { margin-top:14px; font-size:13px; display:none; padding:10px 12px; border-radius:8px; }
+    .auth-box { margin-top:14px; padding:14px; border-radius:10px; background:#0b1220; border:1px solid #1e293b; display:none; }
+    .auth-box input { width:100%; margin:6px 0 10px; padding:9px 11px; border-radius:8px; border:1px solid #334155; background:#020617; color:#e2e8f0; font-size:13px; }
+    .auth-box label { font-size:12px; color:#94a3b8; display:block; }
+    #msg { margin-top:14px; font-size:13px; display:none; padding:10px 12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; }
   </style>
 </head>
 <body>
@@ -1569,54 +1722,123 @@ fn render_official_pma_launcher_html() -> &'static str {
     <h1>Quản trị Cơ sở dữ liệu Kép (Dual-Mode)</h1>
     <p>FerrousPanel hỗ trợ song song cả hai trình quản trị CSDL trên mọi tên miền và IP:</p>
     <ul style="color:#cbd5e1;font-size:13.5px;line-height:1.7;padding-left:18px;margin:0 0 16px;">
-      <li><strong>phpMyAdmin Chính thức</strong> tại <code>/phpmyadmin/</code> (mã nguồn chính thức từ <code>phpmyadmin.net</code>)</li>
+      <li><strong>__PMA_NAME__</strong> tại <code>/phpmyadmin/</code> (tải trực tiếp từ <code>phpmyadmin.net</code>)</li>
       <li><strong>FerrousAdmin (Trang tuỳ chỉnh của Panel)</strong> tại <code>/phpadmin/</code> (100% Pure Rust, siêu tốc)</li>
     </ul>
-    <p style="margin-bottom:8px;">Hiện tại dịch vụ <code>phpMyAdmin Chính thức</code> chưa được kích hoạt trên máy chủ này. Bạn có thể bấm nút cài tự động bên dưới (nếu đang đăng nhập Panel) hoặc chạy lệnh cập nhật:</p>
+    <p style="margin-bottom:8px;">Hiện tại dịch vụ <code>__PMA_NAME__</code> chưa được kích hoạt trên máy chủ này. Bạn có thể bấm nút cài tự động bên dưới hoặc chạy lệnh cập nhật trên VPS:</p>
     <div class="code">sudo fp update</div>
     <div id="msg"></div>
+    <form id="inlineAuthBox" class="auth-box">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fb923c;">Đăng nhập Quản trị Panel để kích hoạt __PMA_NAME__</div>
+      <label for="fpUser">Tài khoản Panel</label>
+      <input id="fpUser" type="text" value="admin_ferrous" required autocomplete="username" />
+      <label for="fpPass">Mật khẩu Panel</label>
+      <input id="fpPass" type="password" required autocomplete="current-password" />
+      <button type="submit" class="btn btn-primary" id="btnAuthAndInstall">Đăng nhập &amp; Cài __PMA_NAME__ ngay</button>
+    </form>
     <div class="actions">
-      <button type="button" class="btn btn-primary" id="btnInstallOfficial">Tải &amp; Kích hoạt phpMyAdmin Chính thức ngay</button>
+      <button type="button" class="btn btn-primary" id="btnInstallOfficial">Tải &amp; Kích hoạt __PMA_NAME__ ngay</button>
       <a href="/phpadmin/" class="btn btn-blue">Mở Trang CSDL Tuỳ chỉnh của Panel (/phpadmin/) →</a>
     </div>
   </div>
   <script>
-    document.getElementById('btnInstallOfficial').addEventListener('click', async function () {
-      const btn = this;
+    (function () {
+      const apiBase = window.location.pathname.startsWith('/phpmyadmin')
+        ? '/phpmyadmin/api'
+        : '/api';
+      const btn = document.getElementById('btnInstallOfficial');
       const msg = document.getElementById('msg');
-      btn.disabled = true;
-      btn.textContent = 'Đang tải từ phpmyadmin.net & khởi chạy…';
-      msg.style.display = 'block';
-      msg.style.background = 'rgba(59,130,246,.14)';
-      msg.style.color = '#93c5fd';
-      msg.textContent = 'Đang cài đặt phpMyAdmin chính thức (khoảng 10–30 giây)…';
-      try {
-        const tok = sessionStorage.getItem('fp_token') || localStorage.getItem('fp_token') || '';
-        const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' };
-        if (tok) headers['Authorization'] = 'Bearer ' + tok;
-        const resp = await fetch('/api/databases/phpmyadmin/install', { method: 'POST', credentials: 'same-origin', headers, body: '{}' });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status + ' — Hãy đăng nhập Panel rồi vào mục Cơ sở dữ liệu để bấm Kích hoạt phpMyAdmin.'));
-        msg.style.background = 'rgba(16,185,129,.16)';
-        msg.style.color = '#6ee7b7';
-        msg.textContent = 'Đã cài đặt & khởi chạy phpMyAdmin chính thức! Đang tải trang…';
-        setTimeout(() => window.location.reload(), 600);
-      } catch (e) {
-        btn.disabled = false;
-        btn.textContent = 'Thử kích hoạt lại';
-        msg.style.background = 'rgba(239,68,68,.16)';
-        msg.style.color = '#fca5a5';
-        msg.textContent = e.message;
+      const authBox = document.getElementById('inlineAuthBox');
+
+      function showMsg(text, kind) {
+        msg.style.display = 'block';
+        if (kind === 'ok') {
+          msg.style.background = 'rgba(16,185,129,.16)';
+          msg.style.color = '#6ee7b7';
+        } else if (kind === 'err') {
+          msg.style.background = 'rgba(239,68,68,.16)';
+          msg.style.color = '#fca5a5';
+        } else {
+          msg.style.background = 'rgba(59,130,246,.14)';
+          msg.style.color = '#93c5fd';
+        }
+        msg.textContent = text;
       }
-    });
+
+      async function runInstall(explicitToken) {
+        btn.disabled = true;
+        btn.textContent = 'Đang tải & khởi chạy __PMA_NAME__…';
+        showMsg('Đang cài đặt __PMA_NAME__ từ files.phpmyadmin.net (khoảng 10–30 giây)…', 'info');
+        try {
+          const tok = explicitToken || sessionStorage.getItem('fp_pma_token') || sessionStorage.getItem('fp_token') || localStorage.getItem('fp_token') || '';
+          const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' };
+          if (tok) headers['Authorization'] = 'Bearer ' + tok;
+          const resp = await fetch(apiBase + '/databases/phpmyadmin/install', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers,
+            body: '{}'
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.status === 401 || resp.status === 403) {
+            btn.disabled = false;
+            btn.textContent = 'Tải & Kích hoạt __PMA_NAME__ ngay';
+            authBox.style.display = 'block';
+            showMsg('Vui lòng đăng nhập tài khoản quản trị Panel ở khung bên dưới để cho phép cài đặt __PMA_NAME__.', 'info');
+            return;
+          }
+          if (!resp.ok) {
+            throw new Error(data.error || ('HTTP ' + resp.status + ' — Cài đặt thất bại.'));
+          }
+          showMsg('Đã cài đặt & khởi chạy ' + (data.displayName || '__PMA_NAME__') + '! Đang mở trang…', 'ok');
+          setTimeout(() => window.location.reload(), 600);
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = 'Thử kích hoạt lại';
+          showMsg(e.message || 'Lỗi không cài được __PMA_NAME__.', 'err');
+        }
+      }
+
+      btn.addEventListener('click', () => runInstall(''));
+
+      authBox.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        const sub = document.getElementById('btnAuthAndInstall');
+        sub.disabled = true;
+        try {
+          const r = await fetch(apiBase + '/auth/login', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' },
+            body: JSON.stringify({
+              username: document.getElementById('fpUser').value.trim(),
+              password: document.getElementById('fpPass').value,
+              rememberMe: false
+            })
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || !d.token) {
+            throw new Error(d.error || 'Sai tài khoản hoặc mật khẩu quản trị Panel.');
+          }
+          sessionStorage.setItem('fp_pma_token', d.token);
+          authBox.style.display = 'none';
+          await runInstall(d.token);
+        } catch (e) {
+          showMsg(e.message || 'Đăng nhập thất bại.', 'err');
+        } finally {
+          sub.disabled = false;
+        }
+      });
+    })();
   </script>
 </body>
-</html>"##
+</html>"##;
+    template.replace("__PMA_NAME__", &display)
 }
 
 /// Reverse-proxies `/phpmyadmin/*` (all HTTP methods, cookies, sessions, SQL uploads/exports)
-/// to the Official phpMyAdmin worker on `127.0.0.1:889`, auto-starting the systemd unit if
-/// installed on disk, or serving the Dual-Mode 1-Click Launcher if not yet installed.
+/// to the Myphpadmin worker on `127.0.0.1:18889`, auto-healing & auto-starting the systemd unit
+/// if installed on disk, or serving the Dual-Mode 1-Click Launcher if not yet installed.
 pub async fn serve_official_phpmyadmin(
     req: HttpRequest,
     body: web::Bytes,
@@ -1632,17 +1854,47 @@ pub async fn serve_official_phpmyadmin(
             .executor()
             .is_binary_available(AllowedBinary::Systemctl)
     {
+        // Auto-migrate stale unit files that used privileged port 889 (which fails under User=www-data).
+        let unit_needs_rewrite = match std::fs::read_to_string(OFFICIAL_PMA_UNIT_PATH) {
+            Ok(txt) => !txt.contains(&format!("127.0.0.1:{OFFICIAL_PMA_PORT}")),
+            Err(_) => true,
+        };
+        if unit_needs_rewrite {
+            if let Some((_, php_bin, _)) = find_php_cli_binary() {
+                set_dir_mode("/www", 0o755);
+                set_dir_mode("/www/server", 0o755);
+                let _ = std::fs::create_dir_all(OFFICIAL_PMA_TMP_DIR);
+                set_dir_mode("/var/lib/phpmyadmin", 0o755);
+                set_dir_mode(OFFICIAL_PMA_TMP_DIR, 0o770);
+                ensure_config_allows_sameorigin_frame(&Path::new(OFFICIAL_PMA_DIR).join("config.inc.php"));
+                let _ = atomic_write_file(
+                    Path::new(OFFICIAL_PMA_ROUTER),
+                    render_official_pma_router_php().as_bytes(),
+                    0o644,
+                );
+                let _ = atomic_write_file(
+                    Path::new(OFFICIAL_PMA_UNIT_PATH),
+                    render_official_pma_systemd_unit(php_bin).as_bytes(),
+                    0o644,
+                );
+                let _ = state
+                    .webserver
+                    .executor()
+                    .run(AllowedBinary::Systemctl, &["daemon-reload"], Duration::from_secs(8))
+                    .await;
+            }
+        }
         let _ = state
             .webserver
             .executor()
             .run(
                 AllowedBinary::Systemctl,
-                &["start", OFFICIAL_PMA_UNIT_NAME],
-                Duration::from_secs(8),
+                &["restart", OFFICIAL_PMA_UNIT_NAME],
+                Duration::from_secs(10),
             )
             .await;
-        for _ in 0..8 {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+        for _ in 0..12 {
+            tokio::time::sleep(Duration::from_millis(160)).await;
             if let Ok(s) = TcpStream::connect(("127.0.0.1", OFFICIAL_PMA_PORT)).await {
                 stream_opt = Some(s);
                 break;
@@ -1651,10 +1903,11 @@ pub async fn serve_official_phpmyadmin(
     }
 
     let Some(mut stream) = stream_opt else {
+        let ver = detect_installed_pma_version();
         return HttpResponse::Ok()
             .content_type("text/html; charset=utf-8")
             .insert_header(("Cache-Control", "no-store"))
-            .body(render_official_pma_launcher_html());
+            .body(render_official_pma_launcher_html(&ver));
     };
 
     let method = req.method().as_str();
@@ -1665,9 +1918,17 @@ pub async fn serve_official_phpmyadmin(
     };
     let (host, scheme) = {
         let conn_info = req.connection_info();
+        let fwd_proto = req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         (
             conn_info.host().to_string(),
-            conn_info.scheme().to_string(),
+            fwd_proto.unwrap_or_else(|| conn_info.scheme().to_string()),
         )
     };
 
@@ -1709,7 +1970,7 @@ pub async fn serve_official_phpmyadmin(
     {
         return HttpResponse::BadGateway()
             .content_type("text/plain; charset=utf-8")
-            .body("Failed to forward request to Official phpMyAdmin worker");
+            .body("Failed to forward request to Myphpadmin worker");
     }
 
     let mut resp_bytes = Vec::with_capacity(16 * 1024);
@@ -1721,13 +1982,13 @@ pub async fn serve_official_phpmyadmin(
     {
         return HttpResponse::GatewayTimeout()
             .content_type("text/plain; charset=utf-8")
-            .body("Official phpMyAdmin worker timed out");
+            .body("Myphpadmin worker timed out");
     }
 
     let Some(hdr_end) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
         return HttpResponse::BadGateway()
             .content_type("text/plain; charset=utf-8")
-            .body("Invalid upstream response from Official phpMyAdmin worker");
+            .body("Invalid upstream response from Myphpadmin worker");
     };
 
     let header_text = String::from_utf8_lossy(&resp_bytes[..hdr_end]);
@@ -1744,6 +2005,7 @@ pub async fn serve_official_phpmyadmin(
     let mut builder = HttpResponse::build(status_code);
     let mut is_chunked = false;
     let mut is_html = false;
+    let internal_origin = format!("http://127.0.0.1:{OFFICIAL_PMA_PORT}");
 
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
@@ -1760,6 +2022,22 @@ pub async fn serve_official_phpmyadmin(
             lower.as_str(),
             "connection" | "content-length" | "transfer-encoding" | "keep-alive"
         ) {
+            continue;
+        }
+        if lower == "x-frame-options" {
+            builder.insert_header(("X-Frame-Options", "SAMEORIGIN"));
+            continue;
+        }
+        if lower == "content-security-policy" {
+            let rewritten = val_trim.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+            builder.append_header((key_trim.to_string(), rewritten));
+            continue;
+        }
+        if lower == "location" {
+            let rewritten = val_trim
+                .strip_prefix(&internal_origin)
+                .unwrap_or(val_trim);
+            builder.append_header((key_trim.to_string(), rewritten.to_string()));
             continue;
         }
         if lower == "content-type" && val_trim.to_ascii_lowercase().contains("text/html") {
@@ -1787,4 +2065,3 @@ pub async fn serve_official_phpmyadmin(
 
     builder.body(decoded_body)
 }
-

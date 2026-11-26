@@ -698,12 +698,17 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
             String::from_utf8_lossy(&read_body_bytes(off_resp.into_body()).await?).to_string();
         if off_status == StatusCode::OK {
             ensure(
-                off_html.contains("/phpadmin/") && off_html.contains("phpMyAdmin"),
-                "expected /phpmyadmin/ HTML to reference phpMyAdmin and switcher to /phpadmin/",
+                off_html.contains("/phpadmin/")
+                    && (off_html.contains("Myphpadmin") || off_html.contains("phpMyAdmin")),
+                "expected /phpmyadmin/ HTML to reference Myphpadmin and switcher to /phpadmin/",
+            )?;
+            ensure(
+                !off_html.contains("phpMyAdmin Chính thức"),
+                "launcher must use 'Myphpadmin <Version>' naming instead of 'phpMyAdmin Chính thức'",
             )?;
         }
 
-        // 4. Authenticated GET /api/databases/phpmyadmin/status returns dual-mode URLs
+        // 4. Authenticated GET /api/databases/phpmyadmin/status returns dual-mode URLs & Myphpadmin <Version> displayName
         let login_req = TestRequest::post()
             .uri("/api/auth/login")
             .set_json(json!({
@@ -744,6 +749,13 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
             &status_json["customPanelUrl"].as_str(),
             &Some("/phpadmin/"),
             "customPanelUrl",
+        )?;
+        ensure(
+            status_json["displayName"]
+                .as_str()
+                .map(|s| s.starts_with("Myphpadmin "))
+                .unwrap_or(false),
+            "expected displayName to start with 'Myphpadmin '",
         )?;
 
         Ok(())

@@ -1724,23 +1724,25 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       : '/phpmyadmin/';
     const officialRunning = Boolean(officialPma?.running);
     const officialInstalled = Boolean(officialPma?.installed);
+    const pmaVersion = officialPma?.version || '5.2.3';
+    const pmaLabel = officialPma?.displayName || `Myphpadmin ${pmaVersion}`;
 
     container.innerHTML = `
       <div class="page-head">
         <div>
-          <h1 class="page-title">Cơ sở dữ liệu SQL — FerrousAdmin &amp; phpMyAdmin Chính thức</h1>
-          <p class="page-desc">Sử dụng song song cả <strong>Trang CSDL tuỳ chỉnh của Panel</strong> (<code>/phpadmin/</code>) lẫn <strong>phpMyAdmin chính thức</strong> (<code>/phpmyadmin/</code> · v${esc(officialPma?.version || '5.2.2')}).</p>
+          <h1 class="page-title">Cơ sở dữ liệu SQL — FerrousAdmin &amp; ${esc(pmaLabel)}</h1>
+          <p class="page-desc">Sử dụng song song cả <strong>Trang CSDL tuỳ chỉnh của Panel</strong> (<code>/phpadmin/</code>) lẫn <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code>).</p>
         </div>
         <div class="row">
           <div class="tabs">
             <button type="button" class="tab-btn ${activeDbTab === 'list' ? 'active' : ''}" id="db-tab-list">Danh sách DB (${Array.isArray(dbs) ? dbs.length : 0})</button>
             <button type="button" class="tab-btn ${activeDbTab === 'studio' ? 'active' : ''}" id="db-tab-studio">Trang Panel (/phpadmin/)</button>
-            <button type="button" class="tab-btn ${activeDbTab === 'official' ? 'active' : ''}" id="db-tab-official">phpMyAdmin Chính thức (/phpmyadmin/)</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'official' ? 'active' : ''}" id="db-tab-official">${esc(pmaLabel)} (/phpmyadmin/)</button>
             <button type="button" class="tab-btn ${activeDbTab === 'config' ? 'active' : ''}" id="db-tab-config">Cấu hình MySQL</button>
           </div>
           <a class="btn btn-sm" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">/phpadmin/ ↗</a>
           <a class="btn btn-sm" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">/phpmyadmin/ ↗</a>
-          ${!officialRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pma">${officialInstalled ? 'Khởi động phpMyAdmin Chính thức' : 'Cài phpMyAdmin Chính thức'}</button>` : ''}
+          ${!officialRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pma">${officialInstalled ? `Khởi động ${esc(pmaLabel)}` : `Cài ${esc(pmaLabel)}`}</button>` : ''}
           <button type="button" class="btn btn-primary" id="db-create-btn">Tạo Database mới</button>
         </div>
       </div>
@@ -1775,7 +1777,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
                             <button type="button" class="btn btn-sm" data-db-panel-studio="${esc(d.id)}" title="Mở trình quản trị CSDL tuỳ chỉnh của Panel (/phpadmin/)">Panel DB</button>
-                            <button type="button" class="btn btn-sm btn-primary" data-db-pma="${esc(d.id)}" title="Mở phpMyAdmin chính thức (/phpmyadmin/)">phpMyAdmin</button>
+                            <button type="button" class="btn btn-sm btn-primary" data-db-pma="${esc(d.id)}" title="Mở ${esc(pmaLabel)} (/phpmyadmin/)">${esc(pmaLabel)}</button>
                             <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">Chạy SQL</button>
                             <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">Đổi MK</button>
                             <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">Xuất .sql</button>
@@ -1806,7 +1808,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
                 <option value="">-- Chọn Database để nạp --</option>
                 ${(Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
               </select>
-              <button type="button" class="btn btn-sm" id="switch-to-official-tab">⇄ Chuyển sang phpMyAdmin Chính thức</button>
+              <button type="button" class="btn btn-sm" id="switch-to-official-tab">⇄ Chuyển sang ${esc(pmaLabel)}</button>
               <a class="btn btn-sm btn-primary" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
             </div>
           </div>
@@ -1816,7 +1818,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
         <section class="surface" style="padding:12px">
           <div class="surface-head" style="margin-bottom:10px">
             <div class="row">
-              <strong>phpMyAdmin Chính thức (phpmyadmin.net · v${esc(officialPma?.version || '5.2.2')})</strong>
+              <strong>${esc(pmaLabel)} (phpmyadmin.net)</strong>
               <span class="${officialRunning ? 'st-ok' : 'st-warn'} mono">${officialRunning ? 'Đang chạy (/phpmyadmin/)' : (officialInstalled ? 'Đã cài · Chưa chạy' : 'Chưa tải')}</span>
             </div>
             <div class="row">
@@ -1824,23 +1826,23 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
                 <option value="">-- Chọn Database MariaDB/MySQL --</option>
                 ${(Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
               </select>
-              <button type="button" class="btn btn-sm" id="db-reinstall-official-pma">${officialRunning ? 'Làm mới dịch vụ' : 'Tải & Kích hoạt ngay'}</button>
+              <button type="button" class="btn btn-sm" id="db-reinstall-official-pma">${officialRunning ? 'Làm mới dịch vụ' : `Tải & Kích hoạt ${esc(pmaLabel)}`}</button>
               <button type="button" class="btn btn-sm" id="switch-to-panel-tab">⇄ Trang Tuỳ chỉnh Panel</button>
               <a class="btn btn-sm btn-primary" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
             </div>
           </div>
-          <iframe src="${esc(officialPmaUrl)}" title="Official phpMyAdmin" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe src="${esc(officialPmaUrl)}" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : `
         <section class="surface">
           <div class="surface-head">
-            <h2 class="surface-title">Cấu hình MariaDB / MySQL (50-server.cnf) &amp; Đường dẫn phpMyAdmin</h2>
+            <h2 class="surface-title">Cấu hình MariaDB / MySQL (50-server.cnf) &amp; Đường dẫn ${esc(pmaLabel)}</h2>
             <span class="meta-line mono">${esc(mysqlCfg?.mysqlVersion || 'MariaDB / MySQL')}</span>
           </div>
           <form id="mysql-cfg-form">
             <div class="form-grid" style="margin-bottom:12px">
               <div class="field">
-                <label>Đường dẫn truy cập phpMyAdmin</label>
+                <label>Đường dẫn truy cập ${esc(pmaLabel)}</label>
                 <input class="input mono" name="pmaPath" value="${esc(mysqlCfg?.pmaPath || '/phpmyadmin')}" />
               </div>
               <div class="field">
@@ -1882,11 +1884,12 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
     const handleInstallOfficialPma = (btn) => withBusy(btn, async () => {
       try {
         officialPma = await api('POST', '/api/databases/phpmyadmin/install', {}, { timeoutMs: 240000, keepAlive: true });
-        toast(`Đã cài đặt & khởi chạy phpMyAdmin chính thức (v${officialPma?.version || '5.2.2'}) tại /phpmyadmin/!`);
+        const installedName = officialPma?.displayName || `Myphpadmin ${officialPma?.version || '5.2.3'}`;
+        toast(`Đã cài đặt & khởi chạy ${installedName} tại /phpmyadmin/!`);
         activeDbTab = 'official';
         draw();
       } catch (err) {
-        toast(err.message || 'Không thể cài đặt phpMyAdmin chính thức.', 'err');
+        toast(err.message || `Không thể cài đặt ${pmaLabel}.`, 'err');
       }
     });
     document.getElementById('db-install-official-pma')?.addEventListener('click', (e) => handleInstallOfficialPma(e.currentTarget));
