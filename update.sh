@@ -560,13 +560,21 @@ setup_phpmyadmin_proxy() {
   fi
 
   if [ -f "${pma_dir}/index.php" ] && [ -n "$php_bin" ]; then
-    local sso_file="/etc/ferrous-panel/myphpadmin.sso.key"
-    mkdir -p /etc/ferrous-panel
+    local sso_file="/var/lib/phpmyadmin/myphpadmin.sso.key"
+    local legacy_sso_file="/etc/ferrous-panel/myphpadmin.sso.key"
+    mkdir -p /var/lib/phpmyadmin /etc/ferrous-panel
+    chmod 0755 /var/lib/phpmyadmin 2>/dev/null || true
     if [ ! -f "${sso_file}" ] || [ ! -s "${sso_file}" ]; then
-      openssl rand -hex 16 2>/dev/null > "${sso_file}" || printf 'FerrousMyphpadminSsoSecretKey32x' > "${sso_file}"
+      if [ -s "${legacy_sso_file}" ]; then
+        cp -f "${legacy_sso_file}" "${sso_file}"
+      else
+        openssl rand -hex 16 2>/dev/null > "${sso_file}" || printf 'FerrousMyphpadminSsoSecretKey32x' > "${sso_file}"
+      fi
     fi
+    cp -f "${sso_file}" "${legacy_sso_file}" 2>/dev/null || true
     chown root:www-data "${sso_file}" 2>/dev/null || true
     chmod 0640 "${sso_file}" 2>/dev/null || true
+    chmod 0600 "${legacy_sso_file}" 2>/dev/null || true
     local sso_pw
     sso_pw="$(tr -d '[:space:]' < "${sso_file}" 2>/dev/null || true)"
     if [ -n "${sso_pw}" ] && command -v mysql >/dev/null 2>&1; then
@@ -581,7 +589,7 @@ FLUSH PRIVILEGES;
 EOF_PMA_SSO
     fi
 
-    if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "HTTP_X_FERROUS_PMA_AUTH" "${pma_dir}/config.inc.php" 2>/dev/null; then
+    if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "HTTP_X_FERROUS_PMA_PASS" "${pma_dir}/config.inc.php" 2>/dev/null; then
       local bf_secret
       bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecretKey')"
       cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
@@ -589,10 +597,19 @@ EOF_PMA_SSO
 declare(strict_types=1);
 \$cfg['blowfish_secret'] = '${bf_secret}';
 \$ferrousSsoFile = '${sso_file}';
+\$ferrousSsoLegacyFile = '${legacy_sso_file}';
 \$ferrousSsoActive = !empty(\$_SERVER['HTTP_X_FERROUS_PMA_AUTH'])
-    && \$_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1'
-    && is_readable(\$ferrousSsoFile);
-\$ferrousSsoPass = \$ferrousSsoActive ? trim((string) @file_get_contents(\$ferrousSsoFile)) : '';
+    && \$_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1';
+\$ferrousSsoPass = '';
+if (\$ferrousSsoActive) {
+    if (!empty(\$_SERVER['HTTP_X_FERROUS_PMA_PASS'])) {
+        \$ferrousSsoPass = trim((string) \$_SERVER['HTTP_X_FERROUS_PMA_PASS']);
+    } elseif (is_readable(\$ferrousSsoFile)) {
+        \$ferrousSsoPass = trim((string) @file_get_contents(\$ferrousSsoFile));
+    } elseif (is_readable(\$ferrousSsoLegacyFile)) {
+        \$ferrousSsoPass = trim((string) @file_get_contents(\$ferrousSsoLegacyFile));
+    }
+}
 \$i = 1;
 \$cfg['Servers'][\$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';
 if (\$ferrousSsoPass !== '') {

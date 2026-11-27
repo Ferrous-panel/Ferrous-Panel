@@ -145,11 +145,12 @@ pub async fn login(
     .await
     .map_err(|_| PanelError::Internal("session creation worker failed".to_string()))??;
 
+    let is_https = request_is_https(&req);
     let cookie = Cookie::build(SESSION_COOKIE_NAME, token.expose().to_string())
         .path("/")
         .http_only(true)
         .same_site(SameSite::Strict)
-        .secure(state.config.secure_cookie)
+        .secure(state.config.secure_cookie && is_https)
         .max_age(CookieDuration::seconds(ttl_secs))
         .finish();
 
@@ -177,7 +178,20 @@ pub async fn session(req: HttpRequest, state: web::Data<AppState>) -> Result<Htt
         .map(|u| u.username.clone())
         .ok_or_else(|| PanelError::Unauthorized("session missing".to_string()))?;
 
-    Ok(HttpResponse::Ok().json(SessionResponse {
+    let mut resp = HttpResponse::Ok();
+    if let Some(tok) = extract_token_from_http(&req) {
+        let is_https = request_is_https(&req);
+        let cookie = Cookie::build(SESSION_COOKIE_NAME, tok)
+            .path("/")
+            .http_only(true)
+            .same_site(SameSite::Strict)
+            .secure(state.config.secure_cookie && is_https)
+            .max_age(CookieDuration::seconds(24 * 3600))
+            .finish();
+        resp.cookie(cookie);
+    }
+
+    Ok(resp.json(SessionResponse {
         authenticated: true,
         user: UserProfileDto {
             username,
@@ -230,11 +244,12 @@ pub async fn logout(
     .await
     .map_err(|_| PanelError::Internal("logout worker failed".to_string()))??;
 
+    let is_https = request_is_https(&req);
     let cleared = Cookie::build(SESSION_COOKIE_NAME, "")
         .path("/")
         .http_only(true)
         .same_site(SameSite::Strict)
-        .secure(state.config.secure_cookie)
+        .secure(state.config.secure_cookie && is_https)
         .max_age(CookieDuration::ZERO)
         .finish();
 
@@ -242,6 +257,20 @@ pub async fn logout(
         success: true,
         message: "Signed out safely.",
     }))
+}
+
+fn request_is_https(req: &HttpRequest) -> bool {
+    if req.connection_info().scheme().eq_ignore_ascii_case("https") {
+        return true;
+    }
+    if let Some(proto) = req.headers().get("X-Forwarded-Proto") {
+        if let Ok(s) = proto.to_str() {
+            if s.trim().eq_ignore_ascii_case("https") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn extract_token_from_http(req: &HttpRequest) -> Option<String> {

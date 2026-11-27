@@ -186,6 +186,26 @@ impl AuthStore {
         Ok(affected)
     }
 
+    /// Checks whether there is at least one active administrator session recorded for `client_ip`.
+    pub fn has_active_session_for_ip(&self, client_ip: &str) -> bool {
+        let trimmed = client_ip.trim();
+        if trimmed.is_empty() || trimmed == "unknown" {
+            return false;
+        }
+        let Ok(conn) = self.lock_conn() else {
+            return false;
+        };
+        let now = Utc::now().timestamp();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE ip = ?1 AND expires_at > ?2",
+                params![trimmed, now],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        count > 0
+    }
+
     /// Appends an audit log entry (user, client IP, action, detail) with bounded retention.
     pub fn append_audit_log(
         &self,

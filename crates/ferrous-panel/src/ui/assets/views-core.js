@@ -1779,12 +1779,19 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
 
   function draw() {
     const selectedDbObj = (Array.isArray(dbs) ? dbs : []).find((d) => d.id === studioDbId) || null;
-    const panelDbUrl = studioDbId
+    const ssoQuery = state.token ? `fp_sso=${encodeURIComponent(state.token)}` : '';
+    const panelDbBase = studioDbId
       ? `/phpadmin/?db=${encodeURIComponent(studioDbId)}`
       : '/phpadmin/';
-    const officialPmaUrl = selectedDbObj?.name
+    const panelDbUrl = ssoQuery
+      ? `${panelDbBase}${panelDbBase.includes('?') ? '&' : '?'}${ssoQuery}`
+      : panelDbBase;
+    const officialPmaBase = selectedDbObj?.name
       ? `/phpmyadmin/index.php?route=/database/structure&db=${encodeURIComponent(selectedDbObj.name)}`
       : '/phpmyadmin/';
+    const officialPmaUrl = ssoQuery
+      ? `${officialPmaBase}${officialPmaBase.includes('?') ? '&' : '?'}${ssoQuery}`
+      : officialPmaBase;
     const officialRunning = Boolean(officialPma?.running);
     const officialInstalled = Boolean(officialPma?.installed);
     const pmaVersion = officialPma?.version || '5.2.3';
@@ -1865,7 +1872,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           <div class="surface-head" style="margin-bottom:10px">
             <div class="row">
               <strong>Trang CSDL Tuỳ chỉnh của Panel — FerrousAdmin (Pure Rust)</strong>
-              <span class="meta-line mono">(${esc(panelDbUrl)})</span>
+              <span class="meta-line mono">(/phpadmin/)</span>
             </div>
             <div class="row">
               <select class="select" id="pma-db-picker" style="width:auto">
@@ -1876,7 +1883,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
               <a class="btn btn-sm btn-primary" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
             </div>
           </div>
-          <iframe src="${esc(panelDbUrl)}" title="FerrousAdmin SQL Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(panelDbUrl)}" title="FerrousAdmin SQL Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : activeDbTab === 'official' ? `
         <section class="surface" style="padding:12px">
@@ -1895,7 +1902,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
               <a class="btn btn-sm btn-primary" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
             </div>
           </div>
-          <iframe src="${esc(officialPmaUrl)}" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(officialPmaUrl)}" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : `
         <section class="surface">
@@ -1934,7 +1941,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       `}
     `;
 
-    const syncDatabasesNow = async (showToast = false) => {
+    const syncDatabasesNow = async (showToast = false, redraw = true) => {
       try {
         const [freshDbs, freshPma] = await Promise.all([
           api('GET', '/api/databases', undefined, { noCache: true }),
@@ -1945,30 +1952,56 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
         if (!studioDbId && Array.isArray(dbs) && dbs[0]) {
           studioDbId = dbs[0].id;
         }
-        draw();
+        if (redraw) {
+          draw();
+        } else {
+          const listBtn = document.getElementById('db-tab-list');
+          if (listBtn) listBtn.textContent = `Danh sách DB (${Array.isArray(dbs) ? dbs.length : 0})`;
+          const picker = document.getElementById('pma-db-picker');
+          if (picker) {
+            const firstOpt = picker.querySelector('option[value=""]')?.outerHTML || '<option value="">-- Chọn Database --</option>';
+            picker.innerHTML = firstOpt + (Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('');
+          }
+        }
         if (showToast) {
-          toast(`Đã đồng bộ ${Array.isArray(dbs) ? dbs.length : 0} cơ sở dữ liệu với ${pmaLabel}.`);
+          toast(`Đã đồng bộ 2 chiều ${Array.isArray(dbs) ? dbs.length : 0} cơ sở dữ liệu với ${pmaLabel}.`);
         }
       } catch (err) {
         if (showToast) toast(err.message || 'Không thể đồng bộ SQL.', 'err');
       }
     };
 
+    document.getElementById('fp-sql-iframe')?.addEventListener('load', () => {
+      syncDatabasesNow(false, false);
+    });
+
     document.getElementById('db-tab-list')?.addEventListener('click', async () => {
       activeDbTab = 'list';
       draw();
-      await syncDatabasesNow(false);
+      await syncDatabasesNow(false, true);
     });
-    document.getElementById('db-tab-studio')?.addEventListener('click', () => { activeDbTab = 'studio'; draw(); });
-    document.getElementById('db-tab-official')?.addEventListener('click', () => { activeDbTab = 'official'; draw(); });
-    document.getElementById('db-tab-config')?.addEventListener('click', () => { activeDbTab = 'config'; draw(); });
-    document.getElementById('switch-to-official-tab')?.addEventListener('click', () => { activeDbTab = 'official'; draw(); });
-    document.getElementById('switch-to-panel-tab')?.addEventListener('click', async () => {
+    document.getElementById('db-tab-studio')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
       activeDbTab = 'studio';
       draw();
-      await syncDatabasesNow(false);
     });
-    document.getElementById('db-sync-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, () => syncDatabasesNow(true)));
+    document.getElementById('db-tab-official')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
+      activeDbTab = 'official';
+      draw();
+    });
+    document.getElementById('db-tab-config')?.addEventListener('click', () => { activeDbTab = 'config'; draw(); });
+    document.getElementById('switch-to-official-tab')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
+      activeDbTab = 'official';
+      draw();
+    });
+    document.getElementById('switch-to-panel-tab')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
+      activeDbTab = 'studio';
+      draw();
+    });
+    document.getElementById('db-sync-btn')?.addEventListener('click', (e) => withBusy(e.currentTarget, () => syncDatabasesNow(true, true)));
     document.getElementById('pma-db-picker')?.addEventListener('change', (e) => {
       studioDbId = e.target.value;
       draw();
@@ -2040,9 +2073,9 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           <div class="field">
             <label>Hệ quản trị SQL</label>
             <select class="select" name="engine">
-              <option value="SQLite 3 (WAL · Pure Rust)">SQLite 3 (WAL · Pure Rust)</option>
-              <option value="MariaDB 11.4">MariaDB 11.4</option>
+              <option value="MariaDB 11.4" selected>MariaDB 11.4 (MySQL · Đồng bộ Myphpadmin)</option>
               <option value="PostgreSQL 17">PostgreSQL 17</option>
+              <option value="SQLite 3 (WAL · Pure Rust)">SQLite 3 (WAL · Pure Rust)</option>
             </select>
           </div>
           <div class="field">
@@ -2064,7 +2097,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           e.preventDefault();
           await withBusy(body.querySelector('#db-create-sub'), async () => {
             const fd = new FormData(e.target);
-            const engine = String(fd.get('engine') || 'SQLite 3 (WAL · Pure Rust)');
+            const engine = String(fd.get('engine') || 'MariaDB 11.4');
             const defaultCollation = engine.toLowerCase().includes('mariadb') || engine.toLowerCase().includes('mysql')
               ? 'utf8mb4_unicode_ci'
               : (engine.toLowerCase().includes('postgres') ? 'en_US.UTF-8' : 'UTF-8');

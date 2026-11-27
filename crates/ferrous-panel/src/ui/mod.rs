@@ -159,40 +159,62 @@ async fn serve_favicon(req: HttpRequest) -> HttpResponse {
     )
 }
 
+fn serve_static_js(req: &HttpRequest, body: &'static str, hash: u64) -> HttpResponse {
+    let etag = format!("\"fp-ui-{}-{:016x}\"", env!("CARGO_PKG_VERSION"), hash);
+    let asset_tag = ui_bundle_version_tag();
+    let cache_control = if has_matching_version_query(req, &asset_tag) {
+        ASSET_CACHE_IMMUTABLE
+    } else {
+        ASSET_CACHE_REVALIDATE
+    };
+
+    if if_none_match_hits(req, &etag) {
+        return HttpResponse::NotModified()
+            .insert_header((header::CACHE_CONTROL, cache_control))
+            .insert_header((header::ETAG, etag))
+            .insert_header((header::VARY, "Accept-Encoding"))
+            .insert_header((UI_HEADER_NAME, UI_HEADER_VALUE))
+            .finish();
+    }
+
+    let versioned_body = body
+        .replace("from './app.js'", &format!("from './app.js?v={asset_tag}'"))
+        .replace(
+            "from './views-core.js'",
+            &format!("from './views-core.js?v={asset_tag}'"),
+        )
+        .replace(
+            "from './views-infra.js'",
+            &format!("from './views-infra.js?v={asset_tag}'"),
+        )
+        .replace(
+            "from './views-security.js'",
+            &format!("from './views-security.js?v={asset_tag}'"),
+        );
+
+    HttpResponse::Ok()
+        .content_type("application/javascript; charset=utf-8")
+        .insert_header((header::CACHE_CONTROL, cache_control))
+        .insert_header((header::ETAG, etag))
+        .insert_header((header::VARY, "Accept-Encoding"))
+        .insert_header((UI_HEADER_NAME, UI_HEADER_VALUE))
+        .body(versioned_body)
+}
+
 async fn serve_app_js(req: HttpRequest) -> HttpResponse {
-    serve_static(
-        &req,
-        "application/javascript; charset=utf-8",
-        APP_JS,
-        HASH_APP_JS,
-    )
+    serve_static_js(&req, APP_JS, HASH_APP_JS)
 }
 
 async fn serve_views_core_js(req: HttpRequest) -> HttpResponse {
-    serve_static(
-        &req,
-        "application/javascript; charset=utf-8",
-        VIEWS_CORE_JS,
-        HASH_VIEWS_CORE_JS,
-    )
+    serve_static_js(&req, VIEWS_CORE_JS, HASH_VIEWS_CORE_JS)
 }
 
 async fn serve_views_infra_js(req: HttpRequest) -> HttpResponse {
-    serve_static(
-        &req,
-        "application/javascript; charset=utf-8",
-        VIEWS_INFRA_JS,
-        HASH_VIEWS_INFRA_JS,
-    )
+    serve_static_js(&req, VIEWS_INFRA_JS, HASH_VIEWS_INFRA_JS)
 }
 
 async fn serve_views_security_js(req: HttpRequest) -> HttpResponse {
-    serve_static(
-        &req,
-        "application/javascript; charset=utf-8",
-        VIEWS_SECURITY_JS,
-        HASH_VIEWS_SECURITY_JS,
-    )
+    serve_static_js(&req, VIEWS_SECURITY_JS, HASH_VIEWS_SECURITY_JS)
 }
 
 /// Registers Pure-Rust native UI asset endpoints (`/ui/*`).

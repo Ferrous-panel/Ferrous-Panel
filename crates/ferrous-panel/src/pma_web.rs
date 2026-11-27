@@ -285,8 +285,17 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       let browseOffset = 0;
       let lastQueryResult = null;
       let lastExportSql = '';
-      let mysqlConfig = null;
-      let authToken = sessionStorage.getItem('fp_pma_token') || localStorage.getItem('fp_token') || '';
+      const ssoParamToken = urlParams.get('fp_sso') || '';
+      if (ssoParamToken) {
+        sessionStorage.setItem('fp_pma_token', ssoParamToken);
+        sessionStorage.setItem('fp_session_token', ssoParamToken);
+      }
+      let authToken = ssoParamToken
+        || sessionStorage.getItem('fp_session_token')
+        || localStorage.getItem('fp_session_token')
+        || sessionStorage.getItem('fp_pma_token')
+        || localStorage.getItem('fp_token')
+        || '';
 
       function esc(v) {
         return String(v === null || v === undefined ? '' : v)
@@ -1234,10 +1243,19 @@ fn render_official_pma_config_inc(secret: &str) -> String {
 declare(strict_types=1);\n\
 $cfg['blowfish_secret'] = '{secret}';\n\
 $ferrousSsoFile = '{sso_file}';\n\
+$ferrousSsoLegacyFile = '{sso_legacy_file}';\n\
 $ferrousSsoActive = !empty($_SERVER['HTTP_X_FERROUS_PMA_AUTH'])\n\
-    && $_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1'\n\
-    && is_readable($ferrousSsoFile);\n\
-$ferrousSsoPass = $ferrousSsoActive ? trim((string) @file_get_contents($ferrousSsoFile)) : '';\n\
+    && $_SERVER['HTTP_X_FERROUS_PMA_AUTH'] === '1';\n\
+$ferrousSsoPass = '';\n\
+if ($ferrousSsoActive) {{\n\
+    if (!empty($_SERVER['HTTP_X_FERROUS_PMA_PASS'])) {{\n\
+        $ferrousSsoPass = trim((string) $_SERVER['HTTP_X_FERROUS_PMA_PASS']);\n\
+    }} elseif (is_readable($ferrousSsoFile)) {{\n\
+        $ferrousSsoPass = trim((string) @file_get_contents($ferrousSsoFile));\n\
+    }} elseif (is_readable($ferrousSsoLegacyFile)) {{\n\
+        $ferrousSsoPass = trim((string) @file_get_contents($ferrousSsoLegacyFile));\n\
+    }}\n\
+}}\n\
 $i = 0;\n\
 $i++;\n\
 $cfg['Servers'][$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';\n\
@@ -1273,7 +1291,8 @@ $cfg['TempDir'] = '{OFFICIAL_PMA_TMP_DIR}';\n\
 $cfg['AllowThirdPartyFraming'] = 'sameorigin';\n\
 $cfg['ExecTimeLimit'] = 300;\n\
 $cfg['SendErrorReports'] = 'never';\n",
-        sso_file = crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE
+        sso_file = crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE,
+        sso_legacy_file = crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE_LEGACY
     )
 }
 
@@ -1384,12 +1403,12 @@ fn set_dir_mode(path: &str, mode: u32) {
 
 fn ensure_config_allows_sameorigin_frame(cfg_inc: &Path) {
     if let Ok(content) = std::fs::read_to_string(cfg_inc) {
-        if !content.contains("HTTP_X_FERROUS_PMA_AUTH") {
+        if !content.contains("HTTP_X_FERROUS_PMA_PASS") {
             let secret = generate_blowfish_secret();
             let _ = atomic_write_file(
                 cfg_inc,
                 render_official_pma_config_inc(&secret).as_bytes(),
-                0o640,
+                0o644,
             );
         }
     }
@@ -1876,28 +1895,118 @@ fn render_official_pma_launcher_html(version: &str) -> String {
     template.replace("__PMA_NAME__", &display)
 }
 
-fn is_valid_panel_session_request(req: &HttpRequest, state: &AppState) -> bool {
-    let token_candidate = req
-        .cookie(crate::auth::middleware::SESSION_COOKIE_NAME)
-        .map(|c| c.value().trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            req.headers()
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().strip_prefix("Bearer "))
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        });
-    let Some(token) = token_candidate else {
-        return false;
-    };
-    state
-        .auth_store
-        .verify_session(&token)
+fn extract_query_param(query: &str, key: &str) -> Option<String> {
+    for pair in query.split('&') {
+        let (k, v) = pair.split_once('=')?;
+        if k == key && !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+fn strip_fp_sso_from_query(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !pair.starts_with("fp_sso="))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn verify_panel_session_for_pma(req: &HttpRequest, state: &AppState) -> (bool, Option<String>) {
+    let query_tok = req
+        .uri()
+        .query()
+        .and_then(|q| extract_query_param(q, "fp_sso"));
+    let candidates = [
+        req.cookie(crate::auth::middleware::SESSION_COOKIE_NAME)
+            .map(|c| c.value().trim().to_string()),
+        req.cookie("fp_pma_sso")
+            .map(|c| c.value().trim().to_string()),
+        query_tok.clone(),
+        req.headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().strip_prefix("Bearer "))
+            .map(|s| s.trim().to_string()),
+        req.headers()
+            .get("x-fp-session")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string()),
+    ];
+
+    for cand in candidates.into_iter().flatten() {
+        if !cand.is_empty()
+            && state
+                .auth_store
+                .verify_session(&cand)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return (true, Some(cand));
+        }
+    }
+
+    let client_ip = crate::auth::rate_limit::extract_client_ip(req, &state.config);
+    if state.auth_store.has_active_session_for_ip(&client_ip) {
+        return (true, None);
+    }
+    (false, None)
+}
+
+async fn resolve_myphpadmin_sso_password(state: &AppState) -> Option<String> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    static CACHE: OnceLock<Mutex<Option<(Instant, String)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some((ts, ref pw)) = *guard {
+            if ts.elapsed() < Duration::from_secs(45) && !pw.is_empty() {
+                return Some(pw.clone());
+            }
+        }
+    }
+
+    let ensured = crate::modules::databases::ensure_myphpadmin_sso_mysql_account(
+        state.webserver.executor().as_ref(),
+    )
+    .await;
+    if let Some((_, pw)) = ensured {
+        if state
+            .webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Chown)
+            && Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
+        {
+            let _ = state
+                .webserver
+                .executor()
+                .run(
+                    AllowedBinary::Chown,
+                    &[
+                        "root:www-data",
+                        crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE,
+                    ],
+                    Duration::from_secs(5),
+                )
+                .await;
+            set_dir_mode(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE, 0o640);
+        }
+        if let Ok(mut guard) = cache.lock() {
+            *guard = Some((Instant::now(), pw.clone()));
+        }
+        return Some(pw);
+    }
+
+    std::fs::read_to_string(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE)
         .ok()
-        .flatten()
-        .is_some()
+        .or_else(|| {
+            std::fs::read_to_string(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE_LEGACY).ok()
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Reverse-proxies `/phpmyadmin/*` (all HTTP methods, cookies, sessions, SQL uploads/exports)
@@ -1908,6 +2017,13 @@ pub async fn serve_official_phpmyadmin(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> HttpResponse {
+    if state.config.is_production() {
+        let cfg_inc = Path::new(OFFICIAL_PMA_DIR).join("config.inc.php");
+        if cfg_inc.is_file() {
+            ensure_config_allows_sameorigin_frame(&cfg_inc);
+        }
+    }
+
     let mut stream_opt = TcpStream::connect(("127.0.0.1", OFFICIAL_PMA_PORT)).await.ok();
 
     if stream_opt.is_none()
@@ -1974,42 +2090,31 @@ pub async fn serve_official_phpmyadmin(
             .body(render_official_pma_launcher_html(&ver));
     };
 
-    let sso_authorized = is_valid_panel_session_request(&req, &state);
-    if sso_authorized
-        && state.config.is_production()
-        && !Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
-    {
-        let _ = crate::modules::databases::ensure_myphpadmin_sso_mysql_account(
-            state.webserver.executor().as_ref(),
-        )
-        .await;
-        if state
-            .webserver
-            .executor()
-            .is_binary_available(AllowedBinary::Chown)
-            && Path::new(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE).is_file()
-        {
-            let _ = state
-                .webserver
-                .executor()
-                .run(
-                    AllowedBinary::Chown,
-                    &[
-                        "root:www-data",
-                        crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE,
-                    ],
-                    Duration::from_secs(5),
-                )
-                .await;
-            set_dir_mode(crate::modules::databases::MYPHPADMIN_SSO_PASS_FILE, 0o640);
+    let method = req.method().as_str();
+    let path = req.uri().path();
+    let (sso_authorized, verified_token) = verify_panel_session_for_pma(&req, &state);
+    let mut sso_password_hdr: Option<String> = None;
+
+    if sso_authorized && state.config.is_production() {
+        sso_password_hdr = resolve_myphpadmin_sso_password(&state).await;
+        if path.ends_with('/') || path.ends_with(".php") {
+            crate::modules::databases::reconcile_live_mariadb_schemas_into_store(
+                &state.modules,
+                state.webserver.executor().as_ref(),
+            )
+            .await;
         }
     }
 
-    let method = req.method().as_str();
-    let path = req.uri().path();
-    let target_uri = match req.uri().query() {
-        Some(q) if !q.is_empty() => format!("{path}?{q}"),
-        _ => path.to_string(),
+    let cleaned_query = req
+        .uri()
+        .query()
+        .map(strip_fp_sso_from_query)
+        .unwrap_or_default();
+    let target_uri = if !cleaned_query.is_empty() {
+        format!("{path}?{cleaned_query}")
+    } else {
+        path.to_string()
     };
     let (host, scheme) = {
         let conn_info = req.connection_info();
@@ -2035,6 +2140,11 @@ pub async fn serve_official_phpmyadmin(
     raw_req.extend_from_slice(format!("X-Forwarded-Proto: {scheme}\r\n").as_bytes());
     if sso_authorized {
         raw_req.extend_from_slice(b"X-Ferrous-PMA-Auth: 1\r\n");
+        if let Some(ref pw) = sso_password_hdr {
+            if !pw.contains('\r') && !pw.contains('\n') {
+                raw_req.extend_from_slice(format!("X-Ferrous-PMA-Pass: {pw}\r\n").as_bytes());
+            }
+        }
     }
 
     for (hname, hval) in req.headers() {
@@ -2049,6 +2159,7 @@ pub async fn serve_official_phpmyadmin(
                 | "x-forwarded-host"
                 | "x-forwarded-proto"
                 | "x-ferrous-pma-auth"
+                | "x-ferrous-pma-pass"
         ) {
             continue;
         }
@@ -2102,6 +2213,17 @@ pub async fn serve_official_phpmyadmin(
         .unwrap_or(StatusCode::OK);
 
     let mut builder = HttpResponse::build(status_code);
+    if let Some(tok) = verified_token {
+        if req.cookie(crate::auth::middleware::SESSION_COOKIE_NAME).is_none() && !tok.contains(';') {
+            builder.append_header((
+                "Set-Cookie",
+                format!(
+                    "{}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                    crate::auth::middleware::SESSION_COOKIE_NAME
+                ),
+            ));
+        }
+    }
     let mut is_chunked = false;
     let mut is_html = false;
     let internal_origin = format!("http://127.0.0.1:{OFFICIAL_PMA_PORT}");

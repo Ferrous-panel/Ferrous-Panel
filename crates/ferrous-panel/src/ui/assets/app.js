@@ -6,7 +6,7 @@ import { renderSecurity, renderOptimizer, renderSsh, renderSettingsJobs, renderS
 const TOKEN_KEY = 'fp_session_token';
 const THEME_KEY = 'fp_theme';
 
-export const state = {
+export const state = window.__FP_STATE__ || (window.__FP_STATE__ = {
   boot: readBootConfig(),
   token: sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY) || '',
   user: null,
@@ -18,7 +18,7 @@ export const state = {
   capabilities: null,
   renderSeq: 0,
   viewAbortController: null,
-};
+});
 
 export function isActiveRender(seq, expectedRoute = null) {
   if (seq !== state.renderSeq) return false;
@@ -347,9 +347,9 @@ export async function openJobDrawer(jobId) {
   }
 }
 
-const getApiCache = new Map();
-const inflightGetMap = new Map();
-const visitedRoutes = new Set();
+const getApiCache = window.__FP_API_CACHE__ || (window.__FP_API_CACHE__ = new Map());
+const inflightGetMap = window.__FP_INFLIGHT_MAP__ || (window.__FP_INFLIGHT_MAP__ = new Map());
+const visitedRoutes = window.__FP_VISITED_ROUTES__ || (window.__FP_VISITED_ROUTES__ = new Set());
 const GET_CACHE_TTL_MS = 15000;
 
 export function invalidateApiCache() {
@@ -402,8 +402,12 @@ export async function api(
       return cloneCachedValue(hit.data);
     }
     if (!signal && inflightGetMap.has(path)) {
-      const shared = await inflightGetMap.get(path);
-      return cloneCachedValue(shared);
+      try {
+        const shared = await inflightGetMap.get(path);
+        return cloneCachedValue(shared);
+      } catch (_) {
+        inflightGetMap.delete(path);
+      }
     }
   }
 
@@ -425,9 +429,7 @@ export async function api(
 
       const reqCtrl = new AbortController();
       let timedOut = false;
-      const viewSignal = (!keepAlive && upperMethod === 'GET' && !signal)
-        ? state.viewAbortController?.signal || null
-        : null;
+      const viewSignal = null;
 
       const onExternalAbort = () => reqCtrl.abort('cancelled');
       if (signal) {
@@ -853,7 +855,7 @@ function renderShell() {
         <nav class="nav-scroll" aria-label="Điều hướng chính">${navHtml}</nav>
         <div class="sidebar-foot">
           <div class="sidebar-mobile-actions">
-            <a class="btn btn-sm" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
+            <a class="btn btn-sm" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FerrousAdmin SQL</a>
             <button type="button" class="btn btn-sm" id="sidebar-theme-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
           </div>
           <div class="sidebar-foot-meta">
@@ -881,7 +883,7 @@ function renderShell() {
           </div>
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm hide-mobile" id="topbar-cmdk-btn" title="Chuyển nhanh phân hệ">Chuyển nhanh <span class="kbd-hint">Ctrl+K</span></button>
-            <a class="btn btn-sm hide-mobile" href="/phpadmin/" target="_blank" rel="noopener">FerrousAdmin SQL</a>
+            <a class="btn btn-sm hide-mobile" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FerrousAdmin SQL</a>
             <button type="button" class="btn btn-sm" id="topbar-refresh-btn">Làm mới</button>
             <button type="button" class="btn btn-sm hide-mobile" id="theme-toggle-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
             <button type="button" class="btn btn-sm btn-danger" id="topbar-logout-btn">Đăng xuất</button>
@@ -1013,33 +1015,37 @@ async function bootstrap() {
   renderLogin();
 }
 
-window.addEventListener('hashchange', () => {
-  if (!state.user) return;
-  const h = window.location.hash.replace(/^#/, '');
-  if (ROUTE_TITLES[h] && h !== state.route) {
-    state.route = h;
-    updateShellChrome();
-    renderCurrentView();
-  }
-});
+if (!window.__FP_BOOTSTRAPPED__) {
+  window.__FP_BOOTSTRAPPED__ = true;
 
-window.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-    if (state.user) {
-      e.preventDefault();
-      openQuickJump();
+  window.addEventListener('hashchange', () => {
+    if (!state.user) return;
+    const h = window.location.hash.replace(/^#/, '');
+    if (ROUTE_TITLES[h] && h !== state.route) {
+      state.route = h;
+      updateShellChrome();
+      renderCurrentView();
     }
-    return;
-  }
-  if (e.key !== 'Escape') return;
-  if (state.mobileNavOpen) {
-    state.mobileNavOpen = false;
-    updateShellChrome();
-  }
-  const modalRoot = document.getElementById('modal-root');
-  if (modalRoot && modalRoot.innerHTML) closeModal();
-  const drawerRoot = document.getElementById('drawer-root');
-  if (drawerRoot && drawerRoot.innerHTML) closeJobDrawer();
-});
+  });
 
-bootstrap();
+  window.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      if (state.user) {
+        e.preventDefault();
+        openQuickJump();
+      }
+      return;
+    }
+    if (e.key !== 'Escape') return;
+    if (state.mobileNavOpen) {
+      state.mobileNavOpen = false;
+      updateShellChrome();
+    }
+    const modalRoot = document.getElementById('modal-root');
+    if (modalRoot && modalRoot.innerHTML) closeModal();
+    const drawerRoot = document.getElementById('drawer-root');
+    if (drawerRoot && drawerRoot.innerHTML) closeJobDrawer();
+  });
+
+  bootstrap();
+}
