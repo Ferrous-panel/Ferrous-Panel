@@ -697,6 +697,28 @@ install -m 0755 "${TMP_DIR}/tw-dl/${tw_asset}" /usr/local/bin/tailwindcss
 echo -e "${GREEN}[+] Installed Tailwind CSS v4 -> /usr/local/bin/tailwindcss.${NC}"
 fi
 fi
+if { ! command -v wg >/dev/null 2>&1 || { ! command -v podman >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; }; } && command -v apt-get >/dev/null 2>&1; then
+echo -e "${CYAN}[*] Installing Edge Cloud runtimes (podman + wireguard-tools)...${NC}"
+DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools podman >/dev/null 2>&1 || true
+fi
+if [ ! -x /usr/local/bin/wasmtime ] && [ -x /root/.wasmtime/bin/wasmtime ]; then
+install -m 0755 /root/.wasmtime/bin/wasmtime /usr/local/bin/wasmtime
+fi
+if [ ! -x /usr/local/bin/wasmtime ] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+local wt_arch="x86_64"; [ "${ARCH}" = "aarch64" ] && wt_arch="aarch64"
+local wt_url
+wt_url="$(curl -fsSL --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/bytecodealliance/wasmtime/releases/latest" 2>/dev/null | grep -oE "https://[^\"]+wasmtime-[^\"]+-${wt_arch}-linux\.tar\.xz" | head -n 1 || true)"
+if [ -n "$wt_url" ]; then
+echo -e "${CYAN}[*] Installing Bytecode Alliance Wasmtime WASI runtime...${NC}"
+mkdir -p "${TMP_DIR}/wt-dl"
+if curl -fsSL --retry 2 --connect-timeout 15 -o "${TMP_DIR}/wt-dl/wt.tar.xz" "$wt_url" && tar -xJf "${TMP_DIR}/wt-dl/wt.tar.xz" -C "${TMP_DIR}/wt-dl" 2>/dev/null; then
+local wt_bin
+wt_bin="$(find "${TMP_DIR}/wt-dl" -type f -name wasmtime | head -n 1 || true)"
+[ -n "$wt_bin" ] && install -m 0755 "$wt_bin" /usr/local/bin/wasmtime && echo -e "${GREEN}[+] Installed Wasmtime -> /usr/local/bin/wasmtime.${NC}"
+fi
+fi
+fi
 }
 ensure_native_rust_ui() {
 local work_dir="$1" ui_changed="${2:-true}"

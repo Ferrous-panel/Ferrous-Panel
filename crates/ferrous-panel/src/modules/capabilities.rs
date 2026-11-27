@@ -557,19 +557,19 @@ pub async fn probe_capabilities(
         "Edge Cloud — WASI Workers",
         "experimental",
         if wasmtime_bin {
-            CapabilityStatus::Experimental
+            CapabilityStatus::Ready
         } else {
             CapabilityStatus::Unavailable
         },
         if wasmtime_bin {
-            "Experimental: wasmtime binary available for real .wasm execution".to_string()
+            "Wasmtime WASI runtime ready for real .wasm execution".to_string()
         } else {
-            "Missing binary wasmtime (experimental WASI worker runtime)".to_string()
+            "Missing binary wasmtime (WASI worker runtime)".to_string()
         },
         if wasmtime_bin {
             String::new()
         } else {
-            "curl https://wasmtime.dev/install.sh -sSf | bash".to_string()
+            "Bấm 'Cài Wasmtime (1-Click)' hoặc chạy: curl https://wasmtime.dev/install.sh -sSf | bash".to_string()
         },
     );
 
@@ -582,19 +582,19 @@ pub async fn probe_capabilities(
         "Edge Cloud — OCI Containers",
         "experimental",
         if oci_bin {
-            CapabilityStatus::Experimental
+            CapabilityStatus::Ready
         } else {
             CapabilityStatus::Unavailable
         },
         if oci_bin {
-            "Experimental: podman/docker CLI detected".to_string()
+            "Podman / Docker OCI container runtime ready".to_string()
         } else {
             "Missing binary podman and docker".to_string()
         },
         if oci_bin {
             String::new()
         } else {
-            "sudo apt install -y podman".to_string()
+            "Bấm 'Cài Podman (1-Click)' hoặc chạy: sudo apt install -y podman".to_string()
         },
     );
 
@@ -606,19 +606,19 @@ pub async fn probe_capabilities(
         "Edge Cloud — WireGuard Mesh",
         "experimental",
         if wg_bin {
-            CapabilityStatus::Experimental
+            CapabilityStatus::Ready
         } else {
             CapabilityStatus::Unavailable
         },
         if wg_bin {
-            "Experimental: wireguard-tools (wg) detected".to_string()
+            "WireGuard kernel VPN mesh (wg) ready".to_string()
         } else {
             "Missing binary wg (wireguard-tools)".to_string()
         },
         if wg_bin {
             String::new()
         } else {
-            "sudo apt install -y wireguard-tools".to_string()
+            "Bấm 'Cài WireGuard (1-Click)' hoặc chạy: sudo apt install -y wireguard-tools".to_string()
         },
     );
 
@@ -630,12 +630,12 @@ pub async fn probe_capabilities(
         "Polyglot Rust FFI/IPC Bridge",
         "experimental",
         if cargo_bin {
-            CapabilityStatus::Experimental
+            CapabilityStatus::Ready
         } else {
             CapabilityStatus::Unavailable
         },
         if cargo_bin {
-            "Experimental: Rust cargo toolchain available".to_string()
+            "Rust cargo toolchain ready for C-ABI FFI (.so) compilation".to_string()
         } else {
             "Missing binary cargo/rustc".to_string()
         },

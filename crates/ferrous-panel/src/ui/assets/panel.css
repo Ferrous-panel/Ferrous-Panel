@@ -57,7 +57,6 @@ html, body {
   padding: 0;
   min-height: 100%;
   max-width: 100%;
-  overflow-x: clip;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -65,6 +64,10 @@ html, body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -webkit-text-size-adjust: 100%;
+}
+
+body {
+  overflow-x: hidden;
 }
 
 body.nav-open {
@@ -156,7 +159,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 100vh;
   max-width: 100%;
-  overflow-x: clip;
 }
 
 .sidebar {
@@ -308,7 +310,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   flex-direction: column;
   min-width: 0;
   max-width: 100%;
-  overflow-x: clip;
 }
 
 .topbar {
@@ -945,14 +946,22 @@ table.data-table th.right, table.data-table td.right {
   .menu-toggle { display: inline-flex; align-items: center; min-height: 36px; }
   .hide-mobile { display: none !important; }
   .breadcrumb-root, .breadcrumb-sep { display: none; }
+  .workspace {
+    padding-top: 54px;
+  }
   .topbar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
     height: 54px;
     padding: 0 12px;
     gap: 8px;
+    z-index: 40;
   }
   .topbar-left { gap: 8px; flex: 1; min-width: 0; }
   .topbar-actions { gap: 6px; }
-  .main-content { padding: 14px 12px 24px; gap: 14px; }
+  .main-content { padding: 16px 12px 24px; gap: 14px; }
   .surface { padding: 14px; }
   .form-grid { grid-template-columns: 1fr; }
 }

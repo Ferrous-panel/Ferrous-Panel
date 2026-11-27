@@ -1,7 +1,7 @@
 // FerrousPanel Pure-Rust UI — Infrastructure Views (Web Engine, PHP/Software, Cron/Backup/DNS, Mail, Edge/Polyglot)
 import {
   api, esc, fmtTime, statusClass, toast, openModal, closeModal, confirmAction, openJobDrawer,
-  capBannerHtml, capDisabledAttr, isCapUnavailable, withBusy, state, isActiveRender, waitForPanelReconnect,
+  capBannerHtml, capDisabledAttr, isCapUnavailable, installCapabilityPackages, withBusy, state, isActiveRender, waitForPanelReconnect,
 } from './app.js';
 
 // ============================================================================
@@ -1116,14 +1116,16 @@ export async function renderEdgePolyglot(container) {
   const containers = edge.ociContainers || [];
   const peers = edge.wireguardPeers || [];
   const snapshots = edge.blake3Snapshots || [];
+  const missingEdgeCaps = ['edge_cloud_wasi', 'edge_cloud_oci', 'edge_cloud_wireguard'].filter((id) => isCapUnavailable(id));
 
   container.innerHTML = `
     <div class="page-head">
       <div>
         <h1 class="page-title">Edge Cloud & Polyglot FFI</h1>
-        <p class="page-desc">Vận hành thật với Wasmtime, Podman/Docker, WireGuard VPN, BLAKE3 Merkle Snapshots và Rust C-ABI (.so). Có thể cài 1-click trong Kho Phần mềm.</p>
+        <p class="page-desc">Vận hành thật với Wasmtime, Podman/Docker, WireGuard VPN, BLAKE3 Merkle Snapshots và Rust C-ABI (.so). Có thể cài 1-click ngay bên dưới hoặc trong Kho Phần mềm.</p>
       </div>
       <div class="row">
+        ${missingEdgeCaps.length ? `<button type="button" class="btn btn-sm btn-primary" id="edge-install-all">Cài toàn bộ Edge Runtimes (1-Click)</button>` : ''}
         <button type="button" class="btn btn-sm" id="edge-add-wasi" ${capDisabledAttr('edge_cloud_wasi')}>Thêm WASI Worker</button>
         <button type="button" class="btn btn-sm" id="edge-add-oci" ${capDisabledAttr('edge_cloud_oci')}>Chạy OCI Container</button>
         <button type="button" class="btn btn-sm" id="edge-add-wg" ${capDisabledAttr('edge_cloud_wireguard')}>Thêm WireGuard Peer</button>
@@ -1303,6 +1305,18 @@ export async function renderEdgePolyglot(container) {
       </div>
     </section>
   `;
+
+  document.getElementById('edge-install-all')?.addEventListener('click', (e) => {
+    withBusy(e.currentTarget, async () => {
+      try {
+        toast('Đang cài đặt Wasmtime + Podman + WireGuard (1-Click)…');
+        await installCapabilityPackages(missingEdgeCaps);
+        toast('Đã cài đặt toàn bộ Edge Cloud Runtimes thành công.');
+      } catch (err) {
+        toast(err.message || 'Cài đặt Edge Runtimes thất bại.', 'err');
+      }
+    });
+  });
 
   document.getElementById('edge-add-wasi')?.addEventListener('click', () => {
     openModal('Tạo WASI Edge Worker (Wasmtime)', `

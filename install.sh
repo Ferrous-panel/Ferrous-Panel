@@ -295,7 +295,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y -q
 CORE_PKGS=(
   ca-certificates curl git build-essential pkg-config libssl-dev
-  tar zstd zip unzip openssl ufw fail2ban certbot
+  tar zstd zip unzip openssl ufw fail2ban certbot wireguard-tools podman
 )
 if [ "$WEB_ENGINE" = "nginx" ]; then
   CORE_PKGS+=(nginx)
@@ -517,6 +517,22 @@ install_zero_node_js_css_toolchain() {
       echo -e "${GREEN}[+] Verified & installed Tailwind CSS v4 standalone binary -> /usr/local/bin/tailwindcss (Zero-Node.js).${NC}"
     else
       echo -e "${YELLOW}[!] Could not download Tailwind CSS standalone binary right now (you can install later via Software Store).${NC}"
+    fi
+  fi
+
+  if [ ! -x /usr/local/bin/wasmtime ] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    local wt_arch="x86_64"
+    [ "${ARCH}" = "aarch64" ] && wt_arch="aarch64"
+    local wt_url
+    wt_url="$(curl -fsSL --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/bytecodealliance/wasmtime/releases/latest" 2>/dev/null | grep -oE "https://[^\"]+wasmtime-[^\"]+-${wt_arch}-linux\.tar\.xz" | head -n 1 || true)"
+    if [ -n "$wt_url" ]; then
+      echo -e "${CYAN}[*] Installing Bytecode Alliance Wasmtime WASI runtime...${NC}"
+      mkdir -p "${TMP_DIR}/wt-dl"
+      if curl -fsSL --retry 2 --connect-timeout 15 -o "${TMP_DIR}/wt-dl/wt.tar.xz" "$wt_url" && tar -xJf "${TMP_DIR}/wt-dl/wt.tar.xz" -C "${TMP_DIR}/wt-dl" 2>/dev/null; then
+        local wt_bin
+        wt_bin="$(find "${TMP_DIR}/wt-dl" -type f -name wasmtime | head -n 1 || true)"
+        [ -n "$wt_bin" ] && install -m 0755 "$wt_bin" /usr/local/bin/wasmtime && echo -e "${GREEN}[+] Installed Wasmtime -> /usr/local/bin/wasmtime.${NC}"
+      fi
     fi
   fi
 }

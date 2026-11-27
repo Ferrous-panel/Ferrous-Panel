@@ -96,6 +96,36 @@ export async function loadCapabilities(force = false) {
   return state.capabilities;
 }
 
+export const CAP_SOFTWARE_PKG_MAP = {
+  edge_cloud_wasi: { pkgIds: ['pkg-wasmtime'], label: 'Cài Wasmtime (1-Click)' },
+  edge_cloud_oci: { pkgIds: ['pkg-podman'], label: 'Cài Podman (1-Click)' },
+  edge_cloud_wireguard: { pkgIds: ['pkg-wireguard'], label: 'Cài WireGuard (1-Click)' },
+  mail_server: { pkgIds: ['pkg-postfix', 'pkg-dovecot', 'pkg-rspamd'], label: 'Cài Mail Stack (1-Click)' },
+  fail2ban: { pkgIds: ['pkg-fail2ban'], label: 'Cài Fail2ban (1-Click)' },
+  mariadb: { pkgIds: ['pkg-mariadb'], label: 'Cài MariaDB (1-Click)' },
+  postgresql: { pkgIds: ['pkg-postgresql'], label: 'Cài PostgreSQL (1-Click)' },
+  certbot: { pkgIds: ['pkg-certbot'], label: 'Cài Certbot (1-Click)' },
+  nginx: { pkgIds: ['pkg-nginx'], label: 'Cài Nginx (1-Click)' },
+};
+
+export async function installCapabilityPackages(capIds) {
+  const list = Array.isArray(capIds) ? capIds : [capIds];
+  const pkgSet = new Set();
+  for (const cid of list) {
+    const entry = CAP_SOFTWARE_PKG_MAP[cid];
+    if (entry && Array.isArray(entry.pkgIds)) {
+      entry.pkgIds.forEach((p) => pkgSet.add(p));
+    }
+  }
+  const pkgs = Array.from(pkgSet);
+  if (!pkgs.length) return;
+  for (const pkgId of pkgs) {
+    await api('POST', `/api/software/${encodeURIComponent(pkgId)}/action`, { action: 'install' });
+  }
+  await loadCapabilities(true);
+  await renderCurrentView(true);
+}
+
 export function capOf(id) {
   const list = state.capabilities?.capabilities || state.capabilities?.features || [];
   return list.find((c) => c.id === id) || null;
@@ -112,16 +142,22 @@ export function capBannerHtml(ids) {
     .filter((c) => c && c.status !== 'ready');
   if (!list.length) return '';
   return list
-    .map((c) => `
+    .map((c) => {
+      const installMeta = (c.status === 'unavailable' || c.status === 'degraded') ? CAP_SOFTWARE_PKG_MAP[c.id] : null;
+      return `
       <div class="cap-banner ${esc(c.status)}">
         <div class="cap-banner-head">
           <strong>${esc(c.label || c.name || c.id)}</strong>
-          <span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span>
+          <div class="row" style="gap:8px">
+            ${installMeta ? `<button type="button" class="btn btn-sm btn-primary" data-cap-install="${esc(c.id)}">${esc(installMeta.label)}</button>` : ''}
+            <span class="${statusClass(c.status)}">${esc(String(c.status || '').toUpperCase())}</span>
+          </div>
         </div>
         <div>${esc(c.reason || 'Tính năng chưa sẵn sàng trên máy chủ này.')}</div>
         ${c.fixHint ? `<div class="cap-hint">Gợi ý khắc phục: ${esc(c.fixHint)}</div>` : ''}
       </div>
-    `)
+    `;
+    })
     .join('');
 }
 
@@ -630,6 +666,13 @@ export function navigate(routeId) {
     window.history.replaceState(null, '', `#${routeId}`);
   }
   updateShellChrome();
+  try {
+    window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+  } catch (_) {
+    window.scrollTo(0, 0);
+  }
+  if (document.documentElement) document.documentElement.scrollTop = 0;
+  if (document.body) document.body.scrollTop = 0;
   renderCurrentView();
 }
 
@@ -1018,12 +1061,33 @@ async function bootstrap() {
 if (!window.__FP_BOOTSTRAPPED__) {
   window.__FP_BOOTSTRAPPED__ = true;
 
+  document.addEventListener('click', (e) => {
+    const btn = e.target?.closest?.('[data-cap-install]');
+    if (!btn) return;
+    const capId = btn.dataset.capInstall;
+    if (!capId) return;
+    withBusy(btn, async () => {
+      try {
+        toast('Đang tự động cài đặt gói dịch vụ hệ thống (1-Click)…');
+        await installCapabilityPackages(capId);
+        toast('Đã cài đặt và kích hoạt tính năng thành công.');
+      } catch (err) {
+        toast(err.message || 'Không thể cài đặt tự động gói dịch vụ.', 'err');
+      }
+    });
+  });
+
   window.addEventListener('hashchange', () => {
     if (!state.user) return;
     const h = window.location.hash.replace(/^#/, '');
     if (ROUTE_TITLES[h] && h !== state.route) {
       state.route = h;
       updateShellChrome();
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+      } catch (_) {
+        window.scrollTo(0, 0);
+      }
       renderCurrentView();
     }
   });
