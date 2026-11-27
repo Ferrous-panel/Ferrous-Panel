@@ -138,7 +138,7 @@ pub async fn dispatch_request(
                 .or_else(|| req.uri().host())
                 .unwrap_or("localhost")
                 .to_string();
-            if req_path == "/phpadmin" || req_path == "/phpmyadmin" {
+            if req_path == "/phpadmin" || req_path == "/phpmyadmin" || req_path == "/pgadmin" {
                 let target = format!("{req_path}/");
                 let mut builder = Response::builder().status(StatusCode::MOVED_PERMANENTLY);
                 if let Ok(hv) = HeaderValue::from_str(&target) {
@@ -151,7 +151,10 @@ pub async fn dispatch_request(
                     return Ok(resp);
                 }
             }
-            if req_path.starts_with("/phpadmin/") || req_path.starts_with("/phpmyadmin/") {
+            if req_path.starts_with("/phpadmin/")
+                || req_path.starts_with("/phpmyadmin/")
+                || req_path.starts_with("/pgadmin/")
+            {
                 return Ok(handle_reverse_proxy(
                     req,
                     peer_addr,
@@ -193,6 +196,47 @@ pub async fn dispatch_request(
     let (site, host) = match match_site_for_request(&req, &bundle) {
         Ok(pair) => pair,
         Err(err) => {
+            if matches!(err, crate::router::HostMatchError::UnknownHost)
+                && matches!(*req.method(), Method::GET | Method::HEAD)
+                && req
+                    .headers()
+                    .get(header::ACCEPT)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|a| a.to_ascii_lowercase().contains("text/html"))
+                    .unwrap_or(false)
+            {
+                let raw_host = req
+                    .headers()
+                    .get(header::HOST)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("edge-node");
+                let safe_host = raw_host
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('"', "&quot;");
+                if let Ok(tpl) = tokio::fs::read_to_string("/www/server/default/index.html").await {
+                    let rendered = tpl.replace("{{HOST}}", &safe_host);
+                    let body = Full::new(Bytes::from(rendered))
+                        .map_err(|never| match never {})
+                        .boxed();
+                    let st = if req_path == "/" || req_path == "/index.html" {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::NOT_FOUND
+                    };
+                    let mut builder = Response::builder()
+                        .status(st)
+                        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                        .header(header::CACHE_CONTROL, "no-store");
+                    if server_tokens {
+                        builder = builder.header(header::SERVER, "FerrousX");
+                    }
+                    if let Ok(resp) = builder.body(body) {
+                        return Ok(resp);
+                    }
+                }
+            }
             return Ok(text_response(err.status_code(), err.message(), server_tokens));
         }
     };

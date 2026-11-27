@@ -7,6 +7,7 @@ const INDEX_HTML_TEMPLATE: &str = include_str!("assets/index.html");
 const PANEL_CSS: &str = include_str!("assets/panel.css");
 const FAVICON_SVG: &str = include_str!("assets/favicon.svg");
 const APP_JS: &str = include_str!("assets/app.js");
+const I18N_JS: &str = include_str!("assets/i18n.js");
 const VIEWS_CORE_JS: &str = include_str!("assets/views-core.js");
 const VIEWS_INFRA_JS: &str = include_str!("assets/views-infra.js");
 const VIEWS_SECURITY_JS: &str = include_str!("assets/views-security.js");
@@ -31,6 +32,7 @@ const fn fnv1a64(bytes: &[u8]) -> u64 {
 const HASH_PANEL_CSS: u64 = fnv1a64(PANEL_CSS.as_bytes());
 const HASH_FAVICON_SVG: u64 = fnv1a64(FAVICON_SVG.as_bytes());
 const HASH_APP_JS: u64 = fnv1a64(APP_JS.as_bytes());
+const HASH_I18N_JS: u64 = fnv1a64(I18N_JS.as_bytes());
 const HASH_VIEWS_CORE_JS: u64 = fnv1a64(VIEWS_CORE_JS.as_bytes());
 const HASH_VIEWS_INFRA_JS: u64 = fnv1a64(VIEWS_INFRA_JS.as_bytes());
 const HASH_VIEWS_SECURITY_JS: u64 = fnv1a64(VIEWS_SECURITY_JS.as_bytes());
@@ -38,6 +40,7 @@ const HASH_VIEWS_SECURITY_JS: u64 = fnv1a64(VIEWS_SECURITY_JS.as_bytes());
 const UI_BUNDLE_HASH: u64 = HASH_PANEL_CSS
     ^ HASH_FAVICON_SVG.rotate_left(7)
     ^ HASH_APP_JS.rotate_left(13)
+    ^ HASH_I18N_JS.rotate_left(19)
     ^ HASH_VIEWS_CORE_JS.rotate_left(23)
     ^ HASH_VIEWS_INFRA_JS.rotate_left(31)
     ^ HASH_VIEWS_SECURITY_JS.rotate_left(41);
@@ -180,6 +183,10 @@ fn serve_static_js(req: &HttpRequest, body: &'static str, hash: u64) -> HttpResp
     let versioned_body = body
         .replace("from './app.js'", &format!("from './app.js?v={asset_tag}'"))
         .replace(
+            "from './i18n.js'",
+            &format!("from './i18n.js?v={asset_tag}'"),
+        )
+        .replace(
             "from './views-core.js'",
             &format!("from './views-core.js?v={asset_tag}'"),
         )
@@ -205,6 +212,10 @@ async fn serve_app_js(req: HttpRequest) -> HttpResponse {
     serve_static_js(&req, APP_JS, HASH_APP_JS)
 }
 
+async fn serve_i18n_js(req: HttpRequest) -> HttpResponse {
+    serve_static_js(&req, I18N_JS, HASH_I18N_JS)
+}
+
 async fn serve_views_core_js(req: HttpRequest) -> HttpResponse {
     serve_static_js(&req, VIEWS_CORE_JS, HASH_VIEWS_CORE_JS)
 }
@@ -222,6 +233,7 @@ pub fn configure_native_ui_assets(cfg: &mut web::ServiceConfig) {
     cfg.service(web::resource("/ui/panel.css").route(web::get().to(serve_css)))
         .service(web::resource("/ui/favicon.svg").route(web::get().to(serve_favicon)))
         .service(web::resource("/ui/app.js").route(web::get().to(serve_app_js)))
+        .service(web::resource("/ui/i18n.js").route(web::get().to(serve_i18n_js)))
         .service(web::resource("/ui/views-core.js").route(web::get().to(serve_views_core_js)))
         .service(web::resource("/ui/views-infra.js").route(web::get().to(serve_views_infra_js)))
         .service(

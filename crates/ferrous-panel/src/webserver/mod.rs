@@ -596,6 +596,8 @@ impl SiteSpec {
                     | "/phpadmin/"
                     | "/phpmyadmin"
                     | "/phpmyadmin/"
+                    | "/pgadmin"
+                    | "/pgadmin/"
                     | "/.well-known/acme-challenge"
                     | "/.well-known/acme-challenge/"
             ) || p.starts_with("/.well-known/acme-challenge/")

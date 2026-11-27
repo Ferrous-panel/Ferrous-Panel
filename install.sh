@@ -646,6 +646,7 @@ else
         if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
+        sed -i 's|norm_path == "/phpadmin" || norm_path == "/phpmyadmin"|norm_path == "/phpadmin" \|\| norm_path == "/phpmyadmin" \|\| norm_path == "/pgadmin"|; s|norm_path.starts_with("/phpadmin/") || norm_path.starts_with("/phpmyadmin/")|norm_path.starts_with("/phpadmin/") \|\| norm_path.starts_with("/phpmyadmin/") \|\| norm_path.starts_with("/pgadmin/")|' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         if grep -q 'mut stream: up_stream,' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           echo -e "${CYAN}[*] Applying compatibility patch: fixing struct pattern mutability in upstream ferrousx-http/src/server.rs...${NC}"
           sed -i 's/mut stream: up_stream,/stream: mut up_stream,/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
@@ -676,6 +677,10 @@ else
             skip > 0 { skip--; next }
             { print }
           ' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" && \
+            mv "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        fi
+        if grep -q 'let payload = serde_json::json!({' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" && ! grep -q '/www/server/default/index.html' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
+          awk '/let payload = serde_json::json!\(\{/ { print "if req.method == \"GET\" || req.method == \"HEAD\" { for cand in [\"/www/server/default/index.html\", \"/www/wwwroot/index.html\"] { if let Ok(tpl) = tokio::fs::read_to_string(cand).await { let sh = host_no_port.replace(\x27&\x27, \"&amp;\").replace(\x27<\x27, \"&lt;\").replace(\x27>\x27, \"&gt;\").replace(\x27\"\x27, \"&quot;\"); let html = tpl.replace(\"{{HOST}}\", &sh); return DispatchResponse::Buffered(HttpResponsePayload { status: if norm_path == \"/\" || norm_path == \"/index.html\" { StatusCode::OK } else { StatusCode::NOT_FOUND }, headers: vec![(\"Content-Type\".to_string(), \"text/html; charset=utf-8\".to_string()), (\"Cache-Control\".to_string(), \"no-store\".to_string())], body: if req.method == \"HEAD\" { Bytes::new() } else { Bytes::from(html) } }); } } }" } { print }' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" > "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" && \
             mv "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs.tmp" "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
       fi
@@ -820,7 +825,29 @@ ln -sf "${BIN_PANEL}" /usr/local/bin/ferrous
 # ==============================================================================
 # [5/7] Configure Active Web Server Engine (Nginx or FerrousX) & phpMyAdmin Proxy
 # ==============================================================================
+ensure_default_landing_page() {
+  mkdir -p /www/server/default /www/wwwroot
+  chmod 0755 /www /www/server /www/server/default /www/wwwroot 2>/dev/null || true
+  if [ -f "${SRC_DIR}/crates/ferrous-panel/src/modules/default_pages.rs" ]; then
+    awk '/^const UNCONFIGURED_HOST_HTML:/{f=1;next} f&&/^"##;$/{exit} f{print}' "${SRC_DIR}/crates/ferrous-panel/src/modules/default_pages.rs" > /www/server/default/index.html.tmp 2>/dev/null || true
+    if [ -s /www/server/default/index.html.tmp ] && grep -q 'FerrousPanel-Managed-Default-Index' /www/server/default/index.html.tmp 2>/dev/null; then
+      chmod 0644 /www/server/default/index.html.tmp && mv -f /www/server/default/index.html.tmp /www/server/default/index.html
+    else
+      rm -f /www/server/default/index.html.tmp
+    fi
+  fi
+  if [ ! -f /www/server/default/index.html ]; then
+    printf '<!DOCTYPE html><!-- FerrousPanel-Managed-Default-Index --><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ferrous Edge Node</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#060913;color:#f8fafc;font-family:system-ui,sans-serif}.c{max-width:560px;padding:28px;border-radius:16px;background:#0f172a;border:1px solid #334155}code{color:#fb923c}</style></head><body><main class="c"><h2>Ferrous Edge Server Ready</h2><p><code>{{HOST}}</code> is online. Add this domain in <b>FerrousPanel → Websites &amp; Apps</b> to deploy your site.</p></main></body></html>\n' > /www/server/default/index.html
+    chmod 0644 /www/server/default/index.html 2>/dev/null || true
+  fi
+  if [ ! -f /www/wwwroot/index.html ] || grep -qE 'Welcome to nginx|FerrousPanel-Managed-Default-Index' /www/wwwroot/index.html 2>/dev/null; then
+    cp -f /www/server/default/index.html /www/wwwroot/index.html 2>/dev/null || true
+    chmod 0644 /www/wwwroot/index.html 2>/dev/null || true
+  fi
+}
+
 setup_phpmyadmin_proxy() {
+  ensure_default_landing_page
   if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
     systemctl disable --now ferrous-pma.service 2>/dev/null || true
   fi
@@ -849,10 +876,10 @@ setup_phpmyadmin_proxy() {
     DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
     if [ -n "$php_ver" ]; then
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-        "php${php_ver}-cli" "php${php_ver}-mysql" "php${php_ver}-mbstring" "php${php_ver}-xml" "php${php_ver}-zip" "php${php_ver}-curl" >/dev/null 2>&1 || true
+        "php${php_ver}-cli" "php${php_ver}-mysql" "php${php_ver}-mbstring" "php${php_ver}-xml" "php${php_ver}-zip" "php${php_ver}-curl" "php${php_ver}-gd" "php${php_ver}-intl" "php${php_ver}-bz2" >/dev/null 2>&1 || true
     fi
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-      php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
+      php-cli php-mysql php-mbstring php-xml php-zip php-curl php-gd php-intl php-bz2 >/dev/null 2>&1 || true
     for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.1 /usr/bin/php8.4 /usr/bin/php /usr/bin/php7.4; do
       if [ -x "$cand" ]; then php_bin="$cand"; break; fi
     done
@@ -890,6 +917,7 @@ setup_phpmyadmin_proxy() {
     sso_pw="$(tr -d '[:space:]' < "${sso_file}" 2>/dev/null || true)"
     if [ -n "${sso_pw}" ] && command -v mysql >/dev/null 2>&1; then
       mysql --batch --raw <<EOF_PMA_SSO >/dev/null 2>&1 || true
+CREATE DATABASE IF NOT EXISTS phpmyadmin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}';
 CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}';
 ALTER USER 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}';
@@ -898,9 +926,12 @@ GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'localhost' WITH GRANT OPTION;
 GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'127.0.0.1' WITH GRANT OPTION;
 FLUSH PRIVILEGES;
 EOF_PMA_SSO
+      if [ -f "${pma_dir}/sql/create_tables.sql" ]; then
+        mysql phpmyadmin < "${pma_dir}/sql/create_tables.sql" >/dev/null 2>&1 || true
+      fi
     fi
 
-    if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "HTTP_X_FERROUS_PMA_PASS" "${pma_dir}/config.inc.php" 2>/dev/null; then
+    if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "PmaNoRelation_DisableWarning" "${pma_dir}/config.inc.php" 2>/dev/null; then
       local bf_secret
       bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecretKey')"
       cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
@@ -921,34 +952,34 @@ if (\$ferrousSsoActive) {
         \$ferrousSsoPass = trim((string) @file_get_contents(\$ferrousSsoLegacyFile));
     }
 }
-\$i = 1;
-\$cfg['Servers'][\$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';
-if (\$ferrousSsoPass !== '') {
-    \$cfg['Servers'][\$i]['auth_type'] = 'config';
-    \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
-    \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
-} else {
-    \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+for (\$i = 1; \$i <= 2; \$i++) {
+    \$cfg['Servers'][\$i]['verbose'] = \$i === 1 ? 'FPSql & Database — MariaDB / MySQL (Socket)' : '127.0.0.1:3306 (TCP)';
+    if (\$ferrousSsoPass !== '') {
+        \$cfg['Servers'][\$i]['auth_type'] = 'config';
+        \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
+        \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
+        \$cfg['Servers'][\$i]['controluser'] = 'fp_myphpadmin';
+        \$cfg['Servers'][\$i]['controlpass'] = \$ferrousSsoPass;
+    } else {
+        \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+    }
+    \$cfg['Servers'][\$i]['host'] = \$i === 1 ? 'localhost' : '127.0.0.1';
+    if (\$i === 2) {
+        \$cfg['Servers'][\$i]['port'] = '3306';
+    } elseif (file_exists('/run/mysqld/mysqld.sock')) {
+        \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
+    }
+    \$cfg['Servers'][\$i]['compress'] = false;
+    \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+    \$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
+    \$cfg['Servers'][\$i]['bookmarktable'] = 'pma__bookmark';
+    foreach (['relation','table_info','table_coords','pdf_pages','column_info','history','table_uiprefs','tracking','userconfig','recent','favorite','users','usergroups','navigationhiding','savedsearches','central_columns','designer_settings','export_templates'] as \$t) {
+        \$cfg['Servers'][\$i][\$t] = 'pma__' . \$t;
+    }
 }
-\$cfg['Servers'][\$i]['host'] = 'localhost';
-\$cfg['Servers'][\$i]['compress'] = false;
-\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-if (file_exists('/run/mysqld/mysqld.sock')) {
-    \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
-}
-\$i++;
-\$cfg['Servers'][\$i]['verbose'] = '127.0.0.1:3306 (TCP)';
-if (\$ferrousSsoPass !== '') {
-    \$cfg['Servers'][\$i]['auth_type'] = 'config';
-    \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
-    \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
-} else {
-    \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
-}
-\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
-\$cfg['Servers'][\$i]['port'] = '3306';
-\$cfg['Servers'][\$i]['compress'] = false;
-\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['PmaNoRelation_DisableWarning'] = true;
+\$cfg['ZeroConf'] = true;
+\$cfg['VersionCheck'] = false;
 \$cfg['TempDir'] = '${pma_tmp}';
 \$cfg['AllowThirdPartyFraming'] = 'sameorigin';
 \$cfg['ExecTimeLimit'] = 300;
@@ -959,12 +990,17 @@ EOF_PMA_CFG
 
     cat > "${pma_router}" <<'EOF_PMA_ROUTER'
 <?php
+if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
 if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
     $_SERVER['HTTPS'] = 'on';
     $_SERVER['SERVER_PORT'] = '443';
 }
-if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
-    $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+if (!empty($_SERVER['HTTP_HOST']) && strpos($_SERVER['HTTP_HOST'], ':') !== false) {
+    [$hName, $hPort] = explode(':', $_SERVER['HTTP_HOST'], 2);
+    if ($hName !== '') $_SERVER['SERVER_NAME'] = $hName;
+    if (ctype_digit($hPort)) $_SERVER['SERVER_PORT'] = $hPort;
 }
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if ($uri === '/phpmyadmin') {
@@ -1200,22 +1236,28 @@ EOF_NGX_PHP
     fi
   fi
 
-  # Upgrade stock untouched Ubuntu default vhost (or existing FerrousPanel default vhost missing /phpadmin/)
+  # Upgrade stock untouched Ubuntu default vhost (or existing FerrousPanel default vhost)
   NGX_DEFAULT_TARGET="$(readlink -f /etc/nginx/sites-enabled/default 2>/dev/null || true)"
   if [ "$NGX_DEFAULT_TARGET" = "/etc/nginx/sites-available/default" ] || \
      { [ "$NGX_DEFAULT_TARGET" = "/etc/nginx/sites-available/ferrous-default.conf" ] && \
        head -n 1 /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null | grep -q 'Managed by FerrousPanel' && \
-       { ! grep -q '/phpadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null || \
-         ! grep -q '/phpmyadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; }; then
+       { ! grep -q '/pgadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null || \
+         ! grep -q '/www/server/default' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; }; then
     cat > /etc/nginx/sites-available/ferrous-default.conf <<'EOF_NGX_DEF'
-# Managed by FerrousPanel — Default catch-all vhost with ACME HTTP-01 webroot & phpMyAdmin reverse proxy
+# Managed by FerrousPanel — Default catch-all vhost (/phpadmin/ /phpmyadmin/ /pgadmin/)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
 
-    root /www/wwwroot;
+    root /www/server/default;
+    index index.html;
     server_tokens off;
+
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
 
     location ^~ /.well-known/acme-challenge/ {
         root /www/acme;
@@ -1223,32 +1265,16 @@ server {
         try_files $uri =404;
     }
 
-    location = /phpadmin {
-        return 301 $scheme://$http_host/phpadmin/;
+    location ~ ^/(phpadmin|phpmyadmin|pgadmin)$ {
+        return 301 $scheme://$http_host$uri/;
     }
 
-    location ^~ /phpadmin/ {
+    location ~ ^/(phpadmin|phpmyadmin|pgadmin)/ {
         proxy_pass http://127.0.0.1:888;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location = /phpmyadmin {
-        return 301 $scheme://$http_host/phpmyadmin/;
-    }
-
-    location ^~ /phpmyadmin/ {
-        proxy_pass http://127.0.0.1:888;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location / {
-        try_files $uri $uri/ =404;
+        try_files $uri $uri/ /index.html;
     }
 }
 EOF_NGX_DEF

@@ -93,6 +93,8 @@ pub enum AllowedBinary {
     Python3,
     Go,
     Runuser,
+    PgAdminPython,
+    PgAdminGunicorn,
 }
 
 impl AllowedBinary {
@@ -179,6 +181,8 @@ impl AllowedBinary {
             Self::Python3 => "python3",
             Self::Go => "go",
             Self::Runuser => "runuser",
+            Self::PgAdminPython => "pgadmin-python3",
+            Self::PgAdminGunicorn => "pgadmin-gunicorn",
         }
     }
 
@@ -271,6 +275,8 @@ impl AllowedBinary {
             "python3" => Some(Self::Python3),
             "go" => Some(Self::Go),
             "runuser" => Some(Self::Runuser),
+            "pgadmin-python3" => Some(Self::PgAdminPython),
+            "pgadmin-gunicorn" => Some(Self::PgAdminGunicorn),
             _ => None,
         }
     }
@@ -358,6 +364,8 @@ impl AllowedBinary {
             Self::Python3 => &["/usr/bin/python3", "/usr/local/bin/python3"],
             Self::Go => &["/usr/local/go/bin/go", "/usr/bin/go", "/usr/local/bin/go"],
             Self::Runuser => &["/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser"],
+            Self::PgAdminPython => &["/var/lib/pgadmin/venv/bin/python3"],
+            Self::PgAdminGunicorn => &["/var/lib/pgadmin/venv/bin/gunicorn"],
         }
     }
 

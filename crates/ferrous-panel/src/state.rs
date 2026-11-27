@@ -440,6 +440,9 @@ impl AppState {
             load_or_init_credentials(&config.credentials_path(), &config.admin_username)?;
         let auth_store = AuthStore::open(&config.db_path())?;
         let modules = ModuleStore::open(&config.db_path())?;
+        if config.is_production() {
+            crate::modules::default_pages::ensure_system_default_landing_pages(&config.wwwroot);
+        }
         let state = Self {
             config,
             credentials: RwLock::new(creds),

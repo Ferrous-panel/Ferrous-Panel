@@ -17,7 +17,8 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>FerrousAdmin — Pure-Rust SQL Studio (/phpadmin/)</title>
+  <meta name="generator" content="FPSql &amp; Database (FerrousAdmin Pure-Rust)" />
+  <title>FPSql &amp; Database — Pure-Rust SQL Studio (/phpadmin/)</title>
   <style>
     :root {
       --bg: #090d16;
@@ -197,12 +198,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
 <body>
   <header>
     <div class="brand">
-      <span>FerrousAdmin</span>
+      <span>FPSql &amp; Database</span>
       <span class="badge">100% Pure Rust · Zero PHP</span>
       <span class="badge badge-ok" id="engineStatus">Actix-Web + SQLite WAL + MariaDB + PostgreSQL</span>
     </div>
     <div class="row" id="headerActions">
       <a href="/phpmyadmin/" style="font-size:12px;font-weight:600;padding:7px 12px;border-radius:7px;border:1px solid rgba(59,130,246,0.45);background:rgba(59,130,246,0.16);color:#93c5fd;text-decoration:none;">⇄ __PMA_DISPLAY_NAME__ (/phpmyadmin/) ↗</a>
+      <a href="/pgadmin/" style="font-size:12px;font-weight:600;padding:7px 12px;border-radius:7px;border:1px solid rgba(56,189,248,0.45);background:rgba(56,189,248,0.14);color:#7dd3fc;text-decoration:none;">🐘 pgAdmin 4 (/pgadmin/) ↗</a>
+      <button type="button" id="btnPmaLang" style="font-family:var(--mono);font-weight:700;">EN</button>
       <span class="muted" id="userLabel"></span>
       <button type="button" id="btnRefresh" class="hidden">Làm mới</button>
       <button type="button" id="btnLogout" class="danger hidden">Đăng xuất</button>
@@ -210,27 +213,27 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
   </header>
 
   <section id="loginView" class="login-box">
-    <h2 style="margin:0 0 6px;font-size:18px;">Đăng nhập FerrousAdmin</h2>
-    <p class="muted" style="margin:0 0 16px;">Quản trị SQL thuần Rust (thay thế phpMyAdmin PHP). Sử dụng tài khoản quản trị FerrousPanel (Argon2id).</p>
+    <h2 style="margin:0 0 6px;font-size:18px;" data-en="Sign in to FPSql &amp; Database">Đăng nhập FPSql &amp; Database</h2>
+    <p class="muted" style="margin:0 0 16px;" data-en="Pure-Rust SQL Studio for FerrousPanel. Sign in with your FerrousPanel admin credentials (Argon2id).">Quản trị SQL thuần Rust của FerrousPanel. Sử dụng tài khoản quản trị FerrousPanel (Argon2id).</p>
     <div id="loginError" class="notice err hidden"></div>
     <form id="loginForm" style="display:flex;flex-direction:column;gap:12px;">
       <div>
-        <label for="loginUser">Tài khoản</label>
+        <label for="loginUser" data-en="Username">Tài khoản</label>
         <input id="loginUser" type="text" value="admin_ferrous" required autocomplete="username" />
       </div>
       <div>
-        <label for="loginPass">Mật khẩu</label>
+        <label for="loginPass" data-en="Password">Mật khẩu</label>
         <input id="loginPass" type="password" required autocomplete="current-password" />
       </div>
-      <button type="submit" class="primary">Đăng nhập SQL Studio</button>
+      <button type="submit" class="primary" data-en="Sign In to FPSql &amp; Database">Đăng nhập SQL Studio</button>
     </form>
   </section>
 
   <div id="appView" class="layout hidden">
     <aside>
       <div class="row" style="justify-content:space-between;margin-bottom:10px;">
-        <strong style="font-size:13px;">Cơ sở dữ liệu</strong>
-        <button type="button" class="primary" id="btnShowCreateDb">+ Tạo DB</button>
+        <strong style="font-size:13px;" data-en="Databases">Cơ sở dữ liệu</strong>
+        <button type="button" class="primary" id="btnShowCreateDb" data-en="+ New DB">+ Tạo DB</button>
       </div>
       <div id="dbList"></div>
     </aside>
@@ -238,14 +241,14 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
       <div id="banner" class="notice hidden"></div>
       <div class="tabs" id="mainTabs">
         <button type="button" class="tab active" data-tab="databases">Databases</button>
-        <button type="button" class="tab" data-tab="structure">Structure (Bảng &amp; Cột)</button>
-        <button type="button" class="tab" data-tab="browse">Browse &amp; Sửa Dòng</button>
-        <button type="button" class="tab" data-tab="insert">Chèn Dòng (Insert)</button>
+        <button type="button" class="tab" data-tab="structure" data-en="Structure (Tables &amp; Columns)">Structure (Bảng &amp; Cột)</button>
+        <button type="button" class="tab" data-tab="browse" data-en="Browse &amp; Edit Rows">Browse &amp; Sửa Dòng</button>
+        <button type="button" class="tab" data-tab="insert" data-en="Insert Row">Chèn Dòng (Insert)</button>
         <button type="button" class="tab" data-tab="sql">SQL Console</button>
-        <button type="button" class="tab" data-tab="new_table">Tạo Bảng</button>
+        <button type="button" class="tab" data-tab="new_table" data-en="Create Table">Tạo Bảng</button>
         <button type="button" class="tab" data-tab="export">Export .SQL</button>
         <button type="button" class="tab" data-tab="import">Import .SQL</button>
-        <button type="button" class="tab" data-tab="server_cfg">Cấu hình MySQL / PMA</button>
+        <button type="button" class="tab" data-tab="server_cfg" data-en="MySQL / PMA Config">Cấu hình MySQL / PMA</button>
       </div>
       <div id="tabContent"></div>
     </main>
@@ -1108,6 +1111,30 @@ const FERROUS_ADMIN_HTML: &str = r##"<!DOCTYPE html>
         }
       });
 
+      const pmaLangBtn = document.getElementById('btnPmaLang');
+      function applyPmaLang() {
+        const en = (localStorage.getItem('fp_lang') || 'vi') === 'en';
+        document.documentElement.lang = en ? 'en' : 'vi';
+        if (pmaLangBtn) pmaLangBtn.textContent = en ? 'VI' : 'EN';
+        document.getElementById('btnRefresh').textContent = en ? 'Refresh' : 'Làm mới';
+        document.getElementById('btnLogout').textContent = en ? 'Sign Out' : 'Đăng xuất';
+        document.getElementById('pmaDialogCancel').textContent = en ? 'Cancel' : 'Hủy';
+        document.querySelectorAll('[data-en]').forEach((el) => {
+          if (!el.hasAttribute('data-vi')) el.setAttribute('data-vi', el.textContent);
+          el.textContent = en ? el.getAttribute('data-en') : el.getAttribute('data-vi');
+        });
+      }
+      if (pmaLangBtn) {
+        pmaLangBtn.addEventListener('click', () => {
+          const next = (localStorage.getItem('fp_lang') || 'vi') === 'en' ? 'vi' : 'en';
+          localStorage.setItem('fp_lang', next);
+          applyPmaLang();
+          renderSidebar();
+          if (activeTab === 'browse' && activeTable) { loadBrowseRows(); } else { renderTab(); }
+        });
+      }
+      applyPmaLang();
+
       document.getElementById('btnRefresh').addEventListener('click', () => loadAll().catch((e) => showBanner(e.message, true)));
       document.getElementById('btnLogout').addEventListener('click', async () => {
         try { await api('/auth/logout', { method: 'POST' }); } catch (_) {}
@@ -1256,35 +1283,53 @@ if ($ferrousSsoActive) {{\n\
         $ferrousSsoPass = trim((string) @file_get_contents($ferrousSsoLegacyFile));\n\
     }}\n\
 }}\n\
-$i = 0;\n\
-$i++;\n\
-$cfg['Servers'][$i]['verbose'] = 'FerrousPanel MariaDB / MySQL (Local Socket)';\n\
-if ($ferrousSsoPass !== '') {{\n\
-    $cfg['Servers'][$i]['auth_type'] = 'config';\n\
-    $cfg['Servers'][$i]['user'] = 'fp_myphpadmin';\n\
-    $cfg['Servers'][$i]['password'] = $ferrousSsoPass;\n\
-}} else {{\n\
-    $cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+for ($i = 1; $i <= 2; $i++) {{\n\
+    $cfg['Servers'][$i]['verbose'] = $i === 1\n\
+        ? 'FPSql & Database — MariaDB / MySQL (Local Socket)'\n\
+        : 'FPSql & Database — MariaDB / MySQL (127.0.0.1:3306)';\n\
+    if ($ferrousSsoPass !== '') {{\n\
+        $cfg['Servers'][$i]['auth_type'] = 'config';\n\
+        $cfg['Servers'][$i]['user'] = 'fp_myphpadmin';\n\
+        $cfg['Servers'][$i]['password'] = $ferrousSsoPass;\n\
+        $cfg['Servers'][$i]['controluser'] = 'fp_myphpadmin';\n\
+        $cfg['Servers'][$i]['controlpass'] = $ferrousSsoPass;\n\
+    }} else {{\n\
+        $cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
+    }}\n\
+    $cfg['Servers'][$i]['host'] = $i === 1 ? 'localhost' : '127.0.0.1';\n\
+    $cfg['Servers'][$i]['controlhost'] = $cfg['Servers'][$i]['host'];\n\
+    if ($i === 2) {{\n\
+        $cfg['Servers'][$i]['port'] = '3306';\n\
+    }} elseif (file_exists('/run/mysqld/mysqld.sock')) {{\n\
+        $cfg['Servers'][$i]['socket'] = '/run/mysqld/mysqld.sock';\n\
+    }}\n\
+    $cfg['Servers'][$i]['compress'] = false;\n\
+    $cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
+    $cfg['Servers'][$i]['pmadb'] = 'phpmyadmin';\n\
+    $cfg['Servers'][$i]['bookmarktable'] = 'pma__bookmark';\n\
+    $cfg['Servers'][$i]['relation'] = 'pma__relation';\n\
+    $cfg['Servers'][$i]['table_info'] = 'pma__table_info';\n\
+    $cfg['Servers'][$i]['table_coords'] = 'pma__table_coords';\n\
+    $cfg['Servers'][$i]['pdf_pages'] = 'pma__pdf_pages';\n\
+    $cfg['Servers'][$i]['column_info'] = 'pma__column_info';\n\
+    $cfg['Servers'][$i]['history'] = 'pma__history';\n\
+    $cfg['Servers'][$i]['table_uiprefs'] = 'pma__table_uiprefs';\n\
+    $cfg['Servers'][$i]['tracking'] = 'pma__tracking';\n\
+    $cfg['Servers'][$i]['userconfig'] = 'pma__userconfig';\n\
+    $cfg['Servers'][$i]['recent'] = 'pma__recent';\n\
+    $cfg['Servers'][$i]['favorite'] = 'pma__favorite';\n\
+    $cfg['Servers'][$i]['users'] = 'pma__users';\n\
+    $cfg['Servers'][$i]['usergroups'] = 'pma__usergroups';\n\
+    $cfg['Servers'][$i]['navigationhiding'] = 'pma__navigationhiding';\n\
+    $cfg['Servers'][$i]['savedsearches'] = 'pma__savedsearches';\n\
+    $cfg['Servers'][$i]['central_columns'] = 'pma__central_columns';\n\
+    $cfg['Servers'][$i]['designer_settings'] = 'pma__designer_settings';\n\
+    $cfg['Servers'][$i]['export_templates'] = 'pma__export_templates';\n\
 }}\n\
-$cfg['Servers'][$i]['host'] = 'localhost';\n\
-$cfg['Servers'][$i]['compress'] = false;\n\
-$cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
-if (file_exists('/run/mysqld/mysqld.sock')) {{\n\
-    $cfg['Servers'][$i]['socket'] = '/run/mysqld/mysqld.sock';\n\
-}}\n\
-$i++;\n\
-$cfg['Servers'][$i]['verbose'] = '127.0.0.1:3306 (TCP)';\n\
-if ($ferrousSsoPass !== '') {{\n\
-    $cfg['Servers'][$i]['auth_type'] = 'config';\n\
-    $cfg['Servers'][$i]['user'] = 'fp_myphpadmin';\n\
-    $cfg['Servers'][$i]['password'] = $ferrousSsoPass;\n\
-}} else {{\n\
-    $cfg['Servers'][$i]['auth_type'] = 'cookie';\n\
-}}\n\
-$cfg['Servers'][$i]['host'] = '127.0.0.1';\n\
-$cfg['Servers'][$i]['port'] = '3306';\n\
-$cfg['Servers'][$i]['compress'] = false;\n\
-$cfg['Servers'][$i]['AllowNoPassword'] = false;\n\
+$cfg['PmaNoRelation_DisableWarning'] = true;\n\
+$cfg['ZeroConf'] = true;\n\
+$cfg['VersionCheck'] = false;\n\
+$cfg['LoginCookieValidity'] = 86400;\n\
 $cfg['UploadDir'] = '';\n\
 $cfg['SaveDir'] = '';\n\
 $cfg['TempDir'] = '{OFFICIAL_PMA_TMP_DIR}';\n\
@@ -1298,12 +1343,25 @@ $cfg['SendErrorReports'] = 'never';\n",
 
 fn render_official_pma_router_php() -> &'static str {
     r#"<?php
-if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+$isHttps = !empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https';
+if ($isHttps) {
     $_SERVER['HTTPS'] = 'on';
-    $_SERVER['SERVER_PORT'] = '443';
 }
 if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) {
     $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+}
+$hostHeader = $_SERVER['HTTP_HOST'] ?? 'localhost';
+if (strpos($hostHeader, ':') !== false && substr($hostHeader, -1) !== ']') {
+    $parts = explode(':', $hostHeader);
+    $portPart = end($parts);
+    if (ctype_digit($portPart)) {
+        $_SERVER['SERVER_PORT'] = $portPart;
+        array_pop($parts);
+        $_SERVER['SERVER_NAME'] = implode(':', $parts);
+    }
+} else {
+    $_SERVER['SERVER_PORT'] = $isHttps ? '443' : '80';
+    $_SERVER['SERVER_NAME'] = $hostHeader;
 }
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if ($uri === '/phpmyadmin') {
@@ -1403,7 +1461,11 @@ fn set_dir_mode(path: &str, mode: u32) {
 
 fn ensure_config_allows_sameorigin_frame(cfg_inc: &Path) {
     if let Ok(content) = std::fs::read_to_string(cfg_inc) {
-        if !content.contains("HTTP_X_FERROUS_PMA_PASS") {
+        if !content.contains("HTTP_X_FERROUS_PMA_PASS")
+            || !content.contains("PmaNoRelation_DisableWarning")
+            || !content.contains("pma__bookmark")
+            || !content.contains("FPSql & Database")
+        {
             let secret = generate_blowfish_secret();
             let _ = atomic_write_file(
                 cfg_inc,
@@ -1461,6 +1523,9 @@ pub async fn install_or_repair_official_phpmyadmin(
                 format!("php{ver}-xml"),
                 format!("php{ver}-zip"),
                 format!("php{ver}-curl"),
+                format!("php{ver}-gd"),
+                format!("php{ver}-intl"),
+                format!("php{ver}-bz2"),
             ];
             let mut args: Vec<&str> = vec![
                 "install",
@@ -1503,6 +1568,9 @@ pub async fn install_or_repair_official_phpmyadmin(
                         "php-xml",
                         "php-zip",
                         "php-curl",
+                        "php-gd",
+                        "php-intl",
+                        "php-bz2",
                     ],
                     &noninteractive_env,
                     None,
@@ -1758,7 +1826,7 @@ fn render_official_pma_launcher_html(version: &str) -> String {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>__PMA_NAME__ &amp; FerrousAdmin — FerrousPanel</title>
+  <title>__PMA_NAME__ &amp; FPSql &amp; Database — FerrousPanel</title>
   <style>
     * { box-sizing: border-box; }
     body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:#090d16; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px; }
@@ -1778,11 +1846,11 @@ fn render_official_pma_launcher_html(version: &str) -> String {
 </head>
 <body>
   <div class="card">
-    <h1>Quản trị Cơ sở dữ liệu Kép (Dual-Mode)</h1>
+    <h1>FPSql &amp; Database (Dual-Mode SQL)</h1>
     <p>FerrousPanel hỗ trợ song song cả hai trình quản trị CSDL trên mọi tên miền và IP:</p>
     <ul style="color:#cbd5e1;font-size:13.5px;line-height:1.7;padding-left:18px;margin:0 0 16px;">
       <li><strong>__PMA_NAME__</strong> tại <code>/phpmyadmin/</code> (tải trực tiếp từ <code>phpmyadmin.net</code>)</li>
-      <li><strong>FerrousAdmin (Trang tuỳ chỉnh của Panel)</strong> tại <code>/phpadmin/</code> (100% Pure Rust, siêu tốc)</li>
+      <li><strong>FPSql &amp; Database (Pure-Rust SQL Studio)</strong> tại <code>/phpadmin/</code> (100% Pure Rust, siêu tốc)</li>
     </ul>
     <p style="margin-bottom:8px;">Hiện tại dịch vụ <code>__PMA_NAME__</code> chưa được kích hoạt trên máy chủ này. Bạn có thể bấm nút cài tự động bên dưới hoặc chạy lệnh cập nhật trên VPS:</p>
     <div class="code">sudo fp update</div>
@@ -1797,7 +1865,7 @@ fn render_official_pma_launcher_html(version: &str) -> String {
     </form>
     <div class="actions">
       <button type="button" class="btn btn-primary" id="btnInstallOfficial">Tải &amp; Kích hoạt __PMA_NAME__ ngay</button>
-      <a href="/phpadmin/" class="btn btn-blue">Mở Trang CSDL Tuỳ chỉnh của Panel (/phpadmin/) →</a>
+      <a href="/phpadmin/" class="btn btn-blue">Mở FPSql &amp; Database (/phpadmin/) →</a>
     </div>
   </div>
   <script>
@@ -2195,6 +2263,14 @@ pub async fn serve_official_phpmyadmin(
             .body("Myphpadmin worker timed out");
     }
 
+    if sso_authorized && state.config.is_production() && method != "GET" && method != "HEAD" {
+        crate::modules::databases::reconcile_live_mariadb_schemas_into_store(
+            &state.modules,
+            state.webserver.executor().as_ref(),
+        )
+        .await;
+    }
+
     let Some(hdr_end) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
         return HttpResponse::BadGateway()
             .content_type("text/plain; charset=utf-8")
@@ -2214,14 +2290,22 @@ pub async fn serve_official_phpmyadmin(
 
     let mut builder = HttpResponse::build(status_code);
     if let Some(tok) = verified_token {
-        if req.cookie(crate::auth::middleware::SESSION_COOKIE_NAME).is_none() && !tok.contains(';') {
-            builder.append_header((
-                "Set-Cookie",
-                format!(
-                    "{}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
-                    crate::auth::middleware::SESSION_COOKIE_NAME
-                ),
-            ));
+        if !tok.contains(';') {
+            if req.cookie(crate::auth::middleware::SESSION_COOKIE_NAME).is_none() {
+                builder.append_header((
+                    "Set-Cookie",
+                    format!(
+                        "{}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                        crate::auth::middleware::SESSION_COOKIE_NAME
+                    ),
+                ));
+            }
+            if req.cookie("fp_pma_sso").is_none() {
+                builder.append_header((
+                    "Set-Cookie",
+                    format!("fp_pma_sso={tok}; Path=/phpmyadmin; HttpOnly; SameSite=Lax; Max-Age=86400"),
+                ));
+            }
         }
     }
     let mut is_chunked = false;
@@ -2255,9 +2339,19 @@ pub async fn serve_official_phpmyadmin(
             continue;
         }
         if lower == "location" {
-            let rewritten = val_trim
+            let stripped = val_trim
                 .strip_prefix(&internal_origin)
                 .unwrap_or(val_trim);
+            let rewritten = if (stripped.starts_with("http://") || stripped.starts_with("https://"))
+                && stripped.contains("/phpmyadmin")
+            {
+                stripped
+                    .find("/phpmyadmin")
+                    .map(|idx| &stripped[idx..])
+                    .unwrap_or(stripped)
+            } else {
+                stripped
+            };
             builder.append_header((key_trim.to_string(), rewritten.to_string()));
             continue;
         }
@@ -2273,9 +2367,888 @@ pub async fn serve_official_phpmyadmin(
         raw_body.to_vec()
     };
 
-    // Inject a subtle quick-switch pill in HTML pages so users can switch to Panel's custom DB UI (/phpadmin/) anytime.
+    // Inject a subtle quick-switch pill in HTML pages so users can switch to Panel's custom FPSql & Database UI (/phpadmin/) anytime.
     if is_html && method != "HEAD" {
-        let badge = b"<a href=\"/phpadmin/\" style=\"position:fixed;bottom:12px;right:12px;z-index:99999;background:#0f172a;color:#fb923c;border:1px solid #f97316;padding:6px 12px;border-radius:999px;font:600 12px system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.35)\">\xE2\x87\x84 Trang CSDL Panel (/phpadmin/)</a></body>";
+        let badge = b"<a href=\"/phpadmin/\" style=\"position:fixed;bottom:12px;right:12px;z-index:99999;background:#0f172a;color:#fb923c;border:1px solid #f97316;padding:6px 12px;border-radius:999px;font:600 12px system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.35)\">\xE2\x87\x84 FPSql &amp; Database (/phpadmin/)</a></body>";
+        if let Some(pos) = decoded_body
+            .windows(7)
+            .rposition(|w| w.eq_ignore_ascii_case(b"</body>"))
+        {
+            decoded_body.splice(pos..pos + 7, badge.iter().copied());
+        }
+    }
+
+    builder.body(decoded_body)
+}
+
+// ============================================================================
+// Official pgAdmin 4 Clone, Auto-Sync & Reverse Proxy (/pgadmin/*)
+// ============================================================================
+
+pub const OFFICIAL_PGADMIN_REPO_DIR: &str = "/www/server/pgadmin";
+pub const OFFICIAL_PGADMIN_STATE_DIR: &str = "/var/lib/pgadmin";
+pub const OFFICIAL_PGADMIN_VENV_DIR: &str = "/var/lib/pgadmin/venv";
+pub const OFFICIAL_PGADMIN_UNIT_NAME: &str = "ferrous-pgadmin.service";
+pub const OFFICIAL_PGADMIN_UNIT_PATH: &str = "/etc/systemd/system/ferrous-pgadmin.service";
+pub const OFFICIAL_PGADMIN_PORT: u16 = 18890;
+pub const OFFICIAL_PGADMIN_DEFAULT_VERSION: &str = "8.14";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialPgAdminStatus {
+    pub installed: bool,
+    pub running: bool,
+    pub repo_cloned: bool,
+    pub version: String,
+    pub display_name: String,
+    pub install_dir: String,
+    pub pgadmin_url: String,
+    pub custom_panel_url: String,
+}
+
+fn detect_installed_pgadmin_version() -> String {
+    let ver_file = Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("version.txt");
+    if let Ok(raw) = std::fs::read_to_string(&ver_file) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    OFFICIAL_PGADMIN_DEFAULT_VERSION.to_string()
+}
+
+async fn is_official_pgadmin_port_open() -> bool {
+    tokio::time::timeout(
+        Duration::from_millis(250),
+        TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
+}
+
+pub async fn get_official_pgadmin_status() -> OfficialPgAdminStatus {
+    let venv_ready = Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file();
+    let repo_cloned = Path::new(OFFICIAL_PGADMIN_REPO_DIR).join(".git").is_dir()
+        || Path::new(OFFICIAL_PGADMIN_REPO_DIR).join("README.md").is_file();
+    let installed = venv_ready;
+    let running = if installed {
+        is_official_pgadmin_port_open().await
+    } else {
+        false
+    };
+    let version = detect_installed_pgadmin_version();
+    OfficialPgAdminStatus {
+        installed,
+        running,
+        repo_cloned,
+        display_name: format!("pgAdmin 4 ({version})"),
+        version,
+        install_dir: OFFICIAL_PGADMIN_REPO_DIR.to_string(),
+        pgadmin_url: "/pgadmin/".to_string(),
+        custom_panel_url: "/phpadmin/".to_string(),
+    }
+}
+
+fn render_pgadmin_config_local() -> &'static str {
+    r#"# Managed by FerrousPanel — Single-User SSO Mode behind Panel Session Guard
+SERVER_MODE = False
+MASTER_PASSWORD_REQUIRED = False
+UPGRADE_CHECK_ENABLED = False
+DEFAULT_SERVER = '127.0.0.1'
+DEFAULT_SERVER_PORT = 18890
+DATA_DIR = '/var/lib/pgadmin/data'
+LOG_FILE = '/var/lib/pgadmin/data/pgadmin4.log'
+SQLITE_PATH = '/var/lib/pgadmin/data/pgadmin4.db'
+SESSION_DB_PATH = '/var/lib/pgadmin/data/sessions'
+STORAGE_DIR = '/var/lib/pgadmin/data/storage'
+ENHANCED_COOKIE_PROTECTION = False
+WTF_CSRF_SSL_STRICT = False
+X_FRAME_OPTIONS = 'SAMEORIGIN'
+"#
+}
+
+fn render_pgadmin_servers_json() -> String {
+    format!(
+        r#"{{
+  "Servers": {{
+    "1": {{
+      "Name": "FPSql & Database — PostgreSQL 17 (Local)",
+      "Group": "Servers",
+      "Host": "127.0.0.1",
+      "Port": 5432,
+      "MaintenanceDB": "postgres",
+      "Username": "{user}",
+      "PassFile": "{pgpass}",
+      "SSLMode": "prefer"
+    }}
+  }}
+}}
+"#,
+        user = crate::modules::databases::PGADMIN_SSO_USER,
+        pgpass = crate::modules::databases::PGADMIN_PGPASS_FILE,
+    )
+}
+
+fn render_pgadmin_wsgi_py() -> &'static str {
+    r#"import os
+import sys
+
+sys.path.insert(0, '/var/lib/pgadmin')
+os.environ['SCRIPT_NAME'] = '/pgadmin'
+
+from pgadmin4.pgAdmin4 import app as _pgadmin_app
+
+def application(environ, start_response):
+    environ['SCRIPT_NAME'] = '/pgadmin'
+    path_info = environ.get('PATH_INFO', '/') or '/'
+    if path_info == '/pgadmin':
+        environ['PATH_INFO'] = '/'
+    elif path_info.startswith('/pgadmin/'):
+        stripped = path_info[len('/pgadmin'):]
+        environ['PATH_INFO'] = stripped if stripped else '/'
+    return _pgadmin_app(environ, start_response)
+"#
+}
+
+fn render_pgadmin_bootstrap_py() -> &'static str {
+    r#"import os
+import shutil
+import subprocess
+import sys
+
+sys.path.insert(0, '/var/lib/pgadmin')
+import pgadmin4
+
+pkg_dir = os.path.dirname(os.path.abspath(pgadmin4.__file__))
+src_cfg = '/var/lib/pgadmin/config_local.py'
+dst_cfg = os.path.join(pkg_dir, 'config_local.py')
+if os.path.isfile(src_cfg):
+    shutil.copyfile(src_cfg, dst_cfg)
+
+ver = getattr(pgadmin4, '__version__', '') or getattr(pgadmin4, 'APP_VERSION', '')
+if not ver:
+    try:
+        from importlib.metadata import version as meta_ver
+        ver = meta_ver('pgadmin4')
+    except Exception:
+        ver = '8.14'
+with open('/var/lib/pgadmin/version.txt', 'w', encoding='utf-8') as vf:
+    vf.write(str(ver).strip() + '\n')
+
+setup_py = os.path.join(pkg_dir, 'setup.py')
+servers_json = '/var/lib/pgadmin/servers.json'
+if os.path.isfile(setup_py) and os.path.isfile(servers_json):
+    env = os.environ.copy()
+    env['PYTHONPATH'] = '/var/lib/pgadmin'
+    subprocess.run(
+        [sys.executable, setup_py, 'load-servers', servers_json, '--replace'],
+        env=env,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+"#
+}
+
+fn render_pgadmin_systemd_unit() -> String {
+    format!(
+        "[Unit]\n\
+Description=FerrousPanel pgAdmin 4 Worker (127.0.0.1:{OFFICIAL_PGADMIN_PORT})\n\
+After=network.target postgresql.service\n\
+\n\
+[Service]\n\
+Type=simple\n\
+User=www-data\n\
+Group=www-data\n\
+WorkingDirectory={OFFICIAL_PGADMIN_STATE_DIR}\n\
+Environment=HOME={OFFICIAL_PGADMIN_STATE_DIR}\n\
+Environment=PYTHONPATH={OFFICIAL_PGADMIN_STATE_DIR}\n\
+Environment=SCRIPT_NAME=/pgadmin\n\
+Environment=PGPASSFILE={pgpass}\n\
+ExecStart=/var/lib/pgadmin/venv/bin/gunicorn --bind 127.0.0.1:{OFFICIAL_PGADMIN_PORT} --workers 1 --threads 8 --timeout 180 --chdir {OFFICIAL_PGADMIN_STATE_DIR} wsgi_pgadmin:application\n\
+Restart=always\n\
+RestartSec=3\n\
+NoNewPrivileges=true\n\
+PrivateTmp=true\n\
+\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        pgpass = crate::modules::databases::PGADMIN_PGPASS_FILE,
+    )
+}
+
+/// Clones `https://github.com/pgadmin-org/pgadmin4.git` into `/www/server/pgadmin`, installs the
+/// precompiled `pgadmin4` runtime into `/var/lib/pgadmin/venv`, auto-registers the local PostgreSQL
+/// cluster (`FPSql & Database — PostgreSQL 17`), and starts `ferrous-pgadmin.service` on `127.0.0.1:18890`.
+pub async fn install_or_repair_official_pgadmin(
+    executor: &dyn CommandExecutor,
+) -> Result<OfficialPgAdminStatus, PanelError> {
+    let apt_timeout = Duration::from_secs(300);
+    let pip_timeout = Duration::from_secs(480);
+    let noninteractive_env = [("DEBIAN_FRONTEND", "noninteractive")];
+
+    if executor.is_binary_available(AllowedBinary::AptGet) {
+        let need_apt = !executor.is_binary_available(AllowedBinary::Psql)
+            || !executor.is_binary_available(AllowedBinary::Python3)
+            || !Path::new("/usr/lib/python3/dist-packages/venv").exists()
+            || !Path::new("/var/lib/pgadmin/venv/bin/python3").is_file();
+        if need_apt {
+            let _ = executor
+                .run_with_env(
+                    AllowedBinary::AptGet,
+                    &["update", "-qq"],
+                    &noninteractive_env,
+                    None,
+                    apt_timeout,
+                )
+                .await;
+            let _ = executor
+                .run_with_env(
+                    AllowedBinary::AptGet,
+                    &[
+                        "install",
+                        "-y",
+                        "-qq",
+                        "-o",
+                        "Dpkg::Options::=--force-confdef",
+                        "-o",
+                        "Dpkg::Options::=--force-confold",
+                        "postgresql",
+                        "postgresql-client",
+                        "python3",
+                        "python3-venv",
+                        "python3-pip",
+                        "libpq-dev",
+                        "git",
+                    ],
+                    &noninteractive_env,
+                    None,
+                    apt_timeout,
+                )
+                .await;
+        }
+    }
+
+    if executor.is_binary_available(AllowedBinary::Systemctl) {
+        let _ = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["enable", "--now", "postgresql"],
+                Duration::from_secs(20),
+            )
+            .await;
+    }
+
+    if !executor.is_binary_available(AllowedBinary::Python3) {
+        return Err(PanelError::Conflict(
+            "Chưa tìm thấy python3 trên máy chủ — hãy chạy: sudo apt install -y python3 python3-venv postgresql".to_string(),
+        ));
+    }
+
+    // 1. Clone upstream pgAdmin 4 repository into /www/server/pgadmin (shallow clone).
+    std::fs::create_dir_all("/www/server")?;
+    set_dir_mode("/www", 0o755);
+    set_dir_mode("/www/server", 0o755);
+    let repo_dir = Path::new(OFFICIAL_PGADMIN_REPO_DIR);
+    if !repo_dir.join(".git").is_dir() && executor.is_binary_available(AllowedBinary::Git) {
+        let _ = std::fs::remove_dir_all(repo_dir);
+        let _ = executor
+            .run(
+                AllowedBinary::Git,
+                &[
+                    "clone",
+                    "--depth",
+                    "1",
+                    "https://github.com/pgadmin-org/pgadmin4.git",
+                    OFFICIAL_PGADMIN_REPO_DIR,
+                ],
+                Duration::from_secs(180),
+            )
+            .await;
+    }
+
+    // 2. Create isolated virtualenv /var/lib/pgadmin/venv and install prebuilt pgadmin4 + gunicorn wheels.
+    std::fs::create_dir_all("/var/lib/pgadmin/data/sessions")?;
+    std::fs::create_dir_all("/var/lib/pgadmin/data/storage")?;
+    set_dir_mode(OFFICIAL_PGADMIN_STATE_DIR, 0o755);
+
+    if !Path::new("/var/lib/pgadmin/venv/bin/python3").is_file() {
+        let venv_out = executor
+            .run(
+                AllowedBinary::Python3,
+                &["-m", "venv", OFFICIAL_PGADMIN_VENV_DIR],
+                Duration::from_secs(90),
+            )
+            .await?;
+        if !venv_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: AllowedBinary::Python3.label(),
+                exit_code: venv_out.exit_code,
+                stderr: venv_out.stderr,
+            });
+        }
+    }
+
+    if !Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+        || !Path::new("/var/lib/pgadmin/version.txt").is_file()
+    {
+        let pip_out = executor
+            .run(
+                AllowedBinary::PgAdminPython,
+                &[
+                    "-m",
+                    "pip",
+                    "install",
+                    "--quiet",
+                    "--upgrade",
+                    "pip",
+                    "wheel",
+                    "gunicorn",
+                    "pgadmin4",
+                ],
+                pip_timeout,
+            )
+            .await?;
+        if !pip_out.success {
+            return Err(PanelError::CommandFailed {
+                binary: AllowedBinary::PgAdminPython.label(),
+                exit_code: pip_out.exit_code,
+                stderr: pip_out.stderr,
+            });
+        }
+    }
+
+    // 3. Provision PostgreSQL SSO account + pgpass + pgAdmin config_local.py + servers.json.
+    let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(executor).await;
+    atomic_write_file(
+        &Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("config_local.py"),
+        render_pgadmin_config_local().as_bytes(),
+        0o644,
+    )?;
+    atomic_write_file(
+        &Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("servers.json"),
+        render_pgadmin_servers_json().as_bytes(),
+        0o640,
+    )?;
+    atomic_write_file(
+        &Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("wsgi_pgadmin.py"),
+        render_pgadmin_wsgi_py().as_bytes(),
+        0o644,
+    )?;
+    let bootstrap_path = Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("bootstrap_pgadmin.py");
+    atomic_write_file(&bootstrap_path, render_pgadmin_bootstrap_py().as_bytes(), 0o644)?;
+
+    let _ = executor
+        .run(
+            AllowedBinary::PgAdminPython,
+            &["/var/lib/pgadmin/bootstrap_pgadmin.py"],
+            Duration::from_secs(60),
+        )
+        .await;
+
+    if executor.is_binary_available(AllowedBinary::Chown) {
+        let _ = executor
+            .run(
+                AllowedBinary::Chown,
+                &["-R", "www-data:www-data", OFFICIAL_PGADMIN_STATE_DIR],
+                Duration::from_secs(20),
+            )
+            .await;
+    }
+    set_dir_mode(crate::modules::databases::PGADMIN_PGPASS_FILE, 0o600);
+    set_dir_mode(crate::modules::databases::PGADMIN_SSO_PASS_FILE, 0o600);
+
+    atomic_write_file(
+        Path::new(OFFICIAL_PGADMIN_UNIT_PATH),
+        render_pgadmin_systemd_unit().as_bytes(),
+        0o644,
+    )?;
+
+    if executor.is_binary_available(AllowedBinary::Systemctl) {
+        let _ = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["daemon-reload"],
+                Duration::from_secs(15),
+            )
+            .await;
+        let _ = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["enable", OFFICIAL_PGADMIN_UNIT_NAME],
+                Duration::from_secs(15),
+            )
+            .await;
+        let restart_out = executor
+            .run(
+                AllowedBinary::Systemctl,
+                &["restart", OFFICIAL_PGADMIN_UNIT_NAME],
+                Duration::from_secs(25),
+            )
+            .await?;
+        if !restart_out.success {
+            return Err(PanelError::BadGateway(format!(
+                "Không thể khởi chạy {OFFICIAL_PGADMIN_UNIT_NAME}: {}",
+                restart_out.stderr.trim()
+            )));
+        }
+    }
+
+    for _ in 0..40 {
+        if is_official_pgadmin_port_open().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    let status = get_official_pgadmin_status().await;
+    if !status.running && executor.is_binary_available(AllowedBinary::Journalctl) {
+        let detail = executor
+            .run(
+                AllowedBinary::Journalctl,
+                &["-u", OFFICIAL_PGADMIN_UNIT_NAME, "-n", "15", "--no-pager"],
+                Duration::from_secs(5),
+            )
+            .await
+            .map(|o| o.stdout)
+            .unwrap_or_default();
+        return Err(PanelError::BadGateway(format!(
+            "Dịch vụ {} ({}) đã cài đặt nhưng chưa mở cổng 127.0.0.1:{OFFICIAL_PGADMIN_PORT}. Nhật ký: {}",
+            status.display_name,
+            OFFICIAL_PGADMIN_UNIT_NAME,
+            detail.trim()
+        )));
+    }
+
+    Ok(status)
+}
+
+pub async fn redirect_pgadmin_slash(req: HttpRequest) -> HttpResponse {
+    let qs = req.query_string();
+    let loc = if qs.is_empty() {
+        "/pgadmin/".to_string()
+    } else {
+        format!("/pgadmin/?{qs}")
+    };
+    HttpResponse::Found()
+        .insert_header(("Location", loc))
+        .insert_header(("Cache-Control", "no-store"))
+        .finish()
+}
+
+fn render_official_pgadmin_launcher_html(version: &str, require_login_only: bool) -> String {
+    let display = format!("pgAdmin 4 ({version})");
+    let template = r##"<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>__PGA_NAME__ &amp; FPSql &amp; Database — FerrousPanel</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,sans-serif; background:#090d16; color:#e2e8f0; display:flex; align-items:center; justify-content:center; min-height:100vh; padding:20px; }
+    .card { max-width:600px; width:100%; background:#111827; border:1px solid #1e293b; border-radius:14px; padding:26px; box-shadow:0 24px 48px rgba(0,0,0,.45); }
+    h1 { margin:0 0 8px; font-size:20px; }
+    p { margin:0 0 16px; color:#94a3b8; font-size:14px; line-height:1.55; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding:10px 16px; border-radius:9px; font-weight:600; font-size:13px; text-decoration:none; cursor:pointer; border:1px solid #334155; background:#1e293b; color:#e2e8f0; }
+    .btn-primary { background:#f97316; border-color:#ea580c; color:#fff; }
+    .btn-blue { background:rgba(59,130,246,.18); border-color:rgba(59,130,246,.45); color:#93c5fd; }
+    .auth-box { margin-top:14px; padding:14px; border-radius:10px; background:#0b1220; border:1px solid #1e293b; }
+    .auth-box input { width:100%; margin:6px 0 10px; padding:9px 11px; border-radius:8px; border:1px solid #334155; background:#020617; color:#e2e8f0; font-size:13px; }
+    .auth-box label { font-size:12px; color:#94a3b8; display:block; }
+    #msg { margin-top:14px; font-size:13px; display:none; padding:10px 12px; border-radius:8px; white-space:pre-wrap; word-break:break-word; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>PostgreSQL Studio — __PGA_NAME__ &amp; FPSql</h1>
+    <p>Dành cho Website &amp; Ứng dụng sử dụng <strong>PostgreSQL</strong>: tự động clone <code>pgadmin4</code> về máy chủ, tự động kết nối SSO tới PostgreSQL cục bộ và đồng bộ dữ liệu 2 chiều với <strong>FPSql &amp; Database</strong>.</p>
+    <div id="msg"></div>
+    <form id="inlineAuthBox" class="auth-box" style="display:__AUTH_DISPLAY__;">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;color:#fb923c;">Đăng nhập Quản trị FerrousPanel để mở __PGA_NAME__</div>
+      <label for="fpUser">Tài khoản Panel / Username</label>
+      <input id="fpUser" type="text" value="admin_ferrous" required autocomplete="username" />
+      <label for="fpPass">Mật khẩu / Password</label>
+      <input id="fpPass" type="password" required autocomplete="current-password" />
+      <button type="submit" class="btn btn-primary" id="btnAuthAndOpen">Đăng nhập &amp; Mở __PGA_NAME__</button>
+    </form>
+    <div class="actions">
+      <button type="button" class="btn btn-primary" id="btnInstallPgAdmin" style="display:__INSTALL_DISPLAY__;">Clone &amp; Kích hoạt __PGA_NAME__ (1-Click)</button>
+      <a href="/phpadmin/" class="btn btn-blue">Mở FPSql &amp; Database (/phpadmin/) →</a>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const requireLoginOnly = __LOGIN_ONLY__;
+      const apiBase = window.location.pathname.startsWith('/pgadmin') ? '/pgadmin/api' : '/api';
+      const btn = document.getElementById('btnInstallPgAdmin');
+      const msg = document.getElementById('msg');
+      const authBox = document.getElementById('inlineAuthBox');
+
+      function showMsg(text, kind) {
+        msg.style.display = 'block';
+        msg.style.background = kind === 'ok' ? 'rgba(16,185,129,.16)' : (kind === 'err' ? 'rgba(239,68,68,.16)' : 'rgba(59,130,246,.14)');
+        msg.style.color = kind === 'ok' ? '#6ee7b7' : (kind === 'err' ? '#fca5a5' : '#93c5fd');
+        msg.textContent = text;
+      }
+
+      async function runInstall(explicitToken) {
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'Đang clone & khởi chạy __PGA_NAME__…';
+        }
+        showMsg('Đang clone pgAdmin 4 & cấu hình đồng bộ PostgreSQL (khoảng 30–90 giây lần đầu)…', 'info');
+        try {
+          const tok = explicitToken || sessionStorage.getItem('fp_pma_token') || sessionStorage.getItem('fp_session_token') || localStorage.getItem('fp_session_token') || '';
+          const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' };
+          if (tok) headers['Authorization'] = 'Bearer ' + tok;
+          const resp = await fetch(apiBase + '/databases/pgadmin/install', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers,
+            body: '{}'
+          });
+          const data = await resp.json().catch(() => ({}));
+          if (resp.status === 401 || resp.status === 403) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Clone & Kích hoạt __PGA_NAME__ (1-Click)'; }
+            authBox.style.display = 'block';
+            showMsg('Vui lòng đăng nhập tài khoản quản trị Panel để kích hoạt __PGA_NAME__.', 'info');
+            return;
+          }
+          if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status + ' — Cài đặt thất bại.'));
+          showMsg('Đã kích hoạt ' + (data.displayName || '__PGA_NAME__') + '! Đang mở…', 'ok');
+          const nextUrl = tok ? ('/pgadmin/?fp_sso=' + encodeURIComponent(tok)) : '/pgadmin/';
+          setTimeout(() => { window.location.href = nextUrl; }, 500);
+        } catch (e) {
+          if (btn) { btn.disabled = false; btn.textContent = 'Thử kích hoạt lại'; }
+          showMsg(e.message || 'Không thể cài đặt __PGA_NAME__.', 'err');
+        }
+      }
+
+      if (btn) btn.addEventListener('click', () => runInstall(''));
+
+      authBox.addEventListener('submit', async function (ev) {
+        ev.preventDefault();
+        const sub = document.getElementById('btnAuthAndOpen');
+        sub.disabled = true;
+        try {
+          const r = await fetch(apiBase + '/auth/login', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'FerrousPanel-UI' },
+            body: JSON.stringify({
+              username: document.getElementById('fpUser').value.trim(),
+              password: document.getElementById('fpPass').value,
+              rememberMe: false
+            })
+          });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || !d.token) throw new Error(d.error || 'Sai tài khoản hoặc mật khẩu.');
+          sessionStorage.setItem('fp_pma_token', d.token);
+          if (requireLoginOnly) {
+            window.location.href = '/pgadmin/?fp_sso=' + encodeURIComponent(d.token);
+            return;
+          }
+          authBox.style.display = 'none';
+          await runInstall(d.token);
+        } catch (e) {
+          showMsg(e.message || 'Đăng nhập thất bại.', 'err');
+        } finally {
+          sub.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>"##;
+    template
+        .replace("__PGA_NAME__", &display)
+        .replace(
+            "__AUTH_DISPLAY__",
+            if require_login_only { "block" } else { "none" },
+        )
+        .replace(
+            "__INSTALL_DISPLAY__",
+            if require_login_only { "none" } else { "inline-flex" },
+        )
+        .replace(
+            "__LOGIN_ONLY__",
+            if require_login_only { "true" } else { "false" },
+        )
+}
+
+fn verify_panel_session_for_pgadmin(req: &HttpRequest, state: &AppState) -> (bool, Option<String>) {
+    if let Some(c) = req.cookie("fp_pgadmin_sso") {
+        let tok = c.value().trim().to_string();
+        if !tok.is_empty()
+            && state
+                .auth_store
+                .verify_session(&tok)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return (true, Some(tok));
+        }
+    }
+    verify_panel_session_for_pma(req, state)
+}
+
+/// Reverse-proxies `/pgadmin/*` to the local `ferrous-pgadmin.service` worker (`127.0.0.1:18890`),
+/// enforcing FerrousPanel session SSO and keeping PostgreSQL databases synchronized 2-way with `FPSql & Database`.
+pub async fn serve_official_pgadmin(
+    req: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let mut stream_opt = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT))
+        .await
+        .ok();
+
+    if stream_opt.is_none()
+        && state.config.is_production()
+        && Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+        && state
+            .webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Systemctl)
+    {
+        let _ = state
+            .webserver
+            .executor()
+            .run(
+                AllowedBinary::Systemctl,
+                &["restart", OFFICIAL_PGADMIN_UNIT_NAME],
+                Duration::from_secs(12),
+            )
+            .await;
+        for _ in 0..16 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT)).await {
+                stream_opt = Some(s);
+                break;
+            }
+        }
+    }
+
+    let ver = detect_installed_pgadmin_version();
+    let Some(mut stream) = stream_opt else {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(render_official_pgadmin_launcher_html(&ver, false));
+    };
+
+    let (sso_authorized, verified_token) = verify_panel_session_for_pgadmin(&req, &state);
+    if !sso_authorized {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(render_official_pgadmin_launcher_html(&ver, true));
+    }
+
+    let method = req.method().as_str();
+    let path = req.uri().path();
+    if state.config.is_production()
+        && (path == "/pgadmin/"
+            || path == "/pgadmin/browser/"
+            || (method != "GET" && method != "HEAD"))
+    {
+        let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(
+            state.webserver.executor().as_ref(),
+        )
+        .await;
+        crate::modules::databases::reconcile_live_postgres_databases_into_store(
+            &state.modules,
+            state.webserver.executor().as_ref(),
+        )
+        .await;
+    }
+
+    let cleaned_query = req
+        .uri()
+        .query()
+        .map(strip_fp_sso_from_query)
+        .unwrap_or_default();
+    let target_uri = if !cleaned_query.is_empty() {
+        format!("{path}?{cleaned_query}")
+    } else {
+        path.to_string()
+    };
+
+    let (host, scheme) = {
+        let conn_info = req.connection_info();
+        let fwd_proto = req
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.split(',').next())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        (
+            conn_info.host().to_string(),
+            fwd_proto.unwrap_or_else(|| conn_info.scheme().to_string()),
+        )
+    };
+
+    let mut raw_req = Vec::with_capacity(512 + body.len());
+    raw_req.extend_from_slice(format!("{method} {target_uri} HTTP/1.1\r\n").as_bytes());
+    raw_req.extend_from_slice(format!("Host: {host}\r\n").as_bytes());
+    raw_req.extend_from_slice(b"Connection: close\r\n");
+    raw_req.extend_from_slice(b"X-Script-Name: /pgadmin\r\n");
+    raw_req.extend_from_slice(b"X-Forwarded-Prefix: /pgadmin\r\n");
+    raw_req.extend_from_slice(format!("X-Scheme: {scheme}\r\n").as_bytes());
+    raw_req.extend_from_slice(format!("X-Forwarded-Proto: {scheme}\r\n").as_bytes());
+    raw_req.extend_from_slice(format!("X-Forwarded-Host: {host}\r\n").as_bytes());
+
+    for (hname, hval) in req.headers() {
+        let lower = hname.as_str().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "host"
+                | "connection"
+                | "transfer-encoding"
+                | "content-length"
+                | "accept-encoding"
+                | "x-script-name"
+                | "x-forwarded-prefix"
+                | "x-scheme"
+                | "x-forwarded-host"
+                | "x-forwarded-proto"
+        ) {
+            continue;
+        }
+        if let Ok(v) = hval.to_str() {
+            if !v.contains('\r') && !v.contains('\n') {
+                raw_req.extend_from_slice(format!("{}: {v}\r\n", hname.as_str()).as_bytes());
+            }
+        }
+    }
+    raw_req.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
+    raw_req.extend_from_slice(&body);
+
+    if tokio::time::timeout(Duration::from_secs(60), stream.write_all(&raw_req))
+        .await
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .is_err()
+    {
+        return HttpResponse::BadGateway()
+            .content_type("text/plain; charset=utf-8")
+            .body("Failed to forward request to pgAdmin worker");
+    }
+
+    let mut resp_bytes = Vec::with_capacity(16 * 1024);
+    if tokio::time::timeout(Duration::from_secs(120), stream.read_to_end(&mut resp_bytes))
+        .await
+        .map_err(|_| ())
+        .and_then(|r| r.map_err(|_| ()))
+        .is_err()
+    {
+        return HttpResponse::GatewayTimeout()
+            .content_type("text/plain; charset=utf-8")
+            .body("pgAdmin worker timed out");
+    }
+
+    if state.config.is_production() && method != "GET" && method != "HEAD" {
+        crate::modules::databases::reconcile_live_postgres_databases_into_store(
+            &state.modules,
+            state.webserver.executor().as_ref(),
+        )
+        .await;
+    }
+
+    let Some(hdr_end) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return HttpResponse::BadGateway()
+            .content_type("text/plain; charset=utf-8")
+            .body("Invalid upstream response from pgAdmin worker");
+    };
+
+    let header_text = String::from_utf8_lossy(&resp_bytes[..hdr_end]);
+    let raw_body = &resp_bytes[hdr_end + 4..];
+    let mut lines = header_text.split("\r\n");
+    let status_line = lines.next().unwrap_or("HTTP/1.1 200 OK");
+    let status_code = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .and_then(|c| StatusCode::from_u16(c).ok())
+        .unwrap_or(StatusCode::OK);
+
+    let mut builder = HttpResponse::build(status_code);
+    if let Some(tok) = verified_token {
+        if !tok.contains(';') && req.cookie("fp_pgadmin_sso").is_none() {
+            builder.append_header((
+                "Set-Cookie",
+                format!("fp_pgadmin_sso={tok}; Path=/pgadmin; HttpOnly; SameSite=Lax; Max-Age=86400"),
+            ));
+        }
+    }
+
+    let mut is_chunked = false;
+    let mut is_html = false;
+    let internal_origin = format!("http://127.0.0.1:{OFFICIAL_PGADMIN_PORT}");
+
+    for line in lines {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let key_trim = k.trim();
+        let val_trim = v.trim();
+        let lower = key_trim.to_ascii_lowercase();
+        if lower == "transfer-encoding" && val_trim.to_ascii_lowercase().contains("chunked") {
+            is_chunked = true;
+            continue;
+        }
+        if matches!(
+            lower.as_str(),
+            "connection" | "content-length" | "transfer-encoding" | "keep-alive"
+        ) {
+            continue;
+        }
+        if lower == "x-frame-options" {
+            builder.insert_header(("X-Frame-Options", "SAMEORIGIN"));
+            continue;
+        }
+        if lower == "content-security-policy" {
+            let rewritten = val_trim.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+            builder.append_header((key_trim.to_string(), rewritten));
+            continue;
+        }
+        if lower == "location" {
+            let stripped = val_trim
+                .strip_prefix(&internal_origin)
+                .unwrap_or(val_trim);
+            let rewritten = if (stripped.starts_with("http://") || stripped.starts_with("https://"))
+                && stripped.contains("/pgadmin")
+            {
+                stripped
+                    .find("/pgadmin")
+                    .map(|idx| &stripped[idx..])
+                    .unwrap_or(stripped)
+            } else {
+                stripped
+            };
+            builder.append_header((key_trim.to_string(), rewritten.to_string()));
+            continue;
+        }
+        if lower == "content-type" && val_trim.to_ascii_lowercase().contains("text/html") {
+            is_html = true;
+        }
+        builder.append_header((key_trim.to_string(), val_trim.to_string()));
+    }
+
+    let mut decoded_body = if is_chunked {
+        decode_chunked_body(raw_body)
+    } else {
+        raw_body.to_vec()
+    };
+
+    if is_html && method != "HEAD" {
+        let badge = b"<a href=\"/phpadmin/\" style=\"position:fixed;bottom:12px;right:12px;z-index:99999;background:#0f172a;color:#fb923c;border:1px solid #f97316;padding:6px 12px;border-radius:999px;font:600 12px system-ui,sans-serif;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.35)\">\xE2\x87\x84 FPSql &amp; Database (/phpadmin/)</a></body>";
         if let Some(pos) = decoded_body
             .windows(7)
             .rposition(|w| w.eq_ignore_ascii_case(b"</body>"))

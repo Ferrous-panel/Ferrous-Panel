@@ -614,6 +614,7 @@ fn pure_rust_native_panel_ui_serves_without_nodejs_dist() -> Result<()> {
             ("/ui/panel.css", "text/css"),
             ("/ui/favicon.svg", "image/svg+xml"),
             ("/ui/app.js", "application/javascript"),
+            ("/ui/i18n.js", "application/javascript"),
             ("/ui/views-core.js", "application/javascript"),
             ("/ui/views-infra.js", "application/javascript"),
             ("/ui/views-security.js", "application/javascript"),
@@ -635,6 +636,35 @@ fn pure_rust_native_panel_ui_serves_without_nodejs_dist() -> Result<()> {
             let body = read_body_bytes(resp.into_body()).await?;
             ensure(!body.is_empty(), &format!("empty asset body for {asset_path}"))?;
         }
+
+        // Default landing index.html & new site welcome page helpers generate clean bilingual HTML
+        let test_wwwroot = ws.path().join("wwwroot");
+        ferrous_panel::modules::default_pages::ensure_system_default_landing_pages(&test_wwwroot);
+        let default_idx = test_wwwroot.join("index.html");
+        ensure(
+            default_idx.is_file(),
+            "expected default index.html to be provisioned in wwwroot",
+        )?;
+        let default_html = std::fs::read_to_string(&default_idx)?;
+        ensure(
+            default_html.contains("FerrousPanel-Managed-Default-Index")
+                && default_html.contains("{{HOST}}"),
+            "expected managed marker and {{HOST}} placeholder in default landing index.html",
+        )?;
+        let sample_site_dir = test_wwwroot.join("demo.example.com");
+        std::fs::create_dir_all(&sample_site_dir)?;
+        ferrous_panel::modules::default_pages::ensure_new_site_welcome_index(
+            &sample_site_dir,
+            "demo.example.com",
+            "Static HTML",
+            false,
+        );
+        let site_welcome = std::fs::read_to_string(sample_site_dir.join("index.html"))?;
+        ensure(
+            site_welcome.contains("demo.example.com")
+                && site_welcome.contains("FerrousPanel-Managed-Site-Placeholder"),
+            "expected site placeholder HTML for newly created empty website",
+        )?;
 
         // Unknown asset under /ui/* must return 404 (no HTML fallback)
         let missing = TestRequest::get().uri("/ui/does-not-exist.js").to_request();
@@ -658,7 +688,7 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
         let (_cfg, state, password) = setup_test_state(&ws)?;
         let app = init_service(App::new().configure(move |cfg| configure_app(cfg, state))).await;
 
-        // 1. /phpadmin/ serves Pure-Rust FerrousAdmin with switcher to /phpmyadmin/
+        // 1. /phpadmin/ serves Pure-Rust FPSql & Database (FerrousAdmin) with switchers to /phpmyadmin/ and /pgadmin/
         let custom_req = TestRequest::get().uri("/phpadmin/").to_request();
         let custom_resp = try_call_service(&app, custom_req)
             .await
@@ -667,8 +697,11 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
         let custom_html =
             String::from_utf8_lossy(&read_body_bytes(custom_resp.into_body()).await?).to_string();
         ensure(
-            custom_html.contains("FerrousAdmin") && custom_html.contains("/phpmyadmin/"),
-            "expected /phpadmin/ to render FerrousAdmin with switcher link to /phpmyadmin/",
+            custom_html.contains("FerrousAdmin")
+                && custom_html.contains("FPSql &amp; Database")
+                && custom_html.contains("/phpmyadmin/")
+                && custom_html.contains("/pgadmin/"),
+            "expected /phpadmin/ to render FPSql & Database with switcher links to /phpmyadmin/ and /pgadmin/",
         )?;
 
         // 2. /phpmyadmin redirects (302) to /phpmyadmin/
@@ -708,7 +741,7 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
             )?;
         }
 
-        // 4. Authenticated GET /api/databases/phpmyadmin/status returns dual-mode URLs & Myphpadmin <Version> displayName
+        // 4. Authenticated GET /api/databases/phpmyadmin/status & /api/databases/pgadmin/status + /pgadmin routes
         let login_req = TestRequest::post()
             .uri("/api/auth/login")
             .set_json(json!({
@@ -756,6 +789,75 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
                 .map(|s| s.starts_with("Myphpadmin "))
                 .unwrap_or(false),
             "expected displayName to start with 'Myphpadmin '",
+        )?;
+
+        // 5. /pgadmin redirects (302) to /pgadmin/, /pgadmin/ renders SSO launcher/proxy, and /api/databases/pgadmin/status returns pgAdmin 4 metadata
+        let pga_redir_req = TestRequest::get()
+            .uri("/pgadmin")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let pga_redir_resp = try_call_service(&app, pga_redir_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /pgadmin failed: {e}"))?;
+        ensure_eq(&pga_redir_resp.status(), &StatusCode::FOUND, "/pgadmin redirect")?;
+        let pga_loc = pga_redir_resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ensure_eq(&pga_loc, &"/pgadmin/", "/pgadmin Location header")?;
+
+        let pga_ui_req = TestRequest::get()
+            .uri("/pgadmin/")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let pga_ui_resp = try_call_service(&app, pga_ui_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /pgadmin/ failed: {e}"))?;
+        ensure(
+            pga_ui_resp.status().is_success() || pga_ui_resp.status().is_redirection(),
+            "expected /pgadmin/ to respond with 2xx or 3xx",
+        )?;
+        if pga_ui_resp.status() == StatusCode::OK {
+            let pga_html =
+                String::from_utf8_lossy(&read_body_bytes(pga_ui_resp.into_body()).await?)
+                    .to_string();
+            ensure(
+                pga_html.contains("pgAdmin") && pga_html.contains("/phpadmin/"),
+                "expected /pgadmin/ launcher to reference pgAdmin and /phpadmin/",
+            )?;
+        }
+
+        let pga_status_req = TestRequest::get()
+            .uri("/api/databases/pgadmin/status")
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let pga_status_resp = try_call_service(&app, pga_status_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("GET /api/databases/pgadmin/status failed: {e}"))?;
+        ensure_eq(
+            &pga_status_resp.status(),
+            &StatusCode::OK,
+            "pgadmin status HTTP code",
+        )?;
+        let pga_json: Value =
+            serde_json::from_slice(&read_body_bytes(pga_status_resp.into_body()).await?)?;
+        ensure_eq(
+            &pga_json["pgadminUrl"].as_str(),
+            &Some("/pgadmin/"),
+            "pgadminUrl",
+        )?;
+        ensure_eq(
+            &pga_json["customPanelUrl"].as_str(),
+            &Some("/phpadmin/"),
+            "pgadmin customPanelUrl",
+        )?;
+        ensure(
+            pga_json["displayName"]
+                .as_str()
+                .map(|s| s.starts_with("pgAdmin"))
+                .unwrap_or(false),
+            "expected pgAdmin displayName to start with 'pgAdmin'",
         )?;
 
         Ok(())

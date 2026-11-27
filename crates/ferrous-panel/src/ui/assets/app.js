@@ -1,7 +1,10 @@
 // FerrousPanel Pure-Rust Native Frontend Core (Zero Node.js)
+import { getLang, setLang, isEn, t, translateString, translateDomSubtree, installDomTranslator } from './i18n.js';
 import { renderOverview, renderApps, renderFiles, renderDatabases } from './views-core.js';
 import { renderWebserver, renderPhpSoftware, renderCpanel, renderMail, renderEdgePolyglot } from './views-infra.js';
 import { renderSecurity, renderOptimizer, renderSsh, renderSettingsJobs, renderSysops } from './views-security.js';
+
+export { getLang, isEn, t };
 
 const TOKEN_KEY = 'fp_session_token';
 const THEME_KEY = 'fp_theme';
@@ -75,7 +78,7 @@ export function fmtTime(iso) {
   if (!iso) return '—';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso);
-  return d.toLocaleString('vi-VN', { hour12: false });
+  return d.toLocaleString(isEn() ? 'en-GB' : 'vi-VN', { hour12: false });
 }
 
 export function statusClass(status) {
@@ -252,12 +255,12 @@ export function toast(message, kind = 'ok') {
   while (root.children.length >= 3) {
     root.firstElementChild?.remove();
   }
-  const raw = String(message ?? '').trim();
+  const raw = translateString(String(message ?? '').trim());
   const display = raw.length > 320 ? `${raw.slice(0, 320)}…` : raw;
   const el = document.createElement('div');
   el.className = `toast ${kind === 'err' ? 'err' : 'ok'}`;
   el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
-  el.innerHTML = `<div class="toast-msg">${esc(display)}</div><button type="button" class="toast-close" aria-label="Đóng thông báo">×</button>`;
+  el.innerHTML = `<div class="toast-msg">${esc(display)}</div><button type="button" class="toast-close" aria-label="${esc(t('Đóng thông báo', 'Dismiss'))}">×</button>`;
   const removeToast = () => {
     el.remove();
   };
@@ -278,13 +281,14 @@ export function openModal(title, bodyHtml, { large = false, onMount } = {}) {
     <div class="backdrop" id="fp-modal-backdrop">
       <div class="modal ${large ? 'modal-lg' : ''}" role="dialog" aria-modal="true">
         <div class="modal-head">
-          <h3 class="modal-title">${esc(title)}</h3>
-          <button type="button" class="btn btn-sm" id="fp-modal-close">Đóng</button>
+          <h3 class="modal-title">${esc(translateString(title))}</h3>
+          <button type="button" class="btn btn-sm" id="fp-modal-close">${esc(t('Đóng', 'Close'))}</button>
         </div>
         <div id="fp-modal-body">${bodyHtml}</div>
       </div>
     </div>
   `;
+  if (isEn()) translateDomSubtree(root);
   const backdrop = document.getElementById('fp-modal-backdrop');
   const closeBtn = document.getElementById('fp-modal-close');
   closeBtn?.addEventListener('click', closeModal);
@@ -296,10 +300,10 @@ export function openModal(title, bodyHtml, { large = false, onMount } = {}) {
 
 export function confirmAction(title, message, onConfirm, danger = true) {
   openModal(title, `
-    <p class="page-desc" style="margin-bottom:18px;color:var(--text-secondary)">${esc(message)}</p>
+    <p class="page-desc" style="margin-bottom:18px;color:var(--text-secondary)">${esc(translateString(message))}</p>
     <div class="row" style="justify-content:flex-end">
-      <button type="button" class="btn" id="fp-confirm-cancel">Hủy</button>
-      <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="fp-confirm-ok">Xác nhận</button>
+      <button type="button" class="btn" id="fp-confirm-cancel">${esc(t('Hủy', 'Cancel'))}</button>
+      <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="fp-confirm-ok">${esc(t('Xác nhận', 'Confirm'))}</button>
     </div>
   `, {
     onMount(body) {
@@ -615,11 +619,21 @@ function applyTheme(theme) {
 function toggleTheme() {
   const next = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
   applyTheme(next);
-  const label = next === 'dark' ? 'Giao diện sáng' : 'Giao diện tối';
+  const label = next === 'dark' ? t('Giao diện sáng', 'Light Theme') : t('Giao diện tối', 'Dark Theme');
   const btn = document.getElementById('theme-toggle-btn');
   if (btn) btn.textContent = label;
   const mobBtn = document.getElementById('sidebar-theme-btn');
   if (mobBtn) mobBtn.textContent = label;
+}
+
+export function toggleLanguage() {
+  const next = getLang() === 'en' ? 'vi' : 'en';
+  setLang(next);
+  if (state.user) {
+    renderShell();
+  } else {
+    renderLogin();
+  }
 }
 
 const NAV_GROUPS = [
@@ -629,7 +643,7 @@ const NAV_GROUPS = [
       { id: 'overview', label: 'Tổng quan hệ thống' },
       { id: 'apps', label: 'Website & Ứng dụng' },
       { id: 'files', label: 'Quản lý Tệp' },
-      { id: 'databases', label: 'Cơ sở dữ liệu SQL' },
+      { id: 'databases', label: 'FPSql & Database' },
     ],
   },
   {
@@ -681,7 +695,7 @@ function updateShellChrome() {
     btn.classList.toggle('active', btn.dataset.route === state.route);
   });
   const bc = document.getElementById('topbar-breadcrumb-curr');
-  if (bc) bc.textContent = ROUTE_TITLES[state.route] || 'Tổng quan hệ thống';
+  if (bc) bc.textContent = translateString(ROUTE_TITLES[state.route] || 'Tổng quan hệ thống');
   const sidebar = document.getElementById('fp-sidebar');
   if (sidebar) sidebar.classList.toggle('open', state.mobileNavOpen);
   const backdrop = document.getElementById('fp-sidebar-backdrop');
@@ -868,15 +882,17 @@ function renderShell() {
   const root = document.getElementById('app');
   if (!root) return;
   const isDark = document.documentElement.classList.contains('dark');
+  const langBtnLabel = isEn() ? 'VI · Tiếng Việt' : 'EN · English';
+  const langCompactLabel = isEn() ? 'VI' : 'EN';
   const navHtml = NAV_GROUPS.map(
     (g) => `
       <div>
-        <div class="nav-group-label">${esc(g.label)}</div>
+        <div class="nav-group-label">${esc(translateString(g.label))}</div>
         <div class="nav-list">
           ${g.items
             .map(
               (it) => `<button type="button" class="nav-btn ${state.route === it.id ? 'active' : ''}" data-route="${esc(it.id)}">
-                <span>${esc(it.label)}</span>
+                <span>${esc(translateString(it.label))}</span>
               </button>`,
             )
             .join('')}
@@ -893,13 +909,14 @@ function renderShell() {
             <span class="brand-mark">FP</span>
             <span>FerrousPanel</span>
           </a>
-          <button type="button" class="sidebar-close-btn" id="mobile-nav-close" aria-label="Đóng menu">×</button>
+          <button type="button" class="sidebar-close-btn" id="mobile-nav-close" aria-label="${esc(t('Đóng menu', 'Close menu'))}">×</button>
         </div>
-        <nav class="nav-scroll" aria-label="Điều hướng chính">${navHtml}</nav>
+        <nav class="nav-scroll" aria-label="${esc(t('Điều hướng chính', 'Main navigation'))}">${navHtml}</nav>
         <div class="sidebar-foot">
           <div class="sidebar-mobile-actions">
-            <a class="btn btn-sm" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FerrousAdmin SQL</a>
-            <button type="button" class="btn btn-sm" id="sidebar-theme-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
+            <a class="btn btn-sm" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FPSql &amp; Database</a>
+            <button type="button" class="btn btn-sm" id="sidebar-lang-btn">${esc(langBtnLabel)}</button>
+            <button type="button" class="btn btn-sm" id="sidebar-theme-btn">${esc(isDark ? t('Giao diện sáng', 'Light Theme') : t('Giao diện tối', 'Dark Theme'))}</button>
           </div>
           <div class="sidebar-foot-meta">
             <span>${esc(state.user?.username || 'admin')}</span>
@@ -917,19 +934,20 @@ function renderShell() {
       <div class="workspace">
         <header class="topbar">
           <div class="topbar-left">
-            <button type="button" class="menu-toggle" id="mobile-menu-btn" aria-label="Mở menu">Menu</button>
+            <button type="button" class="menu-toggle" id="mobile-menu-btn" aria-label="${esc(t('Mở menu', 'Open menu'))}">Menu</button>
             <div class="breadcrumb">
               <span class="breadcrumb-root">FerrousPanel</span>
               <span class="breadcrumb-sep">/</span>
-              <span class="breadcrumb-curr" id="topbar-breadcrumb-curr">${esc(ROUTE_TITLES[state.route] || 'Tổng quan hệ thống')}</span>
+              <span class="breadcrumb-curr" id="topbar-breadcrumb-curr">${esc(translateString(ROUTE_TITLES[state.route] || 'Tổng quan hệ thống'))}</span>
             </div>
           </div>
           <div class="topbar-actions">
-            <button type="button" class="btn btn-sm hide-mobile" id="topbar-cmdk-btn" title="Chuyển nhanh phân hệ">Chuyển nhanh <span class="kbd-hint">Ctrl+K</span></button>
-            <a class="btn btn-sm hide-mobile" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FerrousAdmin SQL</a>
-            <button type="button" class="btn btn-sm" id="topbar-refresh-btn">Làm mới</button>
-            <button type="button" class="btn btn-sm hide-mobile" id="theme-toggle-btn">${isDark ? 'Giao diện sáng' : 'Giao diện tối'}</button>
-            <button type="button" class="btn btn-sm btn-danger" id="topbar-logout-btn">Đăng xuất</button>
+            <button type="button" class="btn btn-sm hide-mobile" id="topbar-cmdk-btn" title="${esc(t('Chuyển nhanh phân hệ', 'Quick Jump'))}">${esc(t('Chuyển nhanh', 'Jump'))} <span class="kbd-hint">Ctrl+K</span></button>
+            <a class="btn btn-sm hide-mobile" href="/phpadmin/${state.token ? `?fp_sso=${encodeURIComponent(state.token)}` : ''}" target="_blank" rel="noopener">FPSql &amp; Database</a>
+            <button type="button" class="btn btn-sm mono" id="lang-toggle-btn" title="${esc(t('Switch to English', 'Chuyển sang Tiếng Việt'))}">${esc(langCompactLabel)}</button>
+            <button type="button" class="btn btn-sm" id="topbar-refresh-btn">${esc(t('Làm mới', 'Refresh'))}</button>
+            <button type="button" class="btn btn-sm hide-mobile" id="theme-toggle-btn">${esc(isDark ? t('Giao diện sáng', 'Light Theme') : t('Giao diện tối', 'Dark Theme'))}</button>
+            <button type="button" class="btn btn-sm btn-danger" id="topbar-logout-btn">${esc(t('Đăng xuất', 'Sign Out'))}</button>
           </div>
         </header>
         <main class="main-content" id="view-container"></main>
@@ -958,10 +976,13 @@ function renderShell() {
   });
   document.getElementById('topbar-cmdk-btn')?.addEventListener('click', openQuickJump);
   document.getElementById('topbar-refresh-btn')?.addEventListener('click', () => renderCurrentView(true));
+  document.getElementById('lang-toggle-btn')?.addEventListener('click', toggleLanguage);
+  document.getElementById('sidebar-lang-btn')?.addEventListener('click', toggleLanguage);
   document.getElementById('theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.getElementById('sidebar-theme-btn')?.addEventListener('click', toggleTheme);
   document.getElementById('topbar-logout-btn')?.addEventListener('click', handleLogout);
 
+  if (isEn()) translateDomSubtree(root);
   renderCurrentView(true);
 }
 
@@ -972,34 +993,39 @@ function renderLogin(errorMessage = '') {
   root.innerHTML = `
     <div class="login-shell">
       <div class="login-card">
-        <div class="login-brand">
-          <div class="brand-mark">FP</div>
-          <div>
-            <h1 class="login-title">FerrousPanel</h1>
-            <p class="login-sub">VPS Control Plane · Cổng <span class="mono">${esc(port)}</span></p>
+        <div class="login-brand" style="justify-content:space-between">
+          <div style="display:flex;align-items:center;gap:12px">
+            <div class="brand-mark">FP</div>
+            <div>
+              <h1 class="login-title">FerrousPanel</h1>
+              <p class="login-sub">VPS Control Plane · ${esc(t('Cổng', 'Port'))} <span class="mono">${esc(port)}</span></p>
+            </div>
           </div>
+          <button type="button" class="btn btn-sm mono" id="login-lang-btn">${esc(isEn() ? 'VI' : 'EN')}</button>
         </div>
-        ${errorMessage ? `<div class="alert-err" id="login-error">${esc(errorMessage)}</div>` : '<div id="login-error"></div>'}
+        ${errorMessage ? `<div class="alert-err" id="login-error">${esc(translateString(errorMessage))}</div>` : '<div id="login-error"></div>'}
         <form id="login-form">
           <div class="field">
-            <label for="login-username">Tài khoản quản trị</label>
+            <label for="login-username">${esc(t('Tài khoản quản trị', 'Admin Username'))}</label>
             <input class="input" id="login-username" name="username" autocomplete="username" placeholder="admin_ferrous" required />
           </div>
           <div class="field">
-            <label for="login-password">Mật khẩu</label>
+            <label for="login-password">${esc(t('Mật khẩu', 'Password'))}</label>
             <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required />
           </div>
           <div class="field">
             <label class="checkbox-row">
               <input type="checkbox" id="login-remember" />
-              <span>Ghi nhớ phiên đăng nhập (30 ngày)</span>
+              <span>${esc(t('Ghi nhớ phiên đăng nhập (30 ngày)', 'Remember session (30 days)'))}</span>
             </label>
           </div>
-          <button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">Đăng nhập</button>
+          <button type="submit" class="btn btn-primary" style="width:100%" id="login-submit-btn">${esc(t('Đăng nhập', 'Sign In'))}</button>
         </form>
       </div>
     </div>
   `;
+
+  document.getElementById('login-lang-btn')?.addEventListener('click', toggleLanguage);
 
   const form = document.getElementById('login-form');
   form?.addEventListener('submit', async (e) => {
@@ -1026,12 +1052,12 @@ function renderLogin(errorMessage = '') {
           sessionStorage.setItem(TOKEN_KEY, state.token);
         }
       }
-      toast('Đăng nhập thành công.');
+      toast(t('Đăng nhập thành công.', 'Signed in successfully.'));
       renderShell();
     } catch (err) {
       if (errEl) {
         errEl.className = 'alert-err';
-        errEl.textContent = err.message || 'Sai tài khoản hoặc mật khẩu.';
+        errEl.textContent = translateString(err.message || 'Sai tài khoản hoặc mật khẩu.');
       }
       if (btn) btn.disabled = false;
     }
@@ -1040,6 +1066,7 @@ function renderLogin(errorMessage = '') {
 
 async function bootstrap() {
   applyTheme(localStorage.getItem(THEME_KEY) || 'dark');
+  installDomTranslator();
   const hashRoute = window.location.hash.replace(/^#/, '');
   if (ROUTE_TITLES[hashRoute]) {
     state.route = hashRoute;

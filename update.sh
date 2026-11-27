@@ -27,26 +27,14 @@ CHECK_ONLY=false; PREBUILT_ONLY=false; SOURCE_ONLY=false; FULL_LTO=false; FORCE_
 EXPLICIT_BIND=""; EXPLICIT_DOMAIN=""; PANEL_CONFIG_CHANGED=false
 usage() {
 cat <<'EOF_HELP'
-FerrousPanel, Nginx & FerrousX 1-Command Updater (Fast Incremental + Atomic Rollback)
-Usage: sudo fp update [OPTIONS] | sudo bash update.sh [OPTIONS] [RELEASE_TAG]
-Options:
-  --check                      Check local vs upstream commit/version without modifying anything
-  --prebuilt                   Fast update: download SHA-256 verified GitHub Release binary
-  --source                     Compile from source using fast incremental [profile.vps] (thin-LTO)
-  --full-lto                   Use full fat-LTO [profile.release] instead of fast [profile.vps]
-  --force                      Force rebuild/reinstall even if already on the latest commit
-  --rollback                   Instantly restore previous working binary & verify /api/health
-  --nginx / --nginx-only       Ensure Nginx is installed, synced, validated & reloaded
-  --ferrousx / --ferrousx-only Sync & rebuild latest FerrousX from github.com/Ferrous-panel/FerrousX
-  --js-only / --no-js-toolchain Sync or skip Zero-Node.js JS/CSS binaries (bun + tailwindcss)
-  --insecure-skip-verify       Bypass SHA-256 verification on downloaded release/tool binaries
-  --engine <nginx|ferrousx>    Target web engine to update & validate
-  --ferrousx-branch <BRANCH>   Upstream FerrousX Git branch (default: main)
-  --branch <BRANCH>            FerrousPanel Git branch (default: main)
-  --version <TAG|latest>       GitHub Release tag for prebuilt binary (default: latest)
-  --bind <IP>                  Set panel listen IP in panel.env (0.0.0.0 or 127.0.0.1)
-  --domain <DOMAIN>            Set panel custom domain in panel.env & issue Let's Encrypt SSL on :8443
-  -h, --help                   Show this help message
+FerrousPanel, Nginx & FerrousX Updater — Usage: sudo fp update [OPTIONS]
+  --check | --prebuilt | --source | --full-lto | --force | --rollback
+  --nginx / --nginx-only       Sync, validate & reload Nginx
+  --ferrousx / --ferrousx-only Sync & rebuild FerrousX
+  --js-only / --no-js-toolchain Sync or skip Bun + Tailwind CSS v4
+  --engine <nginx|ferrousx>    Target web engine
+  --branch <B> | --ferrousx-branch <B> | --version <TAG>
+  --bind <IP> | --domain <DOMAIN> | --insecure-skip-verify | -h, --help
 EOF_HELP
 }
 while [[ $# -gt 0 ]]; do
@@ -268,7 +256,26 @@ done
 detect_local_ip
 }
 VPS_PUBLIC_IP="$(detect_public_ip)"
+ensure_default_landing_page() {
+mkdir -p /www/server/default /www/wwwroot
+chmod 0755 /www /www/server /www/server/default /www/wwwroot 2>/dev/null || true
+if [ -f "${SRC_DIR}/crates/ferrous-panel/src/modules/default_pages.rs" ]; then
+awk '/^const UNCONFIGURED_HOST_HTML:/{f=1;next} f&&/^"##;$/{exit} f{print}' "${SRC_DIR}/crates/ferrous-panel/src/modules/default_pages.rs" > /www/server/default/index.html.tmp 2>/dev/null || true
+if [ -s /www/server/default/index.html.tmp ] && grep -q 'FerrousPanel-Managed-Default-Index' /www/server/default/index.html.tmp 2>/dev/null; then
+chmod 0644 /www/server/default/index.html.tmp && mv -f /www/server/default/index.html.tmp /www/server/default/index.html
+else rm -f /www/server/default/index.html.tmp; fi
+fi
+if [ ! -f /www/server/default/index.html ]; then
+printf '<!DOCTYPE html><!-- FerrousPanel-Managed-Default-Index --><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ferrous Edge Node</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#060913;color:#f8fafc;font-family:system-ui,sans-serif}.c{max-width:560px;padding:28px;border-radius:16px;background:#0f172a;border:1px solid #334155}code{color:#fb923c}</style></head><body><main class="c"><h2>Ferrous Edge Server Ready</h2><p><code>{{HOST}}</code> is online. Add this domain in <b>FerrousPanel → Websites &amp; Apps</b> to deploy your site.</p></main></body></html>\n' > /www/server/default/index.html
+chmod 0644 /www/server/default/index.html 2>/dev/null || true
+fi
+if [ ! -f /www/wwwroot/index.html ] || grep -qE 'Welcome to nginx|FerrousPanel-Managed-Default-Index' /www/wwwroot/index.html 2>/dev/null; then
+cp -f /www/server/default/index.html /www/wwwroot/index.html 2>/dev/null || true
+chmod 0644 /www/wwwroot/index.html 2>/dev/null || true
+fi
+}
 setup_phpmyadmin_proxy() {
+ensure_default_landing_page
 if systemctl is-active --quiet ferrous-pma.service 2>/dev/null || systemctl is-enabled --quiet ferrous-pma.service 2>/dev/null; then
 systemctl disable --now ferrous-pma.service 2>/dev/null || true
 fi
@@ -288,9 +295,9 @@ done
 if { [ -z "$php_bin" ] || ! "$php_bin" -m 2>/dev/null | grep -qi '^mysqli$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^mbstring$' || ! "$php_bin" -m 2>/dev/null | grep -qi '^xml$'; } && command -v apt-get >/dev/null 2>&1; then
 DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
 [ -n "$php_ver" ] && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-"php${php_ver}-cli" "php${php_ver}-mysql" "php${php_ver}-mbstring" "php${php_ver}-xml" "php${php_ver}-zip" "php${php_ver}-curl" >/dev/null 2>&1 || true
+"php${php_ver}-cli" "php${php_ver}-mysql" "php${php_ver}-mbstring" "php${php_ver}-xml" "php${php_ver}-zip" "php${php_ver}-curl" "php${php_ver}-gd" "php${php_ver}-intl" "php${php_ver}-bz2" >/dev/null 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold \
-php-cli php-mysql php-mbstring php-xml php-zip php-curl >/dev/null 2>&1 || true
+php-cli php-mysql php-mbstring php-xml php-zip php-curl php-gd php-intl php-bz2 >/dev/null 2>&1 || true
 for cand in /usr/bin/php8.3 /usr/bin/php8.2 /usr/bin/php8.1 /usr/bin/php8.4 /usr/bin/php /usr/bin/php7.4; do
 if [ -x "$cand" ]; then php_bin="$cand"; break; fi
 done
@@ -321,9 +328,10 @@ chmod 0600 "${legacy_sso_file}" 2>/dev/null || true
 local sso_pw
 sso_pw="$(tr -d '[:space:]' < "${sso_file}" 2>/dev/null || true)"
 if [ -n "${sso_pw}" ] && command -v mysql >/dev/null 2>&1; then
-mysql --batch --raw -e "CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}'; CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}'; ALTER USER 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}'; ALTER USER 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}'; GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+mysql --batch --raw -e "CREATE DATABASE IF NOT EXISTS phpmyadmin CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}'; CREATE USER IF NOT EXISTS 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}'; ALTER USER 'fp_myphpadmin'@'localhost' IDENTIFIED BY '${sso_pw}'; ALTER USER 'fp_myphpadmin'@'127.0.0.1' IDENTIFIED BY '${sso_pw}'; GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'localhost' WITH GRANT OPTION; GRANT ALL PRIVILEGES ON *.* TO 'fp_myphpadmin'@'127.0.0.1' WITH GRANT OPTION; FLUSH PRIVILEGES;" >/dev/null 2>&1 || true
+[ -f "${pma_dir}/sql/create_tables.sql" ] && mysql phpmyadmin < "${pma_dir}/sql/create_tables.sql" >/dev/null 2>&1 || true
 fi
-if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "HTTP_X_FERROUS_PMA_PASS" "${pma_dir}/config.inc.php" 2>/dev/null; then
+if [ ! -f "${pma_dir}/config.inc.php" ] || ! grep -q "PmaNoRelation_DisableWarning" "${pma_dir}/config.inc.php" 2>/dev/null; then
 local bf_secret
 bf_secret="$(openssl rand -hex 16 2>/dev/null || echo 'FerrousPanelOfficialPmaSecretKey')"
 cat > "${pma_dir}/config.inc.php" <<EOF_PMA_CFG
@@ -340,11 +348,13 @@ if (\$ferrousSsoActive) {
   elseif (is_readable(\$ferrousSsoLegacyFile)) \$ferrousSsoPass = trim((string) @file_get_contents(\$ferrousSsoLegacyFile));
 }
 for (\$i = 1; \$i <= 2; \$i++) {
-  \$cfg['Servers'][\$i]['verbose'] = \$i === 1 ? 'FerrousPanel MariaDB / MySQL (Local Socket)' : '127.0.0.1:3306 (TCP)';
+  \$cfg['Servers'][\$i]['verbose'] = \$i === 1 ? 'FPSql & Database — MariaDB / MySQL (Socket)' : '127.0.0.1:3306 (TCP)';
   if (\$ferrousSsoPass !== '') {
     \$cfg['Servers'][\$i]['auth_type'] = 'config';
     \$cfg['Servers'][\$i]['user'] = 'fp_myphpadmin';
     \$cfg['Servers'][\$i]['password'] = \$ferrousSsoPass;
+    \$cfg['Servers'][\$i]['controluser'] = 'fp_myphpadmin';
+    \$cfg['Servers'][\$i]['controlpass'] = \$ferrousSsoPass;
   } else {
     \$cfg['Servers'][\$i]['auth_type'] = 'cookie';
   }
@@ -353,7 +363,13 @@ for (\$i = 1; \$i <= 2; \$i++) {
   elseif (file_exists('/run/mysqld/mysqld.sock')) \$cfg['Servers'][\$i]['socket'] = '/run/mysqld/mysqld.sock';
   \$cfg['Servers'][\$i]['compress'] = false;
   \$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+  \$cfg['Servers'][\$i]['pmadb'] = 'phpmyadmin';
+  \$cfg['Servers'][\$i]['bookmarktable'] = 'pma__bookmark';
+  foreach (['relation','table_info','table_coords','pdf_pages','column_info','history','table_uiprefs','tracking','userconfig','recent','favorite','users','usergroups','navigationhiding','savedsearches','central_columns','designer_settings','export_templates'] as \$t) \$cfg['Servers'][\$i][\$t] = 'pma__' . \$t;
 }
+\$cfg['PmaNoRelation_DisableWarning'] = true;
+\$cfg['ZeroConf'] = true;
+\$cfg['VersionCheck'] = false;
 \$cfg['TempDir'] = '${pma_tmp}';
 \$cfg['AllowThirdPartyFraming'] = 'sameorigin';
 \$cfg['ExecTimeLimit'] = 300;
@@ -363,8 +379,9 @@ chmod 0640 "${pma_dir}/config.inc.php"
 fi
 cat > "${pma_router}" <<'EOF_PMA_ROUTER'
 <?php
-if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') { $_SERVER['HTTPS'] = 'on'; $_SERVER['SERVER_PORT'] = '443'; }
 if (!empty($_SERVER['HTTP_X_FORWARDED_HOST'])) $_SERVER['HTTP_HOST'] = $_SERVER['HTTP_X_FORWARDED_HOST'];
+if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') { $_SERVER['HTTPS'] = 'on'; $_SERVER['SERVER_PORT'] = '443'; }
+if (!empty($_SERVER['HTTP_HOST']) && strpos($_SERVER['HTTP_HOST'], ':') !== false) { [$hN, $hP] = explode(':', $_SERVER['HTTP_HOST'], 2); if ($hN !== '') $_SERVER['SERVER_NAME'] = $hN; if (ctype_digit($hP)) $_SERVER['SERVER_PORT'] = $hP; }
 $uri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 if ($uri === '/phpmyadmin') { header('Location: /phpmyadmin/', true, 302); exit; }
 if (strpos($uri, '/phpmyadmin/') !== 0) { http_response_code(403); exit('Forbidden'); }
@@ -517,7 +534,7 @@ rm -rf "${fx_dir}" && git clone --depth 1 --branch "${FERROUSX_BRANCH}" "https:/
 fi
 ); then
 fx_target_sha="$(git -C "${fx_dir}" rev-parse "origin/${FERROUSX_BRANCH}" 2>/dev/null || git -C "${fx_dir}" rev-parse FETCH_HEAD 2>/dev/null || git -C "${fx_dir}" rev-parse HEAD 2>/dev/null || echo '')"
-local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v5}" fx_prev_sha
+local fx_cache_tag="${fx_target_sha:+${fx_target_sha}-fp-ssl-v6}" fx_prev_sha
 fx_prev_sha="$(cat "${FERROUSX_COMMIT_FILE}" 2>/dev/null || echo '')"
 if [ "$FORCE_REBUILD" = false ] && [ -x "${BIN_FERROUSX}" ] && [ -n "${fx_cache_tag}" ] && [ "${fx_prev_sha}" = "${fx_cache_tag}" ]; then
 echo -e "${GREEN}[+] FerrousX already up to date (${fx_target_sha:0:8}).${NC}"
@@ -547,9 +564,12 @@ git -C "${fx_dir}" ls-files --error-unmatch Cargo.lock >/dev/null 2>&1 || rm -f 
 fi
 local srv_rs="${fx_dir}/crates/ferrousx-http/src/server.rs"
 if [ -f "${srv_rs}" ]; then
-sed -i 's/if is_panel_request(req, \&norm_path, cfg)/if false \&\& is_panel_request(req, \&norm_path, cfg)/g; s/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/; s/mut stream: up_stream,/stream: mut up_stream,/g' "${srv_rs}"
+sed -i 's/if is_panel_request(req, \&norm_path, cfg)/if false \&\& is_panel_request(req, \&norm_path, cfg)/g; s/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/; s|norm_path == "/phpadmin" || norm_path == "/phpmyadmin"|norm_path == "/phpadmin" \|\| norm_path == "/phpmyadmin" \|\| norm_path == "/pgadmin"|; s|norm_path.starts_with("/phpadmin/") || norm_path.starts_with("/phpmyadmin/")|norm_path.starts_with("/phpadmin/") \|\| norm_path.starts_with("/phpmyadmin/") \|\| norm_path.starts_with("/pgadmin/")|; s/mut stream: up_stream,/stream: mut up_stream,/g' "${srv_rs}"
 if grep -q 'while let Some(chunk) = match decoder\.next_decoded()' "${srv_rs}"; then
 awk '/while let Some\(chunk\) = match decoder\.next_decoded\(\) \{/ { print "let mut stream_err = false; loop { match decoder.next_decoded() { Ok(Some(chunk)) => { write_http1_stream_chunk(stream, &chunk, use_chunked, stats).await?; } Ok(None) => break, Err(_) => { stream_err = true; break; } } } if stream_err || decoder.is_done() { break; }"; skip = 8; next } skip > 0 { skip--; next } { print }' "${srv_rs}" > "${srv_rs}.tmp" && mv "${srv_rs}.tmp" "${srv_rs}"
+fi
+if grep -q 'let payload = serde_json::json!({' "${srv_rs}" && ! grep -q '/www/server/default/index.html' "${srv_rs}"; then
+awk '/let payload = serde_json::json!\(\{/ { print "if req.method == \"GET\" || req.method == \"HEAD\" { for cand in [\"/www/server/default/index.html\", \"/www/wwwroot/index.html\"] { if let Ok(tpl) = tokio::fs::read_to_string(cand).await { let sh = host_no_port.replace(\x27&\x27, \"&amp;\").replace(\x27<\x27, \"&lt;\").replace(\x27>\x27, \"&gt;\").replace(\x27\"\x27, \"&quot;\"); let html = tpl.replace(\"{{HOST}}\", &sh); return DispatchResponse::Buffered(HttpResponsePayload { status: if norm_path == \"/\" || norm_path == \"/index.html\" { StatusCode::OK } else { StatusCode::NOT_FOUND }, headers: vec![(\"Content-Type\".to_string(), \"text/html; charset=utf-8\".to_string()), (\"Cache-Control\".to_string(), \"no-store\".to_string())], body: if req.method == \"HEAD\" { Bytes::new() } else { Bytes::from(html) } }); } } }" } { print }' "${srv_rs}" > "${srv_rs}.tmp" && mv "${srv_rs}.tmp" "${srv_rs}"
 fi
 fi
 [ -f "${fx_dir}/crates/ferrousx-proxy/src/fastcgi.rs" ] && sed -i 's/let mut saw_end_request = false;/let saw_end_request: bool;/' "${fx_dir}/crates/ferrousx-proxy/src/fastcgi.rs"
@@ -661,61 +681,48 @@ fi
 fi
 }
 install_zero_node_js_css_toolchain() {
-local bun_arch="x64" tw_arch="x64"
+local bun_arch="x64" tw_arch="x64" gh_bun="https://github.com/oven-sh/bun/releases/latest/download" gh_tw="https://github.com/tailwindlabs/tailwindcss/releases/latest/download"
 if [ "${ARCH}" = "aarch64" ]; then bun_arch="aarch64"; tw_arch="arm64"; fi
 if [ ! -x /usr/local/bin/bun ]; then
-echo -e "${CYAN}[*] Installing Bun single native binary (Zero-Node.js)...${NC}"
-if ! command -v unzip >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
-fi
+echo -e "${CYAN}[*] Installing Bun (Zero-Node.js)...${NC}"
+! command -v unzip >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unzip >/dev/null 2>&1 || true
 mkdir -p "${TMP_DIR}/bun-dl"
 local bun_asset="bun-linux-${bun_arch}.zip"
-if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/${bun_asset}" "https://github.com/oven-sh/bun/releases/latest/download/${bun_asset}"; then
-curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/bun-dl/SHASUMS256.txt" "https://github.com/oven-sh/bun/releases/latest/download/SHASUMS256.txt" 2>/dev/null || rm -f "${TMP_DIR}/bun-dl/SHASUMS256.txt"
-verify_sha256_entry "${TMP_DIR}/bun-dl/SHASUMS256.txt" "${bun_asset}" "${TMP_DIR}/bun-dl" "Bun release"
+if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/bun-dl/${bun_asset}" "${gh_bun}/${bun_asset}"; then
+curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/bun-dl/SHASUMS256.txt" "${gh_bun}/SHASUMS256.txt" 2>/dev/null || rm -f "${TMP_DIR}/bun-dl/SHASUMS256.txt"
+verify_sha256_entry "${TMP_DIR}/bun-dl/SHASUMS256.txt" "${bun_asset}" "${TMP_DIR}/bun-dl" "Bun"
 if unzip -qo "${TMP_DIR}/bun-dl/${bun_asset}" -d "${TMP_DIR}/bun-dl" && [ -f "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" ]; then
 install -m 0755 "${TMP_DIR}/bun-dl/bun-linux-${bun_arch}/bun" /usr/local/bin/bun
-echo -e "${GREEN}[+] Installed Bun -> /usr/local/bin/bun.${NC}"
-else
-echo -e "${RED}[ERROR] Failed to unpack verified Bun archive.${NC}" >&2; exit 1
+else echo -e "${RED}[ERROR] Failed to unpack Bun.${NC}" >&2; exit 1; fi
 fi
 fi
-fi
-if [ -x /usr/local/bin/bun ] && ! command -v node >/dev/null 2>&1; then
-ln -sf /usr/local/bin/bun /usr/local/bin/node
-fi
+[ -x /usr/local/bin/bun ] && ! command -v node >/dev/null 2>&1 && ln -sf /usr/local/bin/bun /usr/local/bin/node || true
 if [ ! -x /usr/local/bin/tailwindcss ]; then
-echo -e "${CYAN}[*] Installing Tailwind CSS v4 standalone native CLI (Zero-Node.js)...${NC}"
+echo -e "${CYAN}[*] Installing Tailwind CSS v4 CLI...${NC}"
 mkdir -p "${TMP_DIR}/tw-dl"
 local tw_asset="tailwindcss-linux-${tw_arch}"
-if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tw-dl/${tw_asset}" "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/${tw_asset}"; then
-curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/sha256sums.txt" 2>/dev/null \
-|| curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" "https://github.com/tailwindlabs/tailwindcss/releases/latest/download/SHA256SUMS.txt" 2>/dev/null \
+if curl -fsSL --retry 3 --connect-timeout 15 -o "${TMP_DIR}/tw-dl/${tw_asset}" "${gh_tw}/${tw_asset}"; then
+curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" "${gh_tw}/sha256sums.txt" 2>/dev/null \
+|| curl -fsSL --connect-timeout 15 -o "${TMP_DIR}/tw-dl/sha256sums.txt" "${gh_tw}/SHA256SUMS.txt" 2>/dev/null \
 || rm -f "${TMP_DIR}/tw-dl/sha256sums.txt"
-verify_sha256_entry "${TMP_DIR}/tw-dl/sha256sums.txt" "${tw_asset}" "${TMP_DIR}/tw-dl" "Tailwind CSS release"
+verify_sha256_entry "${TMP_DIR}/tw-dl/sha256sums.txt" "${tw_asset}" "${TMP_DIR}/tw-dl" "Tailwind"
 install -m 0755 "${TMP_DIR}/tw-dl/${tw_asset}" /usr/local/bin/tailwindcss
-echo -e "${GREEN}[+] Installed Tailwind CSS v4 -> /usr/local/bin/tailwindcss.${NC}"
 fi
 fi
 if { ! command -v wg >/dev/null 2>&1 || { ! command -v podman >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; }; } && command -v apt-get >/dev/null 2>&1; then
-echo -e "${CYAN}[*] Installing Edge Cloud runtimes (podman + wireguard-tools)...${NC}"
 DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard-tools podman >/dev/null 2>&1 || true
 fi
-if [ ! -x /usr/local/bin/wasmtime ] && [ -x /root/.wasmtime/bin/wasmtime ]; then
-install -m 0755 /root/.wasmtime/bin/wasmtime /usr/local/bin/wasmtime
-fi
+[ ! -x /usr/local/bin/wasmtime ] && [ -x /root/.wasmtime/bin/wasmtime ] && install -m 0755 /root/.wasmtime/bin/wasmtime /usr/local/bin/wasmtime || true
 if [ ! -x /usr/local/bin/wasmtime ] && command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
 local wt_arch="x86_64"; [ "${ARCH}" = "aarch64" ] && wt_arch="aarch64"
 local wt_url
 wt_url="$(curl -fsSL --connect-timeout 10 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/bytecodealliance/wasmtime/releases/latest" 2>/dev/null | grep -oE "https://[^\"]+wasmtime-[^\"]+-${wt_arch}-linux\.tar\.xz" | head -n 1 || true)"
 if [ -n "$wt_url" ]; then
-echo -e "${CYAN}[*] Installing Bytecode Alliance Wasmtime WASI runtime...${NC}"
 mkdir -p "${TMP_DIR}/wt-dl"
 if curl -fsSL --retry 2 --connect-timeout 15 -o "${TMP_DIR}/wt-dl/wt.tar.xz" "$wt_url" && tar -xJf "${TMP_DIR}/wt-dl/wt.tar.xz" -C "${TMP_DIR}/wt-dl" 2>/dev/null; then
-local wt_bin
-wt_bin="$(find "${TMP_DIR}/wt-dl" -type f -name wasmtime | head -n 1 || true)"
-[ -n "$wt_bin" ] && install -m 0755 "$wt_bin" /usr/local/bin/wasmtime && echo -e "${GREEN}[+] Installed Wasmtime -> /usr/local/bin/wasmtime.${NC}"
+local wt_bin; wt_bin="$(find "${TMP_DIR}/wt-dl" -type f -name wasmtime | head -n 1 || true)"
+[ -n "$wt_bin" ] && install -m 0755 "$wt_bin" /usr/local/bin/wasmtime || true
 fi
 fi
 fi
@@ -969,34 +976,25 @@ ngx_default_target="$(readlink -f /etc/nginx/sites-enabled/default 2>/dev/null |
 if [ "$ngx_default_target" = "/etc/nginx/sites-available/default" ] || \
 { [ "$ngx_default_target" = "/etc/nginx/sites-available/ferrous-default.conf" ] && \
 head -n 1 /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null | grep -q 'Managed by FerrousPanel' && \
-{ ! grep -q '/phpadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null || \
-! grep -q '/phpmyadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; }; then
+{ ! grep -q '/pgadmin/' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null || \
+! grep -q '/www/server/default' /etc/nginx/sites-available/ferrous-default.conf 2>/dev/null; }; }; then
 cat > /etc/nginx/sites-available/ferrous-default.conf <<'EOF_NGX_DEF'
-# Managed by FerrousPanel — Default catch-all vhost
+# Managed by FerrousPanel — Default catch-all vhost (/phpadmin/ /phpmyadmin/ /pgadmin/)
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
     server_name _;
-    root /www/wwwroot;
+    root /www/server/default;
+    index index.html;
     server_tokens off;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
     location ^~ /.well-known/acme-challenge/ { root /www/acme; default_type "text/plain"; try_files $uri =404; }
-    location = /phpadmin { return 301 $scheme://$http_host/phpadmin/; }
-    location ^~ /phpadmin/ {
-        proxy_pass http://127.0.0.1:888;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    location = /phpmyadmin { return 301 $scheme://$http_host/phpmyadmin/; }
-    location ^~ /phpmyadmin/ {
-        proxy_pass http://127.0.0.1:888;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-    location / { try_files $uri $uri/ =404; }
+    location ~ ^/(phpadmin|phpmyadmin|pgadmin)$ { return 301 $scheme://$http_host$uri/; }
+    location ~ ^/(phpadmin|phpmyadmin|pgadmin)/ { proxy_pass http://127.0.0.1:888; }
+    location / { try_files $uri $uri/ /index.html; }
 }
 EOF_NGX_DEF
 ln -sf /etc/nginx/sites-available/ferrous-default.conf /etc/nginx/sites-enabled/default
@@ -1028,6 +1026,13 @@ if grep -qE "127\.0\.0\.1:${ACTIVE_PANEL_PORT}|127\.0\.0\.1:8443" "$_vh" 2>/dev/
 rm -f "$_vh"
 fi
 done
+is_self_signed_pem() {
+command -v openssl >/dev/null 2>&1 || return 1
+local i s
+i="$(openssl x509 -in "$1" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
+s="$(openssl x509 -in "$1" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
+[ -n "$i" ] && [ "$i" = "$s" ]
+}
 auto_upgrade_self_signed_sites_to_letsencrypt() {
 mkdir -p /www/acme/.well-known/acme-challenge
 chmod 0755 /www /www/acme /www/acme/.well-known /www/acme/.well-known/acme-challenge 2>/dev/null || true
@@ -1039,8 +1044,7 @@ for f in /etc/ferrousx/sites/*.toml /etc/nginx/sites-enabled/*.conf; do
 [ -e "$f" ] || continue
 local dom="${f##*/}"; dom="${dom%.toml}"; dom="${dom%.conf}"
 if [[ "$dom" == *.* ]] && [[ "$dom" != *.local ]] && [ "$dom" != "localhost" ] && [ "$dom" != "ferrous-default" ]; then
-local seen=false
-for d in "${site_domains[@]:-}"; do [ "$d" = "$dom" ] && seen=true; done
+local seen=false; for d in "${site_domains[@]:-}"; do [ "$d" = "$dom" ] && seen=true; done
 [ "$seen" = false ] && site_domains+=("$dom")
 fi
 done
@@ -1048,103 +1052,62 @@ done
 local upgraded_any=false panel_ssl_upgraded=false
 for dom in "${site_domains[@]}"; do
 local cert_p="/etc/letsencrypt/live/${dom}/fullchain.pem" key_p="/etc/letsencrypt/live/${dom}/privkey.pem" need_le=false
-if [ ! -f "$cert_p" ] || [ ! -f "$key_p" ]; then
-need_le=true
-elif command -v openssl >/dev/null 2>&1; then
-local iss sub
-iss="$(openssl x509 -in "$cert_p" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
-sub="$(openssl x509 -in "$cert_p" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
-[ -n "$iss" ] && [ "$iss" = "$sub" ] && need_le=true
-fi
-if [ "$dom" = "${ACTIVE_PANEL_DOMAIN:-}" ] && [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && command -v openssl >/dev/null 2>&1; then
-local p_iss p_sub
-p_iss="$(openssl x509 -in /etc/ferrous-panel/ssl/fullchain.pem -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
-p_sub="$(openssl x509 -in /etc/ferrous-panel/ssl/fullchain.pem -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
-[ -n "$p_iss" ] && [ "$p_iss" = "$p_sub" ] && need_le=true
-fi
+if [ ! -f "$cert_p" ] || [ ! -f "$key_p" ] || is_self_signed_pem "$cert_p"; then need_le=true; fi
+if [ "$dom" = "${ACTIVE_PANEL_DOMAIN:-}" ] && [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && is_self_signed_pem "/etc/ferrous-panel/ssl/fullchain.pem"; then need_le=true; fi
 [ "$need_le" = true ] || continue
 if ! command -v certbot >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
 DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot >/dev/null 2>&1 || true
 fi
 command -v certbot >/dev/null 2>&1 || return 0
-local bak_dir="${TMP_DIR}/ssl-bak-${dom}"
+local bak_dir="${TMP_DIR}/ssl-bak-${dom}" cb_ok=false
 rm -rf "$bak_dir"
-if [ -f "$cert_p" ] && [ -f "$key_p" ]; then
-local cur_iss cur_sub
-cur_iss="$(openssl x509 -in "$cert_p" -noout -issuer 2>/dev/null | sed 's/^issuer=//' | tr -d '[:space:]' || true)"
-cur_sub="$(openssl x509 -in "$cert_p" -noout -subject 2>/dev/null | sed 's/^subject=//' | tr -d '[:space:]' || true)"
-if [ ! -L "$cert_p" ] || { [ -n "$cur_iss" ] && [ "$cur_iss" = "$cur_sub" ]; }; then
-mkdir -p "$bak_dir"
-cp -fL "$cert_p" "$bak_dir/fullchain.pem" 2>/dev/null || true
-cp -fL "$key_p" "$bak_dir/privkey.pem" 2>/dev/null || true
+if [ -f "$cert_p" ] && [ -f "$key_p" ] && { [ ! -L "$cert_p" ] || is_self_signed_pem "$cert_p"; }; then
+mkdir -p "$bak_dir" && cp -fL "$cert_p" "$bak_dir/fullchain.pem" 2>/dev/null && cp -fL "$key_p" "$bak_dir/privkey.pem" 2>/dev/null || true
 rm -rf "/etc/letsencrypt/live/${dom}" "/etc/letsencrypt/archive/${dom}" "/etc/letsencrypt/renewal/${dom}.conf" 2>/dev/null || true
 fi
-fi
-if certbot certonly --non-interactive --agree-tos --register-unsafely-without-email --webroot -w /www/acme -d "${dom}" --cert-name "${dom}" --expand --force-renewal >/dev/null 2>&1 \
-|| certbot certonly --non-interactive --agree-tos --register-unsafely-without-email --standalone -d "${dom}" --cert-name "${dom}" --expand --force-renewal >/dev/null 2>&1; then
+local cb_flags=(certonly --non-interactive --agree-tos --register-unsafely-without-email -d "${dom}" --cert-name "${dom}" --expand --force-renewal)
+if certbot "${cb_flags[@]}" --webroot -w /www/acme >/dev/null 2>&1 || certbot "${cb_flags[@]}" --standalone >/dev/null 2>&1; then
 if [ ! -f "$cert_p" ]; then
 for alt in /etc/letsencrypt/live/"${dom}"-*; do
 if [ -d "$alt" ] && [ -f "$alt/fullchain.pem" ] && [ -f "$alt/privkey.pem" ]; then
 mkdir -p "/etc/letsencrypt/live/${dom}"
-ln -sf "$(readlink -f "$alt/fullchain.pem")" "$cert_p"
-ln -sf "$(readlink -f "$alt/privkey.pem")" "$key_p"
-break
+ln -sf "$(readlink -f "$alt/fullchain.pem")" "$cert_p"; ln -sf "$(readlink -f "$alt/privkey.pem")" "$key_p"; break
 fi
 done
 fi
 if [ -f "$cert_p" ] && [ -f "$key_p" ]; then
+cb_ok=true
 local real_c real_k
-real_c="$(readlink -f "$cert_p" 2>/dev/null || echo "$cert_p")"
-real_k="$(readlink -f "$key_p" 2>/dev/null || echo "$key_p")"
+real_c="$(readlink -f "$cert_p" 2>/dev/null || echo "$cert_p")"; real_k="$(readlink -f "$key_p" 2>/dev/null || echo "$key_p")"
 chmod 0600 "$real_k" 2>/dev/null || true
 if [ -f "/etc/ferrousx/sites/${dom}.toml" ]; then
-awk -v rc="$real_c" -v rk="$real_k" '
-/^\[ssl\]/ { in_ssl=1; print; next }
-/^\[/ { in_ssl=0 }
-in_ssl && /^[[:space:]]*enabled[[:space:]]*=/ { print "enabled = true"; next }
-in_ssl && /^[[:space:]]*cert_path[[:space:]]*=/ { print "cert_path = \"" rc "\""; next }
-in_ssl && /^[[:space:]]*key_path[[:space:]]*=/ { print "key_path = \"" rk "\""; next }
-{ print }
-' "/etc/ferrousx/sites/${dom}.toml" > "/etc/ferrousx/sites/${dom}.toml.tmp" && \
-chmod 0644 "/etc/ferrousx/sites/${dom}.toml.tmp" && mv -f "/etc/ferrousx/sites/${dom}.toml.tmp" "/etc/ferrousx/sites/${dom}.toml"
+awk -v rc="$real_c" -v rk="$real_k" '/^\[ssl\]/{s=1;print;next} /^\[/{s=0} s&&/^[[:space:]]*enabled[[:space:]]*=/{print "enabled = true";next} s&&/^[[:space:]]*cert_path[[:space:]]*=/{print "cert_path = \"" rc "\"";next} s&&/^[[:space:]]*key_path[[:space:]]*=/{print "key_path = \"" rk "\"";next} {print}' "/etc/ferrousx/sites/${dom}.toml" > "/etc/ferrousx/sites/${dom}.toml.tmp" && chmod 0644 "/etc/ferrousx/sites/${dom}.toml.tmp" && mv -f "/etc/ferrousx/sites/${dom}.toml.tmp" "/etc/ferrousx/sites/${dom}.toml"
 fi
 if [ "$dom" = "${ACTIVE_PANEL_DOMAIN:-}" ]; then
-mkdir -p /etc/ferrous-panel/ssl
-cp -f "$real_c" /etc/ferrous-panel/ssl/fullchain.pem
-cp -f "$real_k" /etc/ferrous-panel/ssl/privkey.pem
-chmod 0644 /etc/ferrous-panel/ssl/fullchain.pem
-chmod 0600 /etc/ferrous-panel/ssl/privkey.pem
+mkdir -p /etc/ferrous-panel/ssl && cp -f "$real_c" /etc/ferrous-panel/ssl/fullchain.pem && cp -f "$real_k" /etc/ferrous-panel/ssl/privkey.pem
+chmod 0644 /etc/ferrous-panel/ssl/fullchain.pem && chmod 0600 /etc/ferrous-panel/ssl/privkey.pem
 grep -q '^FERROUS_SSL_CERT=' /etc/ferrous-panel/panel.env 2>/dev/null && sed -i 's|^FERROUS_SSL_CERT=.*|FERROUS_SSL_CERT=/etc/ferrous-panel/ssl/fullchain.pem|' /etc/ferrous-panel/panel.env || echo "FERROUS_SSL_CERT=/etc/ferrous-panel/ssl/fullchain.pem" >> /etc/ferrous-panel/panel.env
 grep -q '^FERROUS_SSL_KEY=' /etc/ferrous-panel/panel.env 2>/dev/null && sed -i 's|^FERROUS_SSL_KEY=.*|FERROUS_SSL_KEY=/etc/ferrous-panel/ssl/privkey.pem|' /etc/ferrous-panel/panel.env || echo "FERROUS_SSL_KEY=/etc/ferrous-panel/ssl/privkey.pem" >> /etc/ferrous-panel/panel.env
 sed -i 's|^FERROUS_SECURE_COOKIE=.*|FERROUS_SECURE_COOKIE=true|' /etc/ferrous-panel/panel.env
 panel_ssl_upgraded=true
 fi
 upgraded_any=true
-echo -e "${GREEN}[+] Issued trusted Let's Encrypt SSL certificate for https://${dom}${NC}"
-elif [ -d "$bak_dir" ]; then
-mkdir -p "/etc/letsencrypt/live/${dom}"
-cp -f "$bak_dir/fullchain.pem" "$cert_p" && cp -f "$bak_dir/privkey.pem" "$key_p" && chmod 0600 "$key_p" 2>/dev/null || true
+echo -e "${GREEN}[+] Issued Let's Encrypt SSL for https://${dom}${NC}"
 fi
-elif [ -d "$bak_dir" ]; then
-mkdir -p "/etc/letsencrypt/live/${dom}"
-cp -f "$bak_dir/fullchain.pem" "$cert_p" && cp -f "$bak_dir/privkey.pem" "$key_p" && chmod 0600 "$key_p" 2>/dev/null || true
+fi
+if [ "$cb_ok" = false ] && [ -d "$bak_dir" ]; then
+mkdir -p "/etc/letsencrypt/live/${dom}" && cp -f "$bak_dir/fullchain.pem" "$cert_p" && cp -f "$bak_dir/privkey.pem" "$key_p" && chmod 0600 "$key_p" 2>/dev/null || true
 fi
 done
 if [ "$upgraded_any" = true ]; then
 systemctl is-active --quiet ferrousx.service 2>/dev/null && systemctl restart ferrousx.service 2>/dev/null || true
-if systemctl is-active --quiet nginx.service 2>/dev/null && nginx -t >/dev/null 2>&1; then systemctl reload nginx.service 2>/dev/null || true; fi
+systemctl is-active --quiet nginx.service 2>/dev/null && nginx -t >/dev/null 2>&1 && systemctl reload nginx.service 2>/dev/null || true
 fi
-if [ "$panel_ssl_upgraded" = true ]; then
-systemctl restart ferrous-panel.service 2>/dev/null || true
-fi
+[ "$panel_ssl_upgraded" = true ] && systemctl restart ferrous-panel.service 2>/dev/null || true
 }
 auto_upgrade_self_signed_sites_to_letsencrypt
 PANEL_SCHEME="http"
-if [ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && [ -f "/etc/ferrous-panel/ssl/privkey.pem" ]; then PANEL_SCHEME="https"; fi
+[ -f "/etc/ferrous-panel/ssl/fullchain.pem" ] && [ -f "/etc/ferrous-panel/ssl/privkey.pem" ] && PANEL_SCHEME="https"
 UPDATE_ELAPSED="$(( $(date +%s) - UPDATE_START_TS ))"
-echo -e "${GREEN}${BOLD}Update completed cleanly in ${UPDATE_ELAPSED}s. State in /var/lib/ferrous-panel, /etc/nginx, and /etc/ferrousx preserved.${NC}"
-echo -e "${CYAN}Panel URL (Port ${ACTIVE_PANEL_PORT}): ${BOLD}${PANEL_SCHEME}://${ACTIVE_PANEL_DOMAIN:-${VPS_PUBLIC_IP}}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC} (Tip: run '${BOLD}sudo fp ssl ${ACTIVE_PANEL_DOMAIN:-<domain>}${NC}' or '${BOLD}sudo fp 18${NC}' to issue/renew Panel SSL on :${ACTIVE_PANEL_PORT})${NC}"
-if [ -x /usr/local/bin/bun ] || [ -x /usr/local/bin/tailwindcss ]; then
-echo -e "${CYAN}Zero-Node.js JS/CSS Toolchain: bun=$(/usr/local/bin/bun --version 2>/dev/null || echo 'missing') | tailwindcss=$([ -x /usr/local/bin/tailwindcss ] && echo 'v4-standalone' || echo 'missing') (Node.js NOT required).${NC}"
-fi
+echo -e "${GREEN}${BOLD}Update completed in ${UPDATE_ELAPSED}s.${NC} Panel URL: ${BOLD}${PANEL_SCHEME}://${ACTIVE_PANEL_DOMAIN:-${VPS_PUBLIC_IP}}:${ACTIVE_PANEL_PORT}${ACTIVE_PANEL_ENTRANCE}${NC}"

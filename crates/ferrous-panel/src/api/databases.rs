@@ -469,7 +469,7 @@ pub async fn get_official_phpmyadmin_status(
     Ok(HttpResponse::Ok().json(status))
 }
 
-/// `POST /api/databases/phpmyadmin/install` — downloads & starts Official phpMyAdmin from phpmyadmin.net alongside FerrousAdmin (`/phpadmin/`).
+/// `POST /api/databases/phpmyadmin/install` — downloads & starts Official phpMyAdmin from phpmyadmin.net alongside FPSql & Database (`/phpadmin/`).
 pub async fn install_official_phpmyadmin(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -487,6 +487,45 @@ pub async fn install_official_phpmyadmin(
         Some(&actor),
         &ip,
         "database.phpmyadmin.install",
+        &format!("version={} running={}", status.version, status.running),
+    )?;
+    Ok(HttpResponse::Ok().json(status))
+}
+
+/// `GET /api/databases/pgadmin/status` — returns status of cloned & managed pgAdmin 4 (`/pgadmin/`) for PostgreSQL.
+pub async fn get_official_pgadmin_status(
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+    let status = crate::pma_web::get_official_pgadmin_status().await;
+    Ok(HttpResponse::Ok().json(status))
+}
+
+/// `POST /api/databases/pgadmin/install` — clones pgAdmin 4, configures SSO & PostgreSQL sync, and starts `ferrous-pgadmin.service`.
+pub async fn install_official_pgadmin(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let status = crate::pma_web::install_or_repair_official_pgadmin(
+        state.webserver.executor().as_ref(),
+    )
+    .await?;
+
+    crate::modules::databases::reconcile_live_postgres_databases_into_store(
+        &state.modules,
+        state.webserver.executor().as_ref(),
+    )
+    .await;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "database.pgadmin.install",
         &format!("version={} running={}", status.version, status.running),
     )?;
     Ok(HttpResponse::Ok().json(status))

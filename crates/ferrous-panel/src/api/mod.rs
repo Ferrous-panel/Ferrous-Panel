@@ -124,6 +124,14 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(databases::install_official_phpmyadmin),
         )
         .route(
+            "/databases/pgadmin/status",
+            web::get().to(databases::get_official_pgadmin_status),
+        )
+        .route(
+            "/databases/pgadmin/install",
+            web::post().to(databases::install_official_pgadmin),
+        )
+        .route(
             "/databases/{id}/password",
             web::put().to(databases::change_password),
         )
@@ -460,6 +468,14 @@ fn register_pma_api_routes(cfg: &mut web::ServiceConfig) {
             web::post().to(databases::install_official_phpmyadmin),
         )
         .route(
+            "/databases/pgadmin/status",
+            web::get().to(databases::get_official_pgadmin_status),
+        )
+        .route(
+            "/databases/pgadmin/install",
+            web::post().to(databases::install_official_pgadmin),
+        )
+        .route(
             "/databases/{id}/password",
             web::put().to(databases::change_password),
         )
@@ -489,7 +505,7 @@ fn register_pma_api_routes(cfg: &mut web::ServiceConfig) {
         .default_service(web::to(not_implemented));
 }
 
-/// Mounts `/api`, `/phpadmin/api`, and `/phpmyadmin/api` scopes protected by
+/// Mounts `/api`, `/phpadmin/api`, `/phpmyadmin/api`, and `/pgadmin/api` scopes protected by
 /// authentication middleware on all routes except public health/login endpoints.
 pub fn configure_api(cfg: &mut web::ServiceConfig) {
     cfg.service(
@@ -521,6 +537,11 @@ pub fn configure_api(cfg: &mut web::ServiceConfig) {
     )
     .service(
         web::scope("/phpmyadmin/api")
+            .wrap(from_fn(require_auth))
+            .configure(register_pma_api_routes),
+    )
+    .service(
+        web::scope("/pgadmin/api")
             .wrap(from_fn(require_auth))
             .configure(register_pma_api_routes),
     );

@@ -2,7 +2,7 @@
 import {
   api, esc, fmtBytes, fmtTime, fmtUptime, statusClass,
   toast, openModal, closeModal, confirmAction, openJobDrawer, navigate, state,
-  capBannerHtml, capDisabledAttr, withBusy, isActiveRender, clearRefreshTimer,
+  capBannerHtml, capDisabledAttr, withBusy, isActiveRender, clearRefreshTimer, t,
 } from './app.js';
 
 function sparklineSvg(values, color = 'var(--accent)') {
@@ -226,14 +226,45 @@ const RUNTIMES = [
 ];
 
 export async function renderApps(container, renderSeq = state.renderSeq) {
-  const [apps, templates] = await Promise.all([
+  const [apps, templates, allDbs] = await Promise.all([
     api('GET', '/api/apps'),
     api('GET', '/api/oneclick/templates').catch(() => []),
+    api('GET', '/api/databases').catch(() => []),
   ]);
   if (!isActiveRender(renderSeq, 'apps')) return;
 
   let searchTerm = '';
   let activeTab = 'sites';
+  const ssoTok = state.token ? encodeURIComponent(state.token) : '';
+
+  function resolveAppDbTool(appItem) {
+    if (!appItem.linkedDbName) return null;
+    const matched = (Array.isArray(allDbs) ? allDbs : []).find(
+      (d) => d.name === appItem.linkedDbName || d.linkedAppId === appItem.id,
+    );
+    const eng = String(matched?.engine || '').toLowerCase();
+    if (eng.includes('postgre')) {
+      return {
+        label: 'pgAdmin',
+        href: `/pgadmin/${ssoTok ? `?fp_sso=${ssoTok}` : ''}`,
+      };
+    }
+    if (eng.includes('sqlite')) {
+      const dbId = matched?.id ? `db=${encodeURIComponent(matched.id)}` : '';
+      const q = [dbId, ssoTok ? `fp_sso=${ssoTok}` : ''].filter(Boolean).join('&');
+      return {
+        label: 'FPSql',
+        href: `/phpadmin/${q ? `?${q}` : ''}`,
+      };
+    }
+    const q = [`db=${encodeURIComponent(appItem.linkedDbName)}`, ssoTok ? `fp_sso=${ssoTok}` : '']
+      .filter(Boolean)
+      .join('&');
+    return {
+      label: 'Myphpadmin',
+      href: `/phpmyadmin/?${q}`,
+    };
+  }
 
   function draw() {
     const filtered = (Array.isArray(apps) ? apps : []).filter((a) => {
@@ -247,15 +278,15 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
     container.innerHTML = `
       <div class="page-head">
         <div>
-          <h1 class="page-title">Website & Ứng dụng</h1>
-          <p class="page-desc">Quản lý triển khai website Rust, PHP, Python, Go, Bun/JS/CSS và chứng chỉ SSL tự động trên cổng 80/443.</p>
+          <h1 class="page-title">${esc(t('Website & Ứng dụng', 'Websites & Apps'))}</h1>
+          <p class="page-desc">${esc(t('Quản lý triển khai website Rust, PHP, Python, Go, Bun/JS/CSS, đồng bộ SQL (Myphpadmin / pgAdmin / FPSql) và chứng chỉ SSL tự động trên cổng 80/443.', 'Manage Rust, PHP, Python, Go, and Zero-Node.js Bun/JS/CSS websites, SQL studio links (Myphpadmin / pgAdmin / FPSql), and automated SSL on ports 80/443.'))}</p>
         </div>
         <div class="row">
           <div class="tabs">
-            <button type="button" class="tab-btn ${activeTab === 'sites' ? 'active' : ''}" id="tab-sites">Danh sách (${apps.length})</button>
-            <button type="button" class="tab-btn ${activeTab === 'oneclick' ? 'active' : ''}" id="tab-oneclick">Triển khai 1-Click (${templates.length})</button>
+            <button type="button" class="tab-btn ${activeTab === 'sites' ? 'active' : ''}" id="tab-sites">${esc(t('Danh sách', 'Websites'))} (${apps.length})</button>
+            <button type="button" class="tab-btn ${activeTab === 'oneclick' ? 'active' : ''}" id="tab-oneclick">${esc(t('Triển khai 1-Click', '1-Click Deploy'))} (${templates.length})</button>
           </div>
-          <button type="button" class="btn btn-primary" id="btn-deploy-app">Thêm Website mới</button>
+          <button type="button" class="btn btn-primary" id="btn-deploy-app">${esc(t('Thêm Website mới', 'Add New Website'))}</button>
         </div>
       </div>
 
@@ -264,24 +295,26 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
       ${activeTab === 'sites' ? `
         <section class="surface">
           <div class="surface-head">
-            <input class="input" id="apps-search" style="max-width:340px" placeholder="Tìm theo tên miền, ứng dụng hoặc framework…" value="${esc(searchTerm)}" />
-            <span class="meta-line"><span>Tổng: <strong class="mono">${filtered.length}</strong> website</span></span>
+            <input class="input" id="apps-search" style="max-width:340px" placeholder="${esc(t('Tìm theo tên miền, ứng dụng hoặc framework…', 'Search domain, app name, or framework…'))}" value="${esc(searchTerm)}" />
+            <span class="meta-line"><span>${esc(t('Tổng:', 'Total:'))} <strong class="mono">${filtered.length}</strong> website</span></span>
           </div>
           <div class="table-wrap">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Tên miền / Ứng dụng</th>
-                  <th>Framework & Engine</th>
-                  <th>Trạng thái</th>
-                  <th>Cổng nội bộ</th>
-                  <th class="right">Thao tác</th>
+                  <th>${esc(t('Tên miền / Ứng dụng', 'Domain / Application'))}</th>
+                  <th>Framework &amp; Engine</th>
+                  <th>${esc(t('Trạng thái', 'Status'))}</th>
+                  <th>${esc(t('Cổng nội bộ', 'Internal Port'))}</th>
+                  <th class="right">${esc(t('Thao tác', 'Actions'))}</th>
                 </tr>
               </thead>
               <tbody>
                 ${
                   filtered.length
-                    ? filtered.map((a) => `
+                    ? filtered.map((a) => {
+                      const dbTool = resolveAppDbTool(a);
+                      return `
                       <tr>
                         <td>
                           <div>
@@ -291,7 +324,7 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
                             <span>${esc(a.name)}</span>
                             <span>·</span>
                             <span class="mono">${esc(a.workingDir || '')}</span>
-                            ${a.linkedDbName ? `<span>·</span><a href="/phpmyadmin/?db=${encodeURIComponent(a.linkedDbName)}" target="_blank" rel="noopener noreferrer" class="mono" style="color:var(--accent)">DB: ${esc(a.linkedDbName)} (phpMyAdmin)</a>` : ''}
+                            ${dbTool ? `<span>·</span><a href="${esc(dbTool.href)}" target="_blank" rel="noopener noreferrer" class="mono" style="color:var(--accent)">DB: ${esc(a.linkedDbName)} (${esc(dbTool.label)})</a>` : ''}
                           </div>
                         </td>
                         <td>
@@ -299,7 +332,7 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
                           <div class="meta-line">
                             <span>${esc(a.webServerEngine || 'nginx')}</span>
                             <span>·</span>
-                            <span class="${a.sslEnabled ? 'status-ok' : 'muted'}">${a.sslEnabled ? (a.forceHttps ? 'HTTPS (301)' : 'HTTPS: Bật') : 'HTTP (chưa có SSL)'}</span>
+                            <span class="${a.sslEnabled ? 'status-ok' : 'muted'}">${a.sslEnabled ? (a.forceHttps ? 'HTTPS (301)' : t('HTTPS: Bật', 'HTTPS: On')) : t('HTTP (chưa có SSL)', 'HTTP (No SSL)')}</span>
                             ${a.rateLimitRps ? `<span>·</span><span class="mono">${esc(a.rateLimitRps)} rps</span>` : ''}
                           </div>
                         </td>
@@ -307,20 +340,21 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
                         <td class="mono">${esc(a.internalPort || '—')}</td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
-                            <a class="btn btn-sm" href="${a.sslEnabled ? 'https' : 'http'}://${esc(a.domain)}" target="_blank" rel="noopener noreferrer">Mở Web</a>
-                            ${a.linkedDbName ? `<a class="btn btn-sm" href="/phpmyadmin/?db=${encodeURIComponent(a.linkedDbName)}" target="_blank" rel="noopener noreferrer">phpMyAdmin</a>` : ''}
+                            <a class="btn btn-sm" href="${a.sslEnabled ? 'https' : 'http'}://${esc(a.domain)}" target="_blank" rel="noopener noreferrer">${esc(t('Mở Web', 'Open Site'))}</a>
+                            ${dbTool ? `<a class="btn btn-sm" href="${esc(dbTool.href)}" target="_blank" rel="noopener noreferrer">${esc(dbTool.label)}</a>` : ''}
                             <button type="button" class="btn btn-sm ${a.sslEnabled ? '' : 'btn-primary'}" data-app-ssl="${esc(a.id)}">SSL / HTTPS</button>
                             <button type="button" class="btn btn-sm" data-app-vhost="${esc(a.id)}">Vhost &amp; Log</button>
-                            <button type="button" class="btn btn-sm" data-app-settings="${esc(a.id)}">Cài đặt Site</button>
+                            <button type="button" class="btn btn-sm" data-app-settings="${esc(a.id)}">${esc(t('Cài đặt Site', 'Site Settings'))}</button>
                             <button type="button" class="btn btn-sm" data-app-act="restart" data-id="${esc(a.id)}">Restart</button>
                             <button type="button" class="btn btn-sm" data-app-job="rebuild" data-id="${esc(a.id)}">Rebuild</button>
                             ${a.gitRepoUrl ? `<button type="button" class="btn btn-sm" data-app-job="git-deploy" data-id="${esc(a.id)}">Git Pull</button>` : ''}
                             <button type="button" class="btn btn-sm" data-app-probe="${esc(a.id)}">Test HTTP</button>
-                            <button type="button" class="btn btn-sm btn-danger" data-app-del="${esc(a.id)}" data-domain="${esc(a.domain)}">Xóa</button>
+                            <button type="button" class="btn btn-sm btn-danger" data-app-del="${esc(a.id)}" data-domain="${esc(a.domain)}">${esc(t('Xóa', 'Delete'))}</button>
                           </div>
                         </td>
-                      </tr>`).join('')
-                    : '<tr><td colspan="5" class="empty-state">Chưa có website nào. Nhấn "Thêm Website mới" để triển khai.</td></tr>'
+                      </tr>`;
+                    }).join('')
+                    : `<tr><td colspan="5" class="empty-state">${esc(t('Chưa có website nào. Nhấn "Thêm Website mới" để triển khai.', 'No websites yet. Click "Add New Website" to deploy.'))}</td></tr>`
                 }
               </tbody>
             </table>
@@ -1764,13 +1798,14 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
 }
 
 // ============================================================================
-// 4. SQL DATABASES & PURE-RUST FERROUSADMIN
+// 4. FPSQL & DATABASE (PURE-RUST STUDIO + MYPHPADMIN + PGADMIN 4)
 // ============================================================================
 export async function renderDatabases(container, renderSeq = state.renderSeq) {
-  let [dbs, mysqlCfg, officialPma] = await Promise.all([
+  let [dbs, mysqlCfg, officialPma, officialPga] = await Promise.all([
     api('GET', '/api/databases'),
     api('GET', '/api/databases/mysql-config').catch(() => null),
     api('GET', '/api/databases/phpmyadmin/status').catch(() => null),
+    api('GET', '/api/databases/pgadmin/status').catch(() => null),
   ]);
   if (!isActiveRender(renderSeq, 'databases')) return;
 
@@ -1786,35 +1821,49 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
     const panelDbUrl = ssoQuery
       ? `${panelDbBase}${panelDbBase.includes('?') ? '&' : '?'}${ssoQuery}`
       : panelDbBase;
-    const officialPmaBase = selectedDbObj?.name
+    const officialPmaBase = selectedDbObj?.name && !String(selectedDbObj?.engine || '').toLowerCase().includes('postgre')
       ? `/phpmyadmin/index.php?route=/database/structure&db=${encodeURIComponent(selectedDbObj.name)}`
       : '/phpmyadmin/';
     const officialPmaUrl = ssoQuery
       ? `${officialPmaBase}${officialPmaBase.includes('?') ? '&' : '?'}${ssoQuery}`
       : officialPmaBase;
+    const officialPgaUrl = ssoQuery ? `/pgadmin/?${ssoQuery}` : '/pgadmin/';
+
     const officialRunning = Boolean(officialPma?.running);
     const officialInstalled = Boolean(officialPma?.installed);
     const pmaVersion = officialPma?.version || '5.2.3';
     const pmaLabel = officialPma?.displayName || `Myphpadmin ${pmaVersion}`;
 
+    const pgaRunning = Boolean(officialPga?.running);
+    const pgaInstalled = Boolean(officialPga?.installed);
+    const pgaLabel = officialPga?.displayName || 'pgAdmin 4';
+
+    const pgDbs = (Array.isArray(dbs) ? dbs : []).filter((d) => String(d.engine || '').toLowerCase().includes('postgre'));
+
     container.innerHTML = `
       <div class="page-head">
         <div>
-          <h1 class="page-title">Cơ sở dữ liệu SQL — FerrousAdmin &amp; ${esc(pmaLabel)}</h1>
-          <p class="page-desc">Tự động đồng bộ 2 chiều giữa <strong>SQL của Panel</strong>, <strong>FerrousAdmin</strong> (<code>/phpadmin/</code>) và <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code> · tự động đăng nhập SSO khi mở từ Panel).</p>
+          <h1 class="page-title">FPSql &amp; Database</h1>
+          <p class="page-desc">${t(
+            `Tự động đồng bộ 2 chiều giữa <strong>FPSql &amp; Database</strong> (<code>/phpadmin/</code>), <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code> · MariaDB/MySQL) và <strong>${esc(pgaLabel)}</strong> (<code>/pgadmin/</code> · PostgreSQL).`,
+            `Two-way live synchronization across <strong>FPSql &amp; Database</strong> (<code>/phpadmin/</code>), <strong>${esc(pmaLabel)}</strong> (<code>/phpmyadmin/</code> · MariaDB/MySQL), and <strong>${esc(pgaLabel)}</strong> (<code>/pgadmin/</code> · PostgreSQL).`,
+          )}</p>
         </div>
         <div class="row">
           <div class="tabs">
-            <button type="button" class="tab-btn ${activeDbTab === 'list' ? 'active' : ''}" id="db-tab-list">Danh sách DB (${Array.isArray(dbs) ? dbs.length : 0})</button>
-            <button type="button" class="tab-btn ${activeDbTab === 'studio' ? 'active' : ''}" id="db-tab-studio">Trang Panel (/phpadmin/)</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'list' ? 'active' : ''}" id="db-tab-list">${esc(t('Danh sách DB', 'Databases'))} (${Array.isArray(dbs) ? dbs.length : 0})</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'studio' ? 'active' : ''}" id="db-tab-studio">FPSql &amp; Database (/phpadmin/)</button>
             <button type="button" class="tab-btn ${activeDbTab === 'official' ? 'active' : ''}" id="db-tab-official">${esc(pmaLabel)} (/phpmyadmin/)</button>
-            <button type="button" class="tab-btn ${activeDbTab === 'config' ? 'active' : ''}" id="db-tab-config">Cấu hình MySQL</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'pgadmin' ? 'active' : ''}" id="db-tab-pgadmin">pgAdmin 4 (/pgadmin/)</button>
+            <button type="button" class="tab-btn ${activeDbTab === 'config' ? 'active' : ''}" id="db-tab-config">${esc(t('Cấu hình SQL', 'SQL Config'))}</button>
           </div>
-          <button type="button" class="btn btn-sm" id="db-sync-btn" title="Đồng bộ danh sách database giữa MariaDB/MySQL, Myphpadmin và Panel">Đồng bộ SQL</button>
-          <a class="btn btn-sm" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">/phpadmin/ ↗</a>
+          <button type="button" class="btn btn-sm" id="db-sync-btn" title="${esc(t('Đồng bộ danh sách database giữa MariaDB, PostgreSQL, Myphpadmin, pgAdmin và FPSql', 'Sync live databases across MariaDB, PostgreSQL, Myphpadmin, pgAdmin, and FPSql'))}">${esc(t('Đồng bộ SQL', 'Sync SQL'))}</button>
+          <a class="btn btn-sm" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">FPSql ↗</a>
           <a class="btn btn-sm" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">/phpmyadmin/ ↗</a>
-          ${!officialRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pma">${officialInstalled ? `Khởi động ${esc(pmaLabel)}` : `Cài ${esc(pmaLabel)}`}</button>` : ''}
-          <button type="button" class="btn btn-primary" id="db-create-btn">Tạo Database mới</button>
+          <a class="btn btn-sm" href="${esc(officialPgaUrl)}" target="_blank" rel="noopener">/pgadmin/ ↗</a>
+          ${!officialRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pma">${esc(officialInstalled ? t(`Khởi động ${pmaLabel}`, `Start ${pmaLabel}`) : t(`Cài ${pmaLabel}`, `Install ${pmaLabel}`))}</button>` : ''}
+          ${!pgaRunning ? `<button type="button" class="btn btn-sm" id="db-install-official-pga">${esc(pgaInstalled ? t('Khởi động pgAdmin 4', 'Start pgAdmin 4') : t('Clone pgAdmin 4', 'Clone pgAdmin 4'))}</button>` : ''}
+          <button type="button" class="btn btn-primary" id="db-create-btn">${esc(t('Tạo Database mới', 'Create Database'))}</button>
         </div>
       </div>
 
@@ -1825,7 +1874,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           <div class="table-wrap">
             <table class="data-table">
               <thead>
-                <tr><th>Tên Database</th><th>Engine &amp; Trạng thái</th><th>Tài khoản</th><th class="right">Kết nối / Bảng / Dung lượng</th><th class="right">Thao tác</th></tr>
+                <tr><th>${esc(t('Tên Database', 'Database Name'))}</th><th>${esc(t('Engine & Trạng thái', 'Engine & Status'))}</th><th>${esc(t('Tài khoản', 'Username'))}</th><th class="right">${esc(t('Kết nối / Bảng / Dung lượng', 'Conns / Tables / Size'))}</th><th class="right">${esc(t('Thao tác', 'Actions'))}</th></tr>
               </thead>
               <tbody>
                 ${
@@ -1833,6 +1882,9 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
                     ? dbs.map((d) => {
                       const tblCount = Array.isArray(d.tables) ? d.tables.length : 0;
                       const connStr = `${d.activeConnections ?? 0}/${d.maxConnections ?? 0}`;
+                      const engLower = String(d.engine || '').toLowerCase();
+                      const isPg = engLower.includes('postgre');
+                      const isSqlite = engLower.includes('sqlite');
                       return `
                       <tr>
                         <td>
@@ -1844,24 +1896,27 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
                           <div class="meta-line"><span class="${statusClass(d.status)}">${esc(d.status || 'online')}</span></div>
                         </td>
                         <td class="mono">${esc(d.username)}</td>
-                        <td class="right mono">${esc(connStr)} conn · ${esc(tblCount)} bảng · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
+                        <td class="right mono">${esc(connStr)} conn · ${esc(tblCount)} ${esc(t('bảng', 'tables'))} · ${Number(d.sizeMb || 0).toFixed(2)} MB</td>
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
-                            <button type="button" class="btn btn-sm" data-db-panel-studio="${esc(d.id)}" title="Mở trình quản trị CSDL tuỳ chỉnh của Panel (/phpadmin/)">Panel DB</button>
-                            <button type="button" class="btn btn-sm btn-primary" data-db-pma="${esc(d.id)}" title="Mở ${esc(pmaLabel)} (/phpmyadmin/)">${esc(pmaLabel)}</button>
-                            <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">Chạy SQL</button>
-                            <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">Đổi MK</button>
-                            <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">Xuất .sql</button>
+                            <button type="button" class="btn btn-sm ${isSqlite ? 'btn-primary' : ''}" data-db-panel-studio="${esc(d.id)}" title="FPSql &amp; Database (/phpadmin/)">FPSql</button>
+                            ${isPg
+                              ? `<button type="button" class="btn btn-sm btn-primary" data-db-pga="${esc(d.id)}" title="pgAdmin 4 (/pgadmin/)">pgAdmin 4</button>`
+                              : (!isSqlite ? `<button type="button" class="btn btn-sm btn-primary" data-db-pma="${esc(d.id)}" title="${esc(pmaLabel)} (/phpmyadmin/)">${esc(pmaLabel)}</button>` : '')
+                            }
+                            <button type="button" class="btn btn-sm" data-db-sql="${esc(d.id)}" data-name="${esc(d.name)}">${esc(t('Chạy SQL', 'Run SQL'))}</button>
+                            <button type="button" class="btn btn-sm" data-db-pw="${esc(d.id)}" data-name="${esc(d.name)}">${esc(t('Đổi MK', 'Password'))}</button>
+                            <button type="button" class="btn btn-sm" data-db-export="${esc(d.id)}" data-name="${esc(d.name)}">${esc(t('Xuất .sql', 'Export .sql'))}</button>
                             <label class="btn btn-sm" style="cursor:pointer">
-                              Nhập .sql
+                              ${esc(t('Nhập .sql', 'Import .sql'))}
                               <input type="file" accept=".sql,.txt" hidden data-db-import="${esc(d.id)}" />
                             </label>
-                            <button type="button" class="btn btn-sm btn-danger" data-db-del="${esc(d.id)}" data-name="${esc(d.name)}">Xóa</button>
+                            <button type="button" class="btn btn-sm btn-danger" data-db-del="${esc(d.id)}" data-name="${esc(d.name)}">${esc(t('Xóa', 'Delete'))}</button>
                           </div>
                         </td>
                       </tr>`;
                     }).join('')
-                    : '<tr><td colspan="5" class="empty-state">Chưa có cơ sở dữ liệu nào. Bạn có thể tạo ngay MariaDB 11.4, PostgreSQL 17 hoặc SQLite 3 (WAL).</td></tr>'
+                    : `<tr><td colspan="5" class="empty-state">${esc(t('Chưa có cơ sở dữ liệu nào. Bạn có thể tạo ngay MariaDB 11.4, PostgreSQL 17 hoặc SQLite 3 (WAL).', 'No databases yet. Create a MariaDB 11.4, PostgreSQL 17, or SQLite 3 (WAL) database right away.'))}</td></tr>`
                 }
               </tbody>
             </table>
@@ -1871,70 +1926,87 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
         <section class="surface" style="padding:12px">
           <div class="surface-head" style="margin-bottom:10px">
             <div class="row">
-              <strong>Trang CSDL Tuỳ chỉnh của Panel — FerrousAdmin (Pure Rust)</strong>
+              <strong>FPSql &amp; Database — Pure-Rust SQL Studio</strong>
               <span class="meta-line mono">(/phpadmin/)</span>
             </div>
             <div class="row">
               <select class="select" id="pma-db-picker" style="width:auto">
-                <option value="">-- Chọn Database để nạp --</option>
+                <option value="">${esc(t('-- Chọn Database để nạp --', '-- Select Database --'))}</option>
                 ${(Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
               </select>
-              <button type="button" class="btn btn-sm" id="switch-to-official-tab">⇄ Chuyển sang ${esc(pmaLabel)}</button>
-              <a class="btn btn-sm btn-primary" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
+              <button type="button" class="btn btn-sm" id="switch-to-official-tab">⇄ ${esc(pmaLabel)}</button>
+              <button type="button" class="btn btn-sm" id="switch-to-pgadmin-tab">⇄ pgAdmin 4</button>
+              <a class="btn btn-sm btn-primary" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
             </div>
           </div>
-          <iframe id="fp-sql-iframe" src="${esc(panelDbUrl)}" title="FerrousAdmin SQL Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(panelDbUrl)}" title="FPSql & Database Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : activeDbTab === 'official' ? `
         <section class="surface" style="padding:12px">
           <div class="surface-head" style="margin-bottom:10px">
             <div class="row">
-              <strong>${esc(pmaLabel)} (phpmyadmin.net)</strong>
-              <span class="${officialRunning ? 'st-ok' : 'st-warn'} mono">${officialRunning ? 'Đang chạy (/phpmyadmin/)' : (officialInstalled ? 'Đã cài · Chưa chạy' : 'Chưa tải')}</span>
+              <strong>${esc(pmaLabel)} (phpmyadmin.net · MariaDB/MySQL)</strong>
+              <span class="${officialRunning ? 'st-ok' : 'st-warn'} mono">${esc(officialRunning ? t('Đang chạy (/phpmyadmin/)', 'Running (/phpmyadmin/)') : (officialInstalled ? t('Đã cài · Chưa chạy', 'Installed · Stopped') : t('Chưa tải', 'Not Installed')))}</span>
             </div>
             <div class="row">
               <select class="select" id="pma-db-picker" style="width:auto">
-                <option value="">-- Chọn Database MariaDB/MySQL --</option>
-                ${(Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
+                <option value="">${esc(t('-- Chọn Database MariaDB/MySQL --', '-- Select MariaDB/MySQL DB --'))}</option>
+                ${(Array.isArray(dbs) ? dbs : []).filter((d) => !String(d.engine || '').toLowerCase().includes('postgre')).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('')}
               </select>
-              <button type="button" class="btn btn-sm" id="db-reinstall-official-pma">${officialRunning ? 'Làm mới dịch vụ' : `Tải & Kích hoạt ${esc(pmaLabel)}`}</button>
-              <button type="button" class="btn btn-sm" id="switch-to-panel-tab">⇄ Trang Tuỳ chỉnh Panel</button>
-              <a class="btn btn-sm btn-primary" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">Mở toàn màn hình</a>
+              <button type="button" class="btn btn-sm" id="db-reinstall-official-pma">${esc(officialRunning ? t('Làm mới dịch vụ', 'Refresh Service') : t(`Tải & Kích hoạt ${pmaLabel}`, `Install & Start ${pmaLabel}`))}</button>
+              <button type="button" class="btn btn-sm" id="switch-to-panel-tab">⇄ FPSql &amp; Database</button>
+              <a class="btn btn-sm btn-primary" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
             </div>
           </div>
           <iframe id="fp-sql-iframe" src="${esc(officialPmaUrl)}" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
+      ` : activeDbTab === 'pgadmin' ? `
+        <section class="surface" style="padding:12px">
+          <div class="surface-head" style="margin-bottom:10px">
+            <div class="row">
+              <strong>${esc(pgaLabel)} (PostgreSQL Studio · /pgadmin/)</strong>
+              <span class="${pgaRunning ? 'st-ok' : 'st-warn'} mono">${esc(pgaRunning ? t('Đang chạy (/pgadmin/)', 'Running (/pgadmin/)') : (pgaInstalled ? t('Đã cài · Chưa chạy', 'Installed · Stopped') : t('Chưa clone', 'Not Cloned')))}</span>
+              <span class="meta-line mono">PostgreSQL DBs: ${pgDbs.length}</span>
+            </div>
+            <div class="row">
+              <button type="button" class="btn btn-sm ${pgaRunning ? '' : 'btn-primary'}" id="db-reinstall-official-pga">${esc(pgaRunning ? t('Làm mới & Đồng bộ pgAdmin', 'Refresh & Sync pgAdmin') : t('Clone & Kích hoạt pgAdmin 4 (1-Click)', 'Clone & Enable pgAdmin 4 (1-Click)'))}</button>
+              <button type="button" class="btn btn-sm" id="switch-to-panel-tab">⇄ FPSql &amp; Database</button>
+              <a class="btn btn-sm btn-primary" href="${esc(officialPgaUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
+            </div>
+          </div>
+          <iframe id="fp-sql-iframe" src="${esc(officialPgaUrl)}" title="${esc(pgaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+        </section>
       ` : `
         <section class="surface">
           <div class="surface-head">
-            <h2 class="surface-title">Cấu hình MariaDB / MySQL (50-server.cnf) &amp; Đường dẫn ${esc(pmaLabel)}</h2>
+            <h2 class="surface-title">${esc(t('Cấu hình MariaDB / MySQL (50-server.cnf) & Đường dẫn SQL', 'MariaDB / MySQL Configuration (50-server.cnf) & SQL Paths'))}</h2>
             <span class="meta-line mono">${esc(mysqlCfg?.mysqlVersion || 'MariaDB / MySQL')}</span>
           </div>
           <form id="mysql-cfg-form">
             <div class="form-grid" style="margin-bottom:12px">
               <div class="field">
-                <label>Đường dẫn truy cập ${esc(pmaLabel)}</label>
+                <label>${esc(t(`Đường dẫn truy cập ${pmaLabel}`, `${pmaLabel} Path`))}</label>
                 <input class="input mono" name="pmaPath" value="${esc(mysqlCfg?.pmaPath || '/phpmyadmin')}" />
               </div>
               <div class="field">
-                <label>Cổng Loopback Nội bộ (Nginx/FerrousX Proxy)</label>
+                <label>${esc(t('Cổng Loopback Nội bộ (Nginx/FerrousX Proxy)', 'Internal Loopback Proxy Port'))}</label>
                 <input class="input mono" name="pmaPort" type="number" value="${esc(mysqlCfg?.pmaPort || 888)}" />
               </div>
               <div class="field">
-                <label>Giới hạn Upload / Import SQL (MB)</label>
+                <label>${esc(t('Giới hạn Upload / Import SQL (MB)', 'Max SQL Upload / Import (MB)'))}</label>
                 <input class="input mono" name="pmaMaxUploadMb" type="number" min="1" max="512" value="${esc(mysqlCfg?.pmaMaxUploadMb || 64)}" />
               </div>
               <div class="field">
-                <label>Socket MariaDB</label>
+                <label>${esc(t('Socket MariaDB', 'MariaDB Socket'))}</label>
                 <input class="input mono" value="${esc(mysqlCfg?.socketPath || '/run/mysqld/mysqld.sock')}" readonly />
               </div>
             </div>
             <div class="field">
-              <label>Tệp cấu hình MariaDB trực tiếp (<code>/etc/mysql/mariadb.conf.d/50-server.cnf</code>)</label>
+              <label>${esc(t('Tệp cấu hình MariaDB trực tiếp', 'Live MariaDB Configuration'))} (<code>/etc/mysql/mariadb.conf.d/50-server.cnf</code>)</label>
               <textarea class="textarea mono" name="myCnfRaw" style="min-height:220px" placeholder="[mysqld]\nbind-address = 127.0.0.1\nport = 3306\nmax_connections = 200">${esc(mysqlCfg?.myCnfRaw || '')}</textarea>
             </div>
             <div class="row" style="justify-content:flex-end;margin-top:12px">
-              <button type="submit" class="btn btn-primary" id="mysql-cfg-save">Lưu cấu hình &amp; Reload MariaDB</button>
+              <button type="submit" class="btn btn-primary" id="mysql-cfg-save">${esc(t('Lưu cấu hình & Reload MariaDB', 'Save Config & Reload MariaDB'))}</button>
             </div>
           </form>
         </section>
@@ -1943,12 +2015,14 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
 
     const syncDatabasesNow = async (showToast = false, redraw = true) => {
       try {
-        const [freshDbs, freshPma] = await Promise.all([
+        const [freshDbs, freshPma, freshPga] = await Promise.all([
           api('GET', '/api/databases', undefined, { noCache: true }),
           api('GET', '/api/databases/phpmyadmin/status', undefined, { noCache: true }).catch(() => officialPma),
+          api('GET', '/api/databases/pgadmin/status', undefined, { noCache: true }).catch(() => officialPga),
         ]);
         dbs = freshDbs;
         if (freshPma) officialPma = freshPma;
+        if (freshPga) officialPga = freshPga;
         if (!studioDbId && Array.isArray(dbs) && dbs[0]) {
           studioDbId = dbs[0].id;
         }
@@ -1956,18 +2030,21 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
           draw();
         } else {
           const listBtn = document.getElementById('db-tab-list');
-          if (listBtn) listBtn.textContent = `Danh sách DB (${Array.isArray(dbs) ? dbs.length : 0})`;
+          if (listBtn) listBtn.textContent = `${t('Danh sách DB', 'Databases')} (${Array.isArray(dbs) ? dbs.length : 0})`;
           const picker = document.getElementById('pma-db-picker');
           if (picker) {
-            const firstOpt = picker.querySelector('option[value=""]')?.outerHTML || '<option value="">-- Chọn Database --</option>';
+            const firstOpt = picker.querySelector('option[value=""]')?.outerHTML || `<option value="">${esc(t('-- Chọn Database --', '-- Select Database --'))}</option>`;
             picker.innerHTML = firstOpt + (Array.isArray(dbs) ? dbs : []).map((d) => `<option value="${esc(d.id)}" ${d.id === studioDbId ? 'selected' : ''}>${esc(d.name)} (${esc(d.engine)})</option>`).join('');
           }
         }
         if (showToast) {
-          toast(`Đã đồng bộ 2 chiều ${Array.isArray(dbs) ? dbs.length : 0} cơ sở dữ liệu với ${pmaLabel}.`);
+          toast(t(
+            `Đã đồng bộ 2 chiều ${Array.isArray(dbs) ? dbs.length : 0} cơ sở dữ liệu (MariaDB + PostgreSQL + FPSql).`,
+            `Synchronized ${Array.isArray(dbs) ? dbs.length : 0} databases two-way across MariaDB, PostgreSQL, and FPSql.`,
+          ));
         }
       } catch (err) {
-        if (showToast) toast(err.message || 'Không thể đồng bộ SQL.', 'err');
+        if (showToast) toast(err.message || t('Không thể đồng bộ SQL.', 'Failed to sync SQL databases.'), 'err');
       }
     };
 
@@ -1990,10 +2067,20 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       activeDbTab = 'official';
       draw();
     });
+    document.getElementById('db-tab-pgadmin')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
+      activeDbTab = 'pgadmin';
+      draw();
+    });
     document.getElementById('db-tab-config')?.addEventListener('click', () => { activeDbTab = 'config'; draw(); });
     document.getElementById('switch-to-official-tab')?.addEventListener('click', async () => {
       await syncDatabasesNow(false, false);
       activeDbTab = 'official';
+      draw();
+    });
+    document.getElementById('switch-to-pgadmin-tab')?.addEventListener('click', async () => {
+      await syncDatabasesNow(false, false);
+      activeDbTab = 'pgadmin';
       draw();
     });
     document.getElementById('switch-to-panel-tab')?.addEventListener('click', async () => {
@@ -2011,15 +2098,31 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       try {
         officialPma = await api('POST', '/api/databases/phpmyadmin/install', {}, { timeoutMs: 240000, keepAlive: true });
         const installedName = officialPma?.displayName || `Myphpadmin ${officialPma?.version || '5.2.3'}`;
-        toast(`Đã cài đặt & khởi chạy ${installedName} tại /phpmyadmin/!`);
+        toast(t(`Đã cài đặt & khởi chạy ${installedName} tại /phpmyadmin/!`, `Installed & started ${installedName} at /phpmyadmin/!`));
         activeDbTab = 'official';
         draw();
       } catch (err) {
-        toast(err.message || `Không thể cài đặt ${pmaLabel}.`, 'err');
+        toast(err.message || t(`Không thể cài đặt ${pmaLabel}.`, `Failed to install ${pmaLabel}.`), 'err');
       }
     });
     document.getElementById('db-install-official-pma')?.addEventListener('click', (e) => handleInstallOfficialPma(e.currentTarget));
     document.getElementById('db-reinstall-official-pma')?.addEventListener('click', (e) => handleInstallOfficialPma(e.currentTarget));
+
+    const handleInstallOfficialPga = (btn) => withBusy(btn, async () => {
+      try {
+        toast(t('Đang clone pgAdmin 4 & cấu hình đồng bộ PostgreSQL (khoảng 30–90s lần đầu)…', 'Cloning pgAdmin 4 & configuring PostgreSQL sync (30–90s on first run)…'));
+        officialPga = await api('POST', '/api/databases/pgadmin/install', {}, { timeoutMs: 360000, keepAlive: true });
+        const installedName = officialPga?.displayName || 'pgAdmin 4';
+        toast(t(`Đã clone & khởi chạy ${installedName} tại /pgadmin/!`, `Cloned & started ${installedName} at /pgadmin/!`));
+        await syncDatabasesNow(false, false);
+        activeDbTab = 'pgadmin';
+        draw();
+      } catch (err) {
+        toast(err.message || t('Không thể cài đặt pgAdmin 4.', 'Failed to install pgAdmin 4.'), 'err');
+      }
+    });
+    document.getElementById('db-install-official-pga')?.addEventListener('click', (e) => handleInstallOfficialPga(e.currentTarget));
+    document.getElementById('db-reinstall-official-pga')?.addEventListener('click', (e) => handleInstallOfficialPga(e.currentTarget));
 
     container.querySelectorAll('[data-db-panel-studio]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -2037,6 +2140,14 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
       });
     });
 
+    container.querySelectorAll('[data-db-pga]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        studioDbId = btn.dataset.dbPga;
+        activeDbTab = 'pgadmin';
+        draw();
+      });
+    });
+
     document.getElementById('mysql-cfg-form')?.addEventListener('submit', async (e) => {
       e.preventDefault();
       const sub = document.getElementById('mysql-cfg-save');
@@ -2049,7 +2160,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
             pmaMaxUploadMb: Number(fd.get('pmaMaxUploadMb') || 64),
             myCnfRaw: String(fd.get('myCnfRaw') || ''),
           });
-          toast('Đã lưu cấu hình MySQL / phpMyAdmin.');
+          toast(t('Đã lưu cấu hình SQL.', 'Saved SQL configuration.'));
           await renderDatabases(container);
         } catch (err) {
           toast(err.message, 'err');

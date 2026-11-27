@@ -43,12 +43,18 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
     (method == Method::GET
         && matches!(
             path,
-            "/api/health" | "/phpadmin/api/health" | "/phpmyadmin/api/health"
+            "/api/health"
+                | "/phpadmin/api/health"
+                | "/phpmyadmin/api/health"
+                | "/pgadmin/api/health"
         ))
         || (method == Method::POST
             && matches!(
                 path,
-                "/api/auth/login" | "/phpadmin/api/auth/login" | "/phpmyadmin/api/auth/login"
+                "/api/auth/login"
+                    | "/phpadmin/api/auth/login"
+                    | "/phpmyadmin/api/auth/login"
+                    | "/pgadmin/api/auth/login"
             ))
 }
 

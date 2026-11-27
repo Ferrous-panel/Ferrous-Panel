@@ -1765,6 +1765,24 @@ pub async fn deploy_app(
 
     let effective_doc_root =
         resolve_effective_doc_root(safe_working.as_path(), &req.run_sub_dir, req.framework);
+    if trimmed_repo.is_empty() && (is_static_runtime(req.framework) || is_php_runtime(req.framework)) {
+        let runtime_label = serde_json::to_value(req.framework)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_else(|| "Pure-Rust Edge".to_string());
+        crate::modules::default_pages::ensure_new_site_welcome_index(
+            &effective_doc_root,
+            domain.as_str(),
+            &runtime_label,
+            is_php_runtime(req.framework),
+        );
+        ensure_wwwroot_ownership(
+            safe_working.as_path(),
+            config,
+            webserver.executor().as_ref(),
+        )
+        .await;
+    }
 
     let resolved_php_fpm = if is_php_runtime(req.framework) && config.is_production() {
         PhpFpmVersion::resolve_active_or_start(webserver.executor().as_ref()).await?
@@ -2048,6 +2066,18 @@ pub async fn deploy_app(
             return Err(err);
         }
         linked_db_name = Some(req.db_name.trim().to_string());
+        if config.is_production() && req.db_engine.to_ascii_lowercase().contains("postgre") {
+            let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(
+                webserver.executor().as_ref(),
+            )
+            .await;
+            if !Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file() {
+                let bg_exec = std::sync::Arc::clone(webserver.executor());
+                tokio::spawn(async move {
+                    let _ = crate::pma_web::install_or_repair_official_pgadmin(bg_exec.as_ref()).await;
+                });
+            }
+        }
     }
 
     clean_envs.clear();

@@ -878,7 +878,8 @@ pub async fn ensure_myphpadmin_sso_mysql_account(
         return None;
     };
     let grant_sql = format!(
-        "CREATE USER IF NOT EXISTS {quser}@'localhost' IDENTIFIED BY {qpw}; \
+        "CREATE DATABASE IF NOT EXISTS `phpmyadmin` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
+         CREATE USER IF NOT EXISTS {quser}@'localhost' IDENTIFIED BY {qpw}; \
          CREATE USER IF NOT EXISTS {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
          ALTER USER {quser}@'localhost' IDENTIFIED BY {qpw}; \
          ALTER USER {quser}@'127.0.0.1' IDENTIFIED BY {qpw}; \
@@ -887,6 +888,18 @@ pub async fn ensure_myphpadmin_sso_mysql_account(
          FLUSH PRIVILEGES;"
     );
     if run_mysql_stdin(executor, None, &grant_sql).await.is_ok() {
+        static PMA_TABLES_IMPORTED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !PMA_TABLES_IMPORTED.load(std::sync::atomic::Ordering::Relaxed) {
+            let create_tables_path = Path::new("/www/server/phpmyadmin/sql/create_tables.sql");
+            if let Ok(schema_sql) = std::fs::read_to_string(create_tables_path) {
+                if !schema_sql.trim().is_empty()
+                    && run_mysql_stdin(executor, None, &schema_sql).await.is_ok()
+                {
+                    PMA_TABLES_IMPORTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
         Some((MYPHPADMIN_SSO_USER.to_string(), sso_pw))
     } else {
         None
@@ -943,9 +956,11 @@ pub async fn reconcile_live_mariadb_schemas_into_store(
 
     // 1. MariaDB -> Panel: import any schema created in Myphpadmin / CLI into ModuleStore
     for (schema_name, collation) in &live_schemas {
-        let already_tracked = existing
-            .iter()
-            .any(|m| m.name.eq_ignore_ascii_case(schema_name));
+        let already_tracked = existing.iter().any(|m| {
+            m.name.eq_ignore_ascii_case(schema_name)
+                && DbEngineKind::parse(&m.engine).unwrap_or(DbEngineKind::MariaDb)
+                    == DbEngineKind::MariaDb
+        });
         if !already_tracked {
             let meta = ManagedDbMeta {
                 id: format!("db-{}-{}", DbEngineKind::MariaDb.id_prefix(), schema_name),
@@ -966,8 +981,12 @@ pub async fn reconcile_live_mariadb_schemas_into_store(
         }
     }
 
-    // 2. Panel -> MariaDB: push Panel databases missing from MariaDB, or remove databases dropped in Myphpadmin
+    // 2. Panel -> MariaDB: push Panel MariaDB databases missing from MariaDB, or remove databases dropped in Myphpadmin
     for meta in &existing {
+        let engine_kind = DbEngineKind::parse(&meta.engine).unwrap_or(DbEngineKind::MariaDb);
+        if engine_kind != DbEngineKind::MariaDb {
+            continue;
+        }
         let in_live = live_schemas
             .iter()
             .any(|(s, _)| s.eq_ignore_ascii_case(&meta.name));
@@ -979,22 +998,18 @@ pub async fn reconcile_live_mariadb_schemas_into_store(
         }
 
         let was_synced = synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name));
-        let engine_kind = DbEngineKind::parse(&meta.engine).unwrap_or(DbEngineKind::MariaDb);
-
-        if was_synced && engine_kind == DbEngineKind::MariaDb {
+        if was_synced {
             let _ = store.delete_database(&meta.id);
             synced_set.retain(|s| !s.eq_ignore_ascii_case(&meta.name));
-        } else if matches!(engine_kind, DbEngineKind::MariaDb | DbEngineKind::Sqlite) {
-            if let Ok(db_ident) = SqlIdentifier::parse(&meta.name) {
-                let create_sql = format!(
-                    "CREATE DATABASE IF NOT EXISTS {} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
-                    db_ident.quote_mysql()
-                );
-                if run_mysql(executor, None, &create_sql).await.is_ok()
-                    && !synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name))
-                {
-                    synced_set.push(meta.name.to_ascii_lowercase());
-                }
+        } else if let Ok(db_ident) = SqlIdentifier::parse(&meta.name) {
+            let create_sql = format!(
+                "CREATE DATABASE IF NOT EXISTS {} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;",
+                db_ident.quote_mysql()
+            );
+            if run_mysql(executor, None, &create_sql).await.is_ok()
+                && !synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name))
+            {
+                synced_set.push(meta.name.to_ascii_lowercase());
             }
         }
     }
@@ -1002,11 +1017,194 @@ pub async fn reconcile_live_mariadb_schemas_into_store(
     let _ = store.put_json(SYNCED_MARIADB_SCHEMAS_KV_KEY, &synced_set);
 }
 
+pub const PGADMIN_SSO_USER: &str = "fp_pgadmin";
+pub const PGADMIN_SSO_PASS_FILE: &str = "/var/lib/pgadmin/pgadmin.sso.key";
+pub const PGADMIN_PGPASS_FILE: &str = "/var/lib/pgadmin/pgpass";
+const SYNCED_POSTGRES_DBS_KV_KEY: &str = "synced_postgres_databases";
+
+fn is_system_postgres_db(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "postgres" | "template0" | "template1"
+    )
+}
+
+/// Ensures a local PostgreSQL superuser (`fp_pgadmin`) and `.pgpass` file (`/var/lib/pgadmin/pgpass`, `0600`)
+/// exist so pgAdmin 4 (`/pgadmin/`) automatically connects to the Panel's PostgreSQL server with zero password prompt.
+pub async fn ensure_pgadmin_sso_postgres_account(
+    executor: &dyn CommandExecutor,
+) -> Option<(String, String)> {
+    if !executor.is_binary_available(AllowedBinary::Psql) {
+        return None;
+    }
+    let key_path = Path::new(PGADMIN_SSO_PASS_FILE);
+    let existing_pw = std::fs::read_to_string(key_path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| s.len() >= 16 && !s.contains('\'') && !s.contains('\\') && !s.contains(':'));
+
+    let sso_pw = existing_pw.unwrap_or_else(|| {
+        use rand::rngs::OsRng;
+        use rand::RngCore;
+        const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut raw = [0u8; 32];
+        if OsRng.try_fill_bytes(&mut raw).is_err() {
+            return String::new();
+        }
+        raw.iter()
+            .map(|&b| ALPHABET[(b as usize) % ALPHABET.len()] as char)
+            .collect()
+    });
+    if sso_pw.is_empty() {
+        return None;
+    }
+
+    if let Some(parent) = key_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _ = atomic_write_file(key_path, sso_pw.as_bytes(), 0o600);
+    let pgpass_content = format!(
+        "127.0.0.1:5432:*:{PGADMIN_SSO_USER}:{sso_pw}\nlocalhost:5432:*:{PGADMIN_SSO_USER}:{sso_pw}\n"
+    );
+    let _ = atomic_write_file(Path::new(PGADMIN_PGPASS_FILE), pgpass_content.as_bytes(), 0o600);
+
+    let Ok(qpw) = escape_postgres_literal(&sso_pw) else {
+        return None;
+    };
+    let role_sql = format!(
+        "DO $$ BEGIN \
+         IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{PGADMIN_SSO_USER}') THEN \
+           CREATE ROLE {PGADMIN_SSO_USER} WITH SUPERUSER CREATEDB CREATEROLE LOGIN PASSWORD {qpw}; \
+         ELSE \
+           ALTER ROLE {PGADMIN_SSO_USER} WITH SUPERUSER CREATEDB CREATEROLE LOGIN PASSWORD {qpw}; \
+         END IF; \
+         END $$;\n"
+    );
+    if run_psql_stdin(executor, None, &role_sql).await.is_ok() {
+        Some((PGADMIN_SSO_USER.to_string(), sso_pw))
+    } else {
+        None
+    }
+}
+
+/// Automatically performs two-way synchronization between live PostgreSQL databases on the host
+/// and `ModuleStore` so Panel `FPSql & Database` (`/phpadmin/`), PostgreSQL Web/Apps, and `pgAdmin` (`/pgadmin/`)
+/// stay 100% synchronized in both directions.
+pub async fn reconcile_live_postgres_databases_into_store(
+    store: &ModuleStore,
+    executor: &dyn CommandExecutor,
+) {
+    if !executor.is_binary_available(AllowedBinary::Psql) {
+        return;
+    }
+    let sql = "SELECT datname, datcollate FROM pg_database WHERE datistemplate = false ORDER BY datname LIMIT 200;";
+    let Ok(out) = run_psql(executor, None, sql).await else {
+        return;
+    };
+    // Guard against unit-test MockExecutor stubs that return placeholder text instead of pg_database rows.
+    if !out
+        .stdout
+        .lines()
+        .any(|line| line.split('\t').next().map(str::trim) == Some("postgres"))
+    {
+        return;
+    }
+
+    let mut live_dbs: Vec<(String, String)> = Vec::new();
+    for line in out.stdout.lines() {
+        let mut parts = line.split('\t');
+        let Some(raw_name) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if raw_name.is_empty() || is_system_postgres_db(raw_name) {
+            continue;
+        }
+        let Ok(db_ident) = SqlIdentifier::parse(raw_name) else {
+            continue;
+        };
+        let raw_collation = parts.next().map(str::trim).unwrap_or("en_US.UTF-8");
+        let collation = CollationName::parse(raw_collation)
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|_| "en_US.UTF-8".to_string());
+        live_dbs.push((db_ident.as_str().to_string(), collation));
+    }
+
+    let mut synced_set: Vec<String> = store
+        .get_json::<Vec<String>>(SYNCED_POSTGRES_DBS_KV_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let existing = store.list_databases().unwrap_or_default();
+
+    // 1. PostgreSQL -> Panel: import any database created inside pgAdmin / psql into ModuleStore
+    for (db_name, collation) in &live_dbs {
+        let already_tracked = existing.iter().any(|m| {
+            m.name.eq_ignore_ascii_case(db_name)
+                && matches!(DbEngineKind::parse(&m.engine), Ok(DbEngineKind::Postgres))
+        });
+        if !already_tracked {
+            let meta = ManagedDbMeta {
+                id: format!("db-{}-{}", DbEngineKind::Postgres.id_prefix(), db_name),
+                name: db_name.clone(),
+                engine: DbEngineKind::Postgres.label().to_string(),
+                host: "127.0.0.1".to_string(),
+                port: DbEngineKind::Postgres.default_port(),
+                username: "postgres".to_string(),
+                collation: collation.clone(),
+                linked_app_id: String::new(),
+                linked_app_name: String::new(),
+                created_at: Utc::now().to_rfc3339(),
+            };
+            let _ = store.insert_database(&meta);
+        }
+        if !synced_set.iter().any(|s| s.eq_ignore_ascii_case(db_name)) {
+            synced_set.push(db_name.to_ascii_lowercase());
+        }
+    }
+
+    // 2. Panel -> PostgreSQL: push Panel PostgreSQL databases missing from PostgreSQL, or remove DBs dropped in pgAdmin
+    for meta in &existing {
+        if !matches!(DbEngineKind::parse(&meta.engine), Ok(DbEngineKind::Postgres)) {
+            continue;
+        }
+        let in_live = live_dbs
+            .iter()
+            .any(|(s, _)| s.eq_ignore_ascii_case(&meta.name));
+        if in_live {
+            if !synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name)) {
+                synced_set.push(meta.name.to_ascii_lowercase());
+            }
+            continue;
+        }
+
+        let was_synced = synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name));
+        if was_synced {
+            let _ = store.delete_database(&meta.id);
+            synced_set.retain(|s| !s.eq_ignore_ascii_case(&meta.name));
+        } else if let Ok(db_ident) = SqlIdentifier::parse(&meta.name) {
+            let create_sql = format!("CREATE DATABASE {};", db_ident.quote_postgres());
+            if run_psql(executor, None, &create_sql).await.is_ok()
+                && !synced_set.iter().any(|s| s.eq_ignore_ascii_case(&meta.name))
+            {
+                synced_set.push(meta.name.to_ascii_lowercase());
+            }
+        }
+    }
+
+    let _ = store.put_json(SYNCED_POSTGRES_DBS_KV_KEY, &synced_set);
+}
+
 pub async fn list_databases(
     store: &ModuleStore,
     executor: &dyn CommandExecutor,
 ) -> Result<Vec<SqlDatabase>, PanelError> {
     reconcile_live_mariadb_schemas_into_store(store, executor).await;
+    reconcile_live_postgres_databases_into_store(store, executor).await;
     let metas = store.list_databases()?;
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {

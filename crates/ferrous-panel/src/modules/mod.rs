@@ -2,6 +2,7 @@ pub mod apps;
 pub mod capabilities;
 pub mod cpanel;
 pub mod databases;
+pub mod default_pages;
 pub mod extended;
 pub mod files;
 pub mod jobs;
