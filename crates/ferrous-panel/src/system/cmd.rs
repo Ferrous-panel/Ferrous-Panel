@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+pub const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
 /// Strictly allowlisted Ubuntu 22.04/24.04 system binaries.
 /// Shells (`sh`, `bash`, `zsh`, `dash`) are intentionally absent and forbidden.

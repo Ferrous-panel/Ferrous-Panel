@@ -1667,21 +1667,26 @@ pub async fn run_fp_command(
                 )
                 .await;
                 let refspec = format!("origin/{branch}:update.sh");
-                match cmd::run(
+                match cmd::run_to_file(
                     AllowedBinary::Git,
                     &["-C", &src_str, "show", &refspec],
+                    &temp_script,
                     Duration::from_secs(15),
                 )
                 .await
                 {
-                    Ok(out) if out.success && out.stdout.starts_with("#!/") => {
-                        if std::fs::write(&temp_script, &out.stdout).is_ok() {
-                            temp_script.clone()
-                        } else {
-                            local_script.clone()
-                        }
+                    Ok(out)
+                        if out.success
+                            && std::fs::read_to_string(&temp_script)
+                                .map(|s| s.starts_with("#!/") && s.ends_with('\n'))
+                                .unwrap_or(false) =>
+                    {
+                        temp_script.clone()
                     }
-                    _ => local_script.clone(),
+                    _ => {
+                        let _ = std::fs::remove_file(&temp_script);
+                        local_script.clone()
+                    }
                 }
             } else if local_script.is_file() {
                 local_script.clone()
