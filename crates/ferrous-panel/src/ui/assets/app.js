@@ -403,7 +403,8 @@ function isCacheableGetPath(path, responseType, noCache) {
     path.includes('/logs') ||
     path.includes('download=1') ||
     path.includes('refresh=1') ||
-    path.startsWith('/api/auth/')
+    path.startsWith('/api/auth/') ||
+    path.startsWith('/api/files')
   ) {
     return false;
   }
@@ -498,6 +499,7 @@ export async function api(
       const init = {
         method: upperMethod,
         credentials: 'same-origin',
+        cache: 'no-store',
         headers,
         signal: reqCtrl.signal,
       };

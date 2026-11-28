@@ -1184,6 +1184,87 @@ fn files_safepath_crud_and_anti_zip_slip() -> Result<()> {
             "zip-slip entry rejected with 403",
         )?;
 
+        // 4. Verify ?dir=/ listing, single delete, stale dist/ cleanup when root source is deleted, and full source wipe
+        let site_root = cfg.wwwroot.join("blog.example.com");
+        std::fs::create_dir_all(site_root.join("dist"))?;
+        std::fs::write(site_root.join("dist/index.html"), b"<h1>stale build</h1>")?;
+        std::fs::create_dir_all(site_root.join(".git/objects/pack"))?;
+        let pack_file = site_root.join(".git/objects/pack/pack-ro.pack");
+        std::fs::write(&pack_file, b"readonly-pack")?;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&pack_file, std::fs::Permissions::from_mode(0o444))?;
+        }
+        std::os::unix::fs::symlink("hello.txt", site_root.join("hello-link.txt"))?;
+
+        let list_dir_req = TestRequest::get()
+            .uri(&format!("/api/files/{app_id}?dir=/"))
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let list_dir_resp = try_call_service(&app, list_dir_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("list dir failed: {e}"))?;
+        ensure_eq(&list_dir_resp.status(), &StatusCode::OK, "GET /files/{app_id}?dir=/")?;
+        let dir_nodes: Value = serde_json::from_slice(
+            &to_bytes(list_dir_resp.into_body())
+                .await
+                .map_err(|e| anyhow::anyhow!("body error: {e}"))?,
+        )?;
+        let dir_arr = dir_nodes.as_array().context("expected array of nodes")?;
+        let link_id = dir_arr
+            .iter()
+            .find(|n| n["name"].as_str() == Some("hello-link.txt"))
+            .and_then(|n| n["id"].as_str())
+            .context("expected symlink hello-link.txt to be listed")?
+            .to_string();
+        let hello_id = dir_arr
+            .iter()
+            .find(|n| n["name"].as_str() == Some("hello.txt"))
+            .and_then(|n| n["id"].as_str())
+            .context("expected hello.txt to be listed")?
+            .to_string();
+        let idx_id = dir_arr
+            .iter()
+            .find(|n| n["name"].as_str() == Some("index.html"))
+            .and_then(|n| n["id"].as_str())
+            .map(str::to_string);
+
+        // Batch-delete symlink + hello.txt (+ index.html if present)
+        let mut batch_ids = vec![link_id, hello_id];
+        if let Some(id) = idx_id {
+            batch_ids.push(id);
+        }
+        let batch_req = TestRequest::post()
+            .uri(&format!("/api/files/{app_id}/delete-batch"))
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .set_json(json!({ "fileIds": batch_ids, "dir": "/" }))
+            .to_request();
+        let batch_resp = try_call_service(&app, batch_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("batch delete failed: {e}"))?;
+        ensure_eq(&batch_resp.status(), &StatusCode::OK, "POST /files/{app_id}/delete-batch")?;
+        ensure(
+            !site_root.join("hello.txt").exists()
+                && std::fs::symlink_metadata(site_root.join("hello-link.txt")).is_err(),
+            "hello.txt and symlink must be physically removed from disk",
+        )?;
+
+        // Full source wipe (`DELETE /api/files/{app_id}`) removes read-only .git packfiles and remaining build dirs
+        let wipe_req = TestRequest::delete()
+            .uri(&format!("/api/files/{app_id}"))
+            .insert_header((header::AUTHORIZATION, format!("Bearer {token}")))
+            .to_request();
+        let wipe_resp = try_call_service(&app, wipe_req)
+            .await
+            .map_err(|e| anyhow::anyhow!("wipe files failed: {e}"))?;
+        ensure_eq(&wipe_resp.status(), &StatusCode::OK, "DELETE /files/{app_id}")?;
+        ensure(
+            site_root.is_dir()
+                && !site_root.join(".git").exists()
+                && !site_root.join("dist").exists(),
+            "site_root must remain while .git and dist are completely wiped",
+        )?;
+
         Ok(())
     })
 }

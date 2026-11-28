@@ -3720,3 +3720,217 @@ pub async fn clear_app_logs(
         fetched_at: Utc::now().to_rfc3339(),
     })
 }
+
+fn has_any_runnable_source(working_dir: &Path, framework: WebsiteRuntimeType) -> bool {
+    if is_rust_runtime(framework) {
+        return working_dir.join("Cargo.toml").is_file()
+            || detect_rust_release_binary(working_dir).is_some();
+    }
+    for marker in [
+        "package.json",
+        "deno.json",
+        "deno.jsonc",
+        "pyproject.toml",
+        "requirements.txt",
+        "go.mod",
+        ".next/standalone/server.js",
+        ".output/server/index.mjs",
+        "dist/server/entry.mjs",
+        "dist/main.js",
+        "build/index.js",
+        "build/server/index.js",
+    ] {
+        if working_dir.join(marker).is_file() {
+            return true;
+        }
+    }
+    let mut stack = vec![(working_dir.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 3 {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), ".git" | "node_modules" | "vendor" | "target") {
+                continue;
+            }
+            let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push((p, depth + 1));
+            } else if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                if matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "js" | "mjs" | "cjs" | "ts" | "tsx" | "py" | "go" | "rs" | "html" | "php"
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Synchronizes live web runtime state immediately after File Manager mutates or deletes files:
+/// 1. Removes stale auto-generated build directories (`dist/`, `build/`, `out/`, `.next/`, `.output/`, `target/`)
+///    when the user deletes core project source files so old compiled bundles stop serving.
+/// 2. Re-evaluates `effective_doc_root` and updates + reloads the FerrousX / Nginx VirtualHost if the served root changed.
+/// 3. Stops `ferrous-app-<domain>.service` immediately when all runnable source/binaries are deleted from RAM-backed apps
+///    (or restarts the unit when source files are updated/partially modified).
+/// 4. Reloads active `php*-fpm.service` on PHP websites so Zend OPcache drops deleted/modified `.php` scripts immediately.
+pub async fn sync_app_runtime_after_file_change(
+    app_id: &str,
+    affected_rels: &[String],
+    is_destructive: bool,
+    store: &ModuleStore,
+    config: &Config,
+    webserver: &WebServerManager,
+) {
+    let Ok(Some(mut app)) = store.get_app(app_id) else {
+        return;
+    };
+    let Ok(working) = SafePath::under_root(&config.wwwroot, &app.working_dir) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(working.as_path());
+    if let Ok(mut guard) = dir_size_cache().lock() {
+        guard.remove(working.as_path());
+    }
+
+    if is_destructive && app.run_sub_dir.trim().is_empty() {
+        let touched_core_source = affected_rels.iter().any(|r| {
+            let clean = r.trim_matches('/');
+            matches!(
+                clean,
+                "*"
+                    | "src"
+                    | "app"
+                    | "pages"
+                    | "index.html"
+                    | "index.htm"
+                    | "index.php"
+                    | "package.json"
+                    | "Cargo.toml"
+                    | "deno.json"
+                    | "deno.jsonc"
+                    | "main.py"
+                    | "app.py"
+                    | "go.mod"
+            )
+        });
+        let no_root_source_left = !working.as_path().join("src").exists()
+            && !working.as_path().join("app").exists()
+            && !working.as_path().join("pages").exists()
+            && !working.as_path().join("package.json").exists()
+            && !working.as_path().join("index.html").exists()
+            && !working.as_path().join("index.php").exists()
+            && !working.as_path().join("Cargo.toml").exists();
+
+        if touched_core_source && no_root_source_left {
+            for build_dir in ["dist", "build", "out", ".next", ".output", "target"] {
+                let candidate = working.as_path().join(build_dir);
+                if std::fs::symlink_metadata(&candidate).is_ok() {
+                    let _ = crate::modules::files::force_remove_entry(&candidate);
+                }
+            }
+        }
+    }
+
+    let effective_doc_root =
+        resolve_effective_doc_root(working.as_path(), &app.run_sub_dir, app.framework);
+    let _ = std::fs::create_dir_all(&effective_doc_root);
+
+    if let Ok(domain) = Domain::parse(&app.domain) {
+        let aliases: Vec<Domain> = app
+            .aliases
+            .iter()
+            .filter_map(|a| Domain::parse(a).ok())
+            .collect();
+        if let Ok(mut spec) = build_site_spec_for_app(
+            domain,
+            aliases,
+            &effective_doc_root,
+            &config.wwwroot,
+            app.framework,
+            php_fpm_from_tag(app.php_version),
+            app.internal_port,
+            app.ssl_enabled,
+            app.force_https,
+        ) {
+            spec.http3_quic = app.http3_quic;
+            spec.websocket_enabled = app.websocket_enabled;
+            spec.rate_limit_rps = app.rate_limit_rps;
+            map_site_rules_to_spec(
+                &mut spec,
+                app.redirects.as_deref(),
+                app.hotlink_protection.as_ref(),
+                app.directory_auth.as_deref(),
+            );
+            let preferred_engine = app.web_server_engine.map(|e| match e {
+                WebServerEngineType::FerrousX => EngineKind::Ferrousx,
+                WebServerEngineType::Nginx => EngineKind::Nginx,
+            });
+            let preview_content = match preferred_engine.unwrap_or(EngineKind::Nginx) {
+                EngineKind::Ferrousx => webserver.ferrousx.render_site(&spec).ok().map(|r| r.content),
+                EngineKind::Nginx => webserver.nginx.render_site(&spec).ok().map(|r| r.content),
+            };
+            let vhost_changed = preview_content
+                .as_deref()
+                .is_some_and(|c| c != app.url_rewrite_rules);
+            if vhost_changed {
+                if let Ok(rendered) = webserver
+                    .upsert_and_apply_site(&spec, preferred_engine)
+                    .await
+                {
+                    app.url_rewrite_rules = rendered.content;
+                    app.nginx_vhost = rendered.config_path.display().to_string();
+                    let _ = store.upsert_app(&app);
+                }
+            }
+        }
+    }
+
+    let executor = webserver.executor();
+    if !is_static_runtime(app.framework) && !is_php_runtime(app.framework) && !app.systemd_unit.is_empty()
+    {
+        if !has_any_runnable_source(working.as_path(), app.framework) {
+            if executor.is_binary_available(AllowedBinary::Systemctl) {
+                let _ = executor
+                    .run(
+                        AllowedBinary::Systemctl,
+                        &["stop", &app.systemd_unit],
+                        SYSTEMD_TIMEOUT,
+                    )
+                    .await;
+            }
+            app.status = AppStatus::Stopped;
+            app.pid = None;
+            let _ = store.upsert_app(&app);
+        } else if config.is_production() && executor.is_binary_available(AllowedBinary::Systemctl) {
+            let _ = executor
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["restart", &app.systemd_unit],
+                    SYSTEMD_TIMEOUT,
+                )
+                .await;
+        }
+    } else if is_php_runtime(app.framework)
+        && config.is_production()
+        && executor.is_binary_available(AllowedBinary::Systemctl)
+    {
+        let fpm_unit = php_fpm_from_tag(app.php_version).systemd_unit();
+        let _ = executor
+            .run(AllowedBinary::Systemctl, &["reload", fpm_unit], SYSTEMD_TIMEOUT)
+            .await;
+    }
+}
+

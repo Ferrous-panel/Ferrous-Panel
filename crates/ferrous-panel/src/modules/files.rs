@@ -14,8 +14,8 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-const MAX_LIST_NODES: usize = 2000;
-const MAX_READ_CONTENT_BYTES: u64 = 128 * 1024;
+const MAX_LIST_NODES: usize = 5000;
+const MAX_READ_CONTENT_BYTES: u64 = 256 * 1024;
 const MAX_UPLOAD_ENTRIES: usize = 512;
 const MAX_RAW_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 const FILE_CMD_TIMEOUT: Duration = Duration::from_secs(45);
@@ -73,6 +73,10 @@ fn encode_hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+pub fn decode_file_id_relative(hex_id: &str) -> Result<String, PanelError> {
+    decode_hex_path(hex_id)
 }
 
 fn decode_hex_path(hex_id: &str) -> Result<String, PanelError> {
@@ -166,9 +170,15 @@ fn validate_archive_relative_entry(raw: &str) -> Result<String, PanelError> {
     Ok(trimmed.to_string())
 }
 
-fn format_symbolic_perms(is_dir: bool, mode: u32) -> String {
+fn format_symbolic_perms(is_dir: bool, is_symlink: bool, mode: u32) -> String {
     let mut s = String::with_capacity(10);
-    s.push(if is_dir { 'd' } else { '-' });
+    s.push(if is_symlink {
+        'l'
+    } else if is_dir {
+        'd'
+    } else {
+        '-'
+    });
     for shift in [6, 3, 0] {
         let bits = (mode >> shift) & 0o7;
         s.push(if (bits & 0o4) != 0 { 'r' } else { '-' });
@@ -220,6 +230,167 @@ fn resolve_under_app_root(app_root: &SafePath, virtual_rel: &str) -> Result<Safe
     SafePath::under_root(app_root.as_path(), clean)
 }
 
+/// Resolves an entry inside `app_root` WITHOUT following the leaf if the leaf itself is a symlink
+/// (so symlinks created by `bun`/`npm`/frameworks inside `app_root` can be inspected and unlinked safely).
+fn resolve_leaf_allowing_symlink(
+    app_root: &SafePath,
+    virtual_rel: &str,
+) -> Result<PathBuf, PanelError> {
+    let clean = virtual_rel.trim().trim_start_matches('/').trim_end_matches('/');
+    if clean.is_empty() || clean == "." {
+        return Ok(app_root.as_path().to_path_buf());
+    }
+    if clean.contains('\0') || clean.contains('\\') {
+        return Err(PanelError::Forbidden(
+            "forbidden character in file path".to_string(),
+        ));
+    }
+    for comp in Path::new(clean).components() {
+        if !matches!(comp, Component::Normal(_)) {
+            return Err(PanelError::Forbidden(
+                "path traversal in file identifier is forbidden".to_string(),
+            ));
+        }
+    }
+    let (parent_rel, leaf_name) = match clean.rsplit_once('/') {
+        Some((p, l)) => (p, l),
+        None => ("", clean),
+    };
+    let safe_parent = resolve_under_app_root(app_root, parent_rel)?;
+    let leaf = validate_single_filename(leaf_name)?;
+    Ok(safe_parent.as_path().join(leaf))
+}
+
+fn build_web_file_node(
+    app_id: &str,
+    canon_root: &Path,
+    path: &Path,
+    meta: &std::fs::Metadata,
+    include_content: bool,
+) -> Option<WebFileNode> {
+    let rel_path = path.strip_prefix(canon_root).ok()?;
+    let rel_str = rel_path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    if rel_str.is_empty() {
+        return None;
+    }
+    let is_symlink = meta.file_type().is_symlink();
+    let is_dir = !is_symlink && meta.is_dir();
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let parent_dir = match rel_str.rsplit_once('/') {
+        Some((parent, _)) => format!("/{parent}"),
+        None => "/".to_string(),
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    let permissions = format!("{mode:04o}");
+    let symbolic_perms = format_symbolic_perms(is_dir, is_symlink, mode);
+    let owner = format!("{}:{}", meta.uid(), meta.gid());
+    let modified_at = meta
+        .modified()
+        .ok()
+        .map(|st| DateTime::<Utc>::from(st).to_rfc3339())
+        .unwrap_or_else(|| Utc::now().to_rfc3339());
+    let content = if include_content && !is_dir && !is_symlink && meta.len() <= MAX_READ_CONTENT_BYTES
+    {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    } else {
+        None
+    };
+    Some(WebFileNode {
+        id: file_id_for_relative(&rel_str),
+        app_id: app_id.to_string(),
+        name,
+        path: format!("/{rel_str}"),
+        parent_dir,
+        node_type: if is_dir {
+            "directory".to_string()
+        } else {
+            "file".to_string()
+        },
+        size_bytes: if is_symlink { 0 } else { meta.len() },
+        permissions,
+        symbolic_perms,
+        owner,
+        modified_at,
+        content,
+    })
+}
+
+fn is_heavy_vendor_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules" | ".git" | "target" | "vendor" | ".next" | ".nuxt" | ".svelte-kit"
+    )
+}
+
+/// Lists direct children of `dir_opt` when `Some(...)` (fast, zero 2000-node truncation even when
+/// `node_modules` has 50,000 files), or the full bounded tree when `None` (backwards-compatible).
+pub fn list_files_in_dir(
+    app_id: &str,
+    dir_opt: Option<&str>,
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<Vec<WebFileNode>, PanelError> {
+    if let Some(raw_dir) = dir_opt {
+        let app_root = resolve_app_root(app_id, store, config)?;
+        let canon_root = std::fs::canonicalize(app_root.as_path())?;
+        let clean_dir = normalize_virtual_dir(raw_dir)?;
+        let target_dir = resolve_under_app_root(&app_root, &clean_dir)?;
+        if !target_dir.as_path().is_dir() {
+            return Ok(Vec::new());
+        }
+        let canon_target = std::fs::canonicalize(target_dir.as_path())?;
+        let mut nodes = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&canon_target) {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                let Ok(meta) = std::fs::symlink_metadata(&p) else {
+                    continue;
+                };
+                if let Some(node) = build_web_file_node(app_id, &canon_root, &p, &meta, false) {
+                    nodes.push(node);
+                }
+            }
+        }
+        nodes.sort_by(|a, b| {
+            let a_dir = a.node_type == "directory";
+            let b_dir = b.node_type == "directory";
+            b_dir
+                .cmp(&a_dir)
+                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        });
+        return Ok(nodes);
+    }
+
+    list_files(app_id, store, config)
+}
+
+pub fn get_file_node(
+    app_id: &str,
+    file_id: &str,
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<WebFileNode, PanelError> {
+    let app_root = resolve_app_root(app_id, store, config)?;
+    let canon_root = std::fs::canonicalize(app_root.as_path())?;
+    let rel = decode_hex_path(file_id)?;
+    let target = resolve_under_app_root(&app_root, &rel)?;
+    let canon_target = std::fs::canonicalize(target.as_path())
+        .map_err(|_| PanelError::NotFound("file not found".to_string()))?;
+    let meta = std::fs::symlink_metadata(&canon_target)
+        .map_err(|_| PanelError::NotFound("file not found".to_string()))?;
+    build_web_file_node(app_id, &canon_root, &canon_target, &meta, true)
+        .ok_or_else(|| PanelError::NotFound("file not found".to_string()))
+}
+
 pub fn list_files(
     app_id: &str,
     store: &ModuleStore,
@@ -236,6 +407,8 @@ pub fn list_files(
         let Ok(rd) = std::fs::read_dir(&dir_path) else {
             continue;
         };
+        let mut normal_subdirs = Vec::new();
+        let mut heavy_subdirs = Vec::new();
         for entry in rd.flatten() {
             if nodes.len() >= MAX_LIST_NODES {
                 break;
@@ -244,71 +417,25 @@ pub fn list_files(
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
-            // Never follow or traverse symlinks out of or inside the web root tree.
-            if meta.file_type().is_symlink() {
-                continue;
-            }
-            let Ok(rel_path) = path.strip_prefix(&canon_root) else {
-                continue;
-            };
-            let rel_str = rel_path
-                .components()
-                .filter_map(|c| match c {
-                    Component::Normal(s) => s.to_str(),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("/");
-            if rel_str.is_empty() {
-                continue;
-            }
-
-            let is_dir = meta.is_dir();
+            let is_symlink = meta.file_type().is_symlink();
+            let is_dir = !is_symlink && meta.is_dir();
             if is_dir {
-                queue.push_back(path.clone());
-            }
-
-            let name = entry.file_name().to_string_lossy().to_string();
-            let parent_dir = match rel_str.rsplit_once('/') {
-                Some((parent, _)) => format!("/{parent}"),
-                None => "/".to_string(),
-            };
-            let mode = meta.permissions().mode() & 0o777;
-            let permissions = format!("{mode:04o}");
-            let symbolic_perms = format_symbolic_perms(is_dir, mode);
-            let owner = format!("{}:{}", meta.uid(), meta.gid());
-            let modified_at = meta
-                .modified()
-                .ok()
-                .map(|st| DateTime::<Utc>::from(st).to_rfc3339())
-                .unwrap_or_else(|| Utc::now().to_rfc3339());
-
-            let content = if !is_dir && meta.len() <= MAX_READ_CONTENT_BYTES {
-                std::fs::read(&path)
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-            } else {
-                None
-            };
-
-            nodes.push(WebFileNode {
-                id: file_id_for_relative(&rel_str),
-                app_id: app_id.to_string(),
-                name,
-                path: format!("/{rel_str}"),
-                parent_dir,
-                node_type: if is_dir {
-                    "directory".to_string()
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if is_heavy_vendor_dir(&dir_name) {
+                    heavy_subdirs.push(path.clone());
                 } else {
-                    "file".to_string()
-                },
-                size_bytes: meta.len(),
-                permissions,
-                symbolic_perms,
-                owner,
-                modified_at,
-                content,
-            });
+                    normal_subdirs.push(path.clone());
+                }
+            }
+            if let Some(node) = build_web_file_node(app_id, &canon_root, &path, &meta, true) {
+                nodes.push(node);
+            }
+        }
+        for sub in normal_subdirs {
+            queue.push_back(sub);
+        }
+        for sub in heavy_subdirs {
+            queue.push_back(sub);
         }
     }
 
@@ -427,6 +554,56 @@ pub fn rename_node(
     list_files(app_id, store, config)
 }
 
+/// Safely removes a file, symlink, or directory tree inside `app_root` without following symlinks,
+/// granting owner write/execute bits first so read-only `.git/objects/pack/*` (`0444`) or build outputs
+/// never block deletion, and verifying that the entry is truly gone from disk afterward.
+pub(crate) fn force_remove_entry(target: &Path) -> Result<(), PanelError> {
+    let meta = std::fs::symlink_metadata(target)
+        .map_err(|_| PanelError::NotFound("target path not found".to_string()))?;
+    if meta.file_type().is_symlink() {
+        std::fs::remove_file(target)?;
+    } else if meta.is_dir() {
+        let mut stack = vec![target.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for entry in rd.flatten() {
+                    let p = entry.path();
+                    if let Ok(m) = std::fs::symlink_metadata(&p) {
+                        if m.file_type().is_symlink() {
+                            continue;
+                        }
+                        if m.is_dir() {
+                            stack.push(p);
+                        } else {
+                            let _ =
+                                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644));
+                        }
+                    }
+                }
+            }
+        }
+        std::fs::remove_dir_all(target)?;
+    } else {
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+        }
+        let _ = std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o644));
+        std::fs::remove_file(target)?;
+    }
+
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(PanelError::Internal(format!(
+            "filesystem entry '{}' still exists after removal",
+            target
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+        )));
+    }
+    Ok(())
+}
+
 pub fn delete_node(
     app_id: &str,
     file_id: &str,
@@ -434,26 +611,76 @@ pub fn delete_node(
     config: &Config,
 ) -> Result<Vec<WebFileNode>, PanelError> {
     let app_root = resolve_app_root(app_id, store, config)?;
+    let canon_root = std::fs::canonicalize(app_root.as_path())?;
     let rel = decode_hex_path(file_id)?;
-    let target = resolve_under_app_root(&app_root, &rel)?;
-    if target.as_path() == app_root.as_path() {
+    let target = resolve_leaf_allowing_symlink(&app_root, &rel)?;
+    if target == canon_root || target == app_root.as_path() {
         return Err(PanelError::Forbidden(
             "deleting website root directory via file manager is forbidden".to_string(),
         ));
     }
-    let meta = std::fs::symlink_metadata(target.as_path())
-        .map_err(|_| PanelError::NotFound("target path not found".to_string()))?;
-    if meta.file_type().is_symlink() {
-        return Err(PanelError::Forbidden(
-            "symbolic links cannot be removed via file manager".to_string(),
+    force_remove_entry(&target)?;
+    list_files(app_id, store, config)
+}
+
+pub fn delete_nodes_batch(
+    app_id: &str,
+    file_ids: &[String],
+    dir_opt: Option<&str>,
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<(Vec<String>, Vec<WebFileNode>), PanelError> {
+    if file_ids.is_empty() {
+        return Err(PanelError::Validation(
+            "at least one fileId is required".to_string(),
         ));
     }
-    if meta.is_dir() {
-        std::fs::remove_dir_all(target.as_path())?;
-    } else {
-        std::fs::remove_file(target.as_path())?;
+    if file_ids.len() > 1000 {
+        return Err(PanelError::Validation(
+            "cannot batch-delete more than 1000 entries at once".to_string(),
+        ));
     }
-    list_files(app_id, store, config)
+    let app_root = resolve_app_root(app_id, store, config)?;
+    let canon_root = std::fs::canonicalize(app_root.as_path())?;
+    let mut deleted_rels = Vec::with_capacity(file_ids.len());
+
+    for fid in file_ids {
+        let rel = decode_hex_path(fid)?;
+        let target = resolve_leaf_allowing_symlink(&app_root, &rel)?;
+        if target == canon_root || target == app_root.as_path() {
+            return Err(PanelError::Forbidden(
+                "deleting website root directory via file manager is forbidden".to_string(),
+            ));
+        }
+        if std::fs::symlink_metadata(&target).is_ok() {
+            force_remove_entry(&target)?;
+            deleted_rels.push(rel);
+        }
+    }
+
+    let nodes = list_files_in_dir(app_id, dir_opt, store, config)?;
+    Ok((deleted_rels, nodes))
+}
+
+/// Wipes ALL files, subdirectories, hidden `.git` metadata, and build outputs inside `app_root`
+/// while preserving the website root directory itself (`0755`).
+pub fn clear_all_files(
+    app_id: &str,
+    store: &ModuleStore,
+    config: &Config,
+) -> Result<Vec<WebFileNode>, PanelError> {
+    let app_root = resolve_app_root(app_id, store, config)?;
+    let canon_root = std::fs::canonicalize(app_root.as_path())?;
+    if let Ok(rd) = std::fs::read_dir(&canon_root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p != canon_root {
+                force_remove_entry(&p)?;
+            }
+        }
+    }
+    let _ = std::fs::set_permissions(&canon_root, std::fs::Permissions::from_mode(0o755));
+    Ok(Vec::new())
 }
 
 pub fn batch_chmod(

@@ -65,24 +65,63 @@ pub struct UploadRawQuery {
     pub file_name: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListFilesQuery {
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteBatchRequest {
+    pub file_ids: Vec<String>,
+    #[serde(default)]
+    pub dir: Option<String>,
+}
+
 fn default_root_dir() -> String {
     "/".to_string()
 }
 
-/// `GET /api/files/{app_id}` — lists real filesystem tree inside `SafePath` under `/www/wwwroot`.
+/// `GET /api/files/{app_id}` — lists real filesystem entries inside `SafePath` under `/www/wwwroot`.
 pub async fn list_files(
     state: web::Data<AppState>,
     path: web::Path<String>,
+    query: web::Query<ListFilesQuery>,
 ) -> Result<HttpResponse, PanelError> {
     state.telemetry.record_request();
     let _conn_guard = state.telemetry.connection_guard();
 
     let app_id = path.into_inner();
+    let dir_opt = query.into_inner().dir;
     let st = state.clone();
-    let nodes = web::block(move || files_mod::list_files(&app_id, &st.modules, &st.config))
+    let nodes = web::block(move || {
+        files_mod::list_files_in_dir(&app_id, dir_opt.as_deref(), &st.modules, &st.config)
+    })
+    .await
+    .map_err(|_| PanelError::Internal("file listing worker failed".to_string()))??;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, no-cache, must-revalidate"))
+        .json(nodes))
+}
+
+/// `GET /api/files/{app_id}/{file_id}` — reads a single file node and its UTF-8 content directly from disk.
+pub async fn get_file(
+    state: web::Data<AppState>,
+    path: web::Path<(String, String)>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let (app_id, file_id) = path.into_inner();
+    let st = state.clone();
+    let node = web::block(move || files_mod::get_file_node(&app_id, &file_id, &st.modules, &st.config))
         .await
-        .map_err(|_| PanelError::Internal("file listing worker failed".to_string()))??;
-    Ok(HttpResponse::Ok().json(nodes))
+        .map_err(|_| PanelError::Internal("file read worker failed".to_string()))??;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store, no-cache, must-revalidate"))
+        .json(node))
 }
 
 /// `POST /api/files/{app_id}` — creates a file or directory inside the website root.
@@ -116,6 +155,16 @@ pub async fn create_node(
     .await
     .map_err(|_| PanelError::Internal("file creation worker failed".to_string()))??;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&audit_name),
+        false,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -123,7 +172,9 @@ pub async fn create_node(
         "files.create",
         &format!("appId={audit_app} type={audit_type} name={audit_name}"),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
 /// `POST /api/files/{app_id}/upload-zip` — validates entries against zip-slip and extracts/packs archive.
@@ -148,6 +199,16 @@ pub async fn upload_zip(
     )
     .await?;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &app_id,
+        std::slice::from_ref(&archive_name),
+        false,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -155,7 +216,9 @@ pub async fn upload_zip(
         "files.upload_zip",
         &format!("appId={app_id} archive={archive_name}"),
     )?;
-    Ok(HttpResponse::Ok().json(res))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(res))
 }
 
 /// `POST /api/files/{app_id}/upload-raw?parentDir=/&fileName=archive.zip` — uploads raw binary file up to 64 MiB.
@@ -189,6 +252,16 @@ pub async fn upload_raw(
     .await
     .map_err(|_| PanelError::Internal("file upload worker failed".to_string()))??;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&audit_name),
+        false,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -198,7 +271,9 @@ pub async fn upload_raw(
             "appId={audit_app} parentDir={audit_parent} fileName={audit_name} bytes={byte_len}"
         ),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
 /// `POST /api/files/{app_id}/compress` — compresses a subdirectory into a `.zip` archive.
@@ -230,7 +305,9 @@ pub async fn compress_dir(
         "files.compress",
         &format!("appId={app_id} archive={}", res.archive_name),
     )?;
-    Ok(HttpResponse::Ok().json(res))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(res))
 }
 
 /// `POST /api/files/{app_id}/remote-download` — SSRF-guarded `curl` download into website root.
@@ -263,7 +340,9 @@ pub async fn remote_download(
         "files.remote_download",
         &format!("appId={app_id} file={}", body.file_name),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
 /// `POST /api/files/{app_id}/batch-chmod` — applies `0755` to directories and `0644` to files.
@@ -289,7 +368,9 @@ pub async fn batch_chmod(
         "files.batch_chmod",
         &format!("appId={audit_app}"),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
 /// `POST /api/files/{app_id}/{file_id}/extract` — pre-flight anti-zip-slip inspected archive extraction.
@@ -314,6 +395,16 @@ pub async fn extract_archive(
     )
     .await?;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &app_id,
+        &[],
+        false,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -321,7 +412,9 @@ pub async fn extract_archive(
         "files.extract",
         &format!("appId={app_id} archive={}", res.archive_name),
     )?;
-    Ok(HttpResponse::Ok().json(res))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(res))
 }
 
 /// `POST /api/files/{app_id}/{file_id}/rename` — renames a node safely within the website root.
@@ -336,6 +429,7 @@ pub async fn rename_node(
 
     let (app_id, file_id) = path.into_inner();
     let new_name = payload.into_inner().new_name;
+    let old_rel = files_mod::decode_file_id_relative(&file_id).unwrap_or_default();
     let audit_app = app_id.clone();
     let audit_name = new_name.clone();
     let st = state.clone();
@@ -345,6 +439,16 @@ pub async fn rename_node(
     .await
     .map_err(|_| PanelError::Internal("file rename worker failed".to_string()))??;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&old_rel),
+        true,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -352,7 +456,9 @@ pub async fn rename_node(
         "files.rename",
         &format!("appId={audit_app} newName={audit_name}"),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
 /// `PUT /api/files/{app_id}/{file_id}` — atomically writes edited file content and mode.
@@ -367,6 +473,7 @@ pub async fn update_file(
 
     let (app_id, file_id) = path.into_inner();
     let body = payload.into_inner();
+    let edited_rel = files_mod::decode_file_id_relative(&file_id).unwrap_or_default();
     let audit_app = app_id.clone();
     let audit_file = file_id.clone();
     let st = state.clone();
@@ -383,6 +490,16 @@ pub async fn update_file(
     .await
     .map_err(|_| PanelError::Internal("file update worker failed".to_string()))??;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&edited_rel),
+        false,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
@@ -390,10 +507,13 @@ pub async fn update_file(
         "files.update",
         &format!("appId={audit_app} fileId={audit_file}"),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
 
-/// `DELETE /api/files/{app_id}/{file_id}` — deletes a file or subdirectory inside the website root.
+/// `DELETE /api/files/{app_id}/{file_id}` — deletes a file, symlink, or subdirectory inside the website root
+/// and immediately synchronizes the live web server / daemon / PHP-FPM OPcache.
 pub async fn delete_node(
     req: HttpRequest,
     state: web::Data<AppState>,
@@ -403,6 +523,7 @@ pub async fn delete_node(
     let _conn_guard = state.telemetry.connection_guard();
 
     let (app_id, file_id) = path.into_inner();
+    let deleted_rel = files_mod::decode_file_id_relative(&file_id).unwrap_or_default();
     let audit_app = app_id.clone();
     let audit_file = file_id.clone();
     let st = state.clone();
@@ -410,12 +531,113 @@ pub async fn delete_node(
         .await
         .map_err(|_| PanelError::Internal("file delete worker failed".to_string()))??;
 
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&deleted_rel),
+        true,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
     let (actor, ip) = actor_and_ip(&req);
     state.auth_store.append_audit_log(
         Some(&actor),
         &ip,
         "files.delete",
-        &format!("appId={audit_app} fileId={audit_file}"),
+        &format!("appId={audit_app} path={deleted_rel} fileId={audit_file}"),
     )?;
-    Ok(HttpResponse::Ok().json(nodes))
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
 }
+
+/// `POST /api/files/{app_id}/delete-batch` — deletes multiple selected files/folders at once and syncs runtime.
+pub async fn delete_batch(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+    payload: web::Json<DeleteBatchRequest>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let app_id = path.into_inner();
+    let body = payload.into_inner();
+    let audit_app = app_id.clone();
+    let st = state.clone();
+    let (deleted_rels, nodes) = web::block(move || {
+        files_mod::delete_nodes_batch(
+            &app_id,
+            &body.file_ids,
+            body.dir.as_deref(),
+            &st.modules,
+            &st.config,
+        )
+    })
+    .await
+    .map_err(|_| PanelError::Internal("batch file delete worker failed".to_string()))??;
+
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        &deleted_rels,
+        true,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "files.delete_batch",
+        &format!("appId={audit_app} count={}", deleted_rels.len()),
+    )?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
+}
+
+/// `DELETE /api/files/{app_id}` — wipes all source files, `.git`, and build outputs inside the website root
+/// and stops any running daemon so the website stops serving deleted source immediately.
+pub async fn clear_all_files(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, PanelError> {
+    state.telemetry.record_request();
+    let _conn_guard = state.telemetry.connection_guard();
+
+    let app_id = path.into_inner();
+    let audit_app = app_id.clone();
+    let st = state.clone();
+    let nodes = web::block(move || files_mod::clear_all_files(&app_id, &st.modules, &st.config))
+        .await
+        .map_err(|_| PanelError::Internal("clear files worker failed".to_string()))??;
+
+    let wildcard = String::from("*");
+    crate::modules::apps::sync_app_runtime_after_file_change(
+        &audit_app,
+        std::slice::from_ref(&wildcard),
+        true,
+        &state.modules,
+        &state.config,
+        &state.webserver,
+    )
+    .await;
+
+    let (actor, ip) = actor_and_ip(&req);
+    state.auth_store.append_audit_log(
+        Some(&actor),
+        &ip,
+        "files.clear_all",
+        &format!("appId={audit_app}"),
+    )?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "no-store"))
+        .json(nodes))
+}
+

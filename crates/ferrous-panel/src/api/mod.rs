@@ -161,6 +161,7 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         // SafePath File Manager (static ops before dynamic {file_id})
         .route("/files/{app_id}", web::get().to(files::list_files))
         .route("/files/{app_id}", web::post().to(files::create_node))
+        .route("/files/{app_id}", web::delete().to(files::clear_all_files))
         .service(
             web::resource("/files/{app_id}/upload-zip")
                 .app_data(web::JsonConfig::default().limit(LARGE_ZIP_JSON_BYTES))
@@ -178,6 +179,10 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
         )
         .route("/files/{app_id}/batch-chmod", web::post().to(files::batch_chmod))
         .route(
+            "/files/{app_id}/delete-batch",
+            web::post().to(files::delete_batch),
+        )
+        .route(
             "/files/{app_id}/{file_id}/extract",
             web::post().to(files::extract_archive),
         )
@@ -185,6 +190,7 @@ fn register_p5_real_routes(cfg: &mut web::ServiceConfig) {
             "/files/{app_id}/{file_id}/rename",
             web::post().to(files::rename_node),
         )
+        .route("/files/{app_id}/{file_id}", web::get().to(files::get_file))
         .route("/files/{app_id}/{file_id}", web::put().to(files::update_file))
         .route("/files/{app_id}/{file_id}", web::delete().to(files::delete_node))
         // cPanel Suite: Real Crontab, Zstd Backups, Hickory DNS Zone Editor & SFTP Chroot

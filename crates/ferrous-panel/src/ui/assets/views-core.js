@@ -341,6 +341,7 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
                         <td class="right">
                           <div class="row" style="justify-content:flex-end">
                             <a class="btn btn-sm" href="${a.sslEnabled ? 'https' : 'http'}://${esc(a.domain)}" target="_blank" rel="noopener noreferrer">${esc(t('Mở Web', 'Open Site'))}</a>
+                            <button type="button" class="btn btn-sm" data-app-files="${esc(a.id)}">${esc(t('Tệp', 'Files'))}</button>
                             ${dbTool ? `<a class="btn btn-sm" href="${esc(dbTool.href)}" target="_blank" rel="noopener noreferrer">${esc(dbTool.label)}</a>` : ''}
                             <button type="button" class="btn btn-sm ${a.sslEnabled ? '' : 'btn-primary'}" data-app-ssl="${esc(a.id)}">SSL / HTTPS</button>
                             <button type="button" class="btn btn-sm" data-app-vhost="${esc(a.id)}">Vhost &amp; Log</button>
@@ -388,6 +389,15 @@ export async function renderApps(container, renderSeq = state.renderSeq) {
     document.getElementById('tab-oneclick')?.addEventListener('click', () => { activeTab = 'oneclick'; draw(); });
     document.getElementById('apps-search')?.addEventListener('input', (e) => { searchTerm = e.target.value; draw(); });
     document.getElementById('btn-deploy-app')?.addEventListener('click', () => openDeployModal(container));
+
+    container.querySelectorAll('[data-app-files]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.dataset.appFiles || '';
+        state.selectedFileAppId = targetId;
+        try { sessionStorage.setItem('fp_files_app_id', targetId); } catch (_) {}
+        navigate('files');
+      });
+    });
 
     container.querySelectorAll('[data-app-ssl]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1482,7 +1492,7 @@ function openDeployModal(container) {
 // 3. SAFEPATH FILE MANAGER (FULL PARITY: RENAME, COMPRESS, REMOTE DOWNLOAD, CHMOD)
 // ============================================================================
 export async function renderFiles(container, renderSeq = state.renderSeq) {
-  const apps = await api('GET', '/api/apps');
+  const apps = await api('GET', '/api/apps', undefined, { noCache: true });
   if (!isActiveRender(renderSeq, 'files')) return;
   if (!Array.isArray(apps) || !apps.length) {
     container.innerHTML = `
@@ -1492,23 +1502,45 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
     return;
   }
 
-  let selectedAppId = apps[0].id;
+  let savedAppId = state.selectedFileAppId || '';
+  if (!savedAppId) {
+    try { savedAppId = sessionStorage.getItem('fp_files_app_id') || ''; } catch (_) {}
+  }
+  let selectedAppId = apps.some((a) => a.id === savedAppId) ? savedAppId : apps[0].id;
+  state.selectedFileAppId = selectedAppId;
+  try { sessionStorage.setItem('fp_files_app_id', selectedAppId); } catch (_) {}
+
   let currentDir = '/';
-  let nodes = [];
+  let visible = [];
+  const selectedIds = new Set();
 
   async function loadAndDraw() {
-    nodes = await api('GET', `/api/files/${encodeURIComponent(selectedAppId)}`);
+    const nodes = await api(
+      'GET',
+      `/api/files/${encodeURIComponent(selectedAppId)}?dir=${encodeURIComponent(currentDir)}`,
+      undefined,
+      { noCache: true },
+    );
     if (!isActiveRender(renderSeq, 'files')) return;
-    const visible = (Array.isArray(nodes) ? nodes : []).filter((n) => (n.parentDir || '/') === currentDir);
+    visible = Array.isArray(nodes) ? nodes : [];
+    const validIds = new Set(visible.map((n) => n.id));
+    Array.from(selectedIds).forEach((id) => {
+      if (!validIds.has(id)) selectedIds.delete(id);
+    });
+
+    const activeApp = apps.find((a) => a.id === selectedAppId) || apps[0];
+    const baseWorkingDir = String(activeApp?.workingDir || `/www/wwwroot/${activeApp?.domain || ''}`).replace(/\/+$/, '');
+    const physicalDir = currentDir === '/' ? baseWorkingDir : `${baseWorkingDir}${currentDir}`;
+    const allChecked = visible.length > 0 && visible.every((n) => selectedIds.has(n.id));
 
     container.innerHTML = `
       <div class="page-head">
         <div>
           <h1 class="page-title">Quản lý Tệp (SafePath)</h1>
-          <p class="page-desc">Chỉnh sửa mã nguồn, đổi tên, nén/giải nén an toàn chống symlink escape, tải từ URL chống SSRF và chuẩn hóa quyền.</p>
+          <p class="page-desc">Chỉnh sửa mã nguồn, đổi tên, nén/giải nén an toàn chống symlink escape, tải từ URL chống SSRF và đồng bộ tức thời với Web Server.</p>
         </div>
-        <div class="row">
-          <select class="select" id="fm-app-select" style="width:auto;min-width:200px">
+        <div class="row" style="flex-wrap:wrap">
+          <select class="select" id="fm-app-select" style="width:auto;min-width:210px">
             ${apps.map((a) => `<option value="${esc(a.id)}" ${a.id === selectedAppId ? 'selected' : ''}>${esc(a.domain)}</option>`).join('')}
           </select>
           <button type="button" class="btn btn-sm" id="fm-new-file">Tạo tệp</button>
@@ -1516,6 +1548,7 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
           <button type="button" class="btn btn-sm" id="fm-compress-btn">Nén thư mục</button>
           <button type="button" class="btn btn-sm" id="fm-remote-dl-btn">Tải từ URL</button>
           <button type="button" class="btn btn-sm" id="fm-chmod-btn">Batch Chmod</button>
+          <button type="button" class="btn btn-sm btn-danger" id="fm-wipe-all-btn">${esc(t('Dọn sạch mã nguồn', 'Wipe All Source'))}</button>
           <label class="btn btn-sm btn-primary" style="cursor:pointer">
             Tải tệp lên
             <input type="file" id="fm-upload-input" hidden />
@@ -1526,41 +1559,55 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
       ${capBannerHtml(['files'])}
 
       <section class="surface">
-        <div class="surface-head">
-          <div class="row">
-            <span class="mono">Thư mục: <strong>${esc(currentDir)}</strong></span>
+        <div class="surface-head" style="flex-wrap:wrap;gap:10px">
+          <div class="row" style="flex-wrap:wrap;gap:8px">
+            <span class="mono">${esc(t('Đường dẫn thật:', 'Disk Path:'))} <strong>${esc(physicalDir)}</strong></span>
             ${currentDir !== '/' ? '<button type="button" class="btn btn-sm" id="fm-up-btn">Lên 1 cấp</button>' : ''}
+            <button type="button" class="btn btn-sm" id="fm-reload-btn">Làm mới</button>
+            ${selectedIds.size > 0 ? `<button type="button" class="btn btn-sm btn-danger" id="fm-del-selected-btn">${esc(t('Xóa mục đã chọn', 'Delete Selected'))} (${selectedIds.size})</button>` : ''}
           </div>
-          <span class="meta-line"><span>${visible.length} mục</span></span>
+          <span class="meta-line">
+            <span><a href="${activeApp?.sslEnabled ? 'https' : 'http'}://${esc(activeApp?.domain || '')}" target="_blank" rel="noopener noreferrer" class="mono">${esc(activeApp?.domain || '')} ↗</a></span>
+            <span>·</span>
+            <span>${visible.length} ${esc(t('mục', 'items'))}</span>
+          </span>
         </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>Tên</th><th>Loại</th><th>Quyền</th><th class="right">Kích thước</th><th class="right">Thao tác</th></tr>
+              <tr>
+                <th style="width:36px"><input type="checkbox" id="fm-select-all" ${allChecked ? 'checked' : ''} ${visible.length ? '' : 'disabled'} /></th>
+                <th>Tên</th>
+                <th>Loại</th>
+                <th>Quyền</th>
+                <th class="right">Kích thước</th>
+                <th class="right">Thao tác</th>
+              </tr>
             </thead>
             <tbody>
               ${
                 visible.length
                   ? visible.map((n) => `
                     <tr>
+                      <td><input type="checkbox" data-sel-file="${esc(n.id)}" ${selectedIds.has(n.id) ? 'checked' : ''} /></td>
                       <td>
                         ${n.type === 'directory'
                           ? `<button type="button" class="btn btn-sm" data-open-dir="${esc(n.path)}">${esc(n.name)}/</button>`
                           : `<span class="mono">${esc(n.name)}</span>`}
                       </td>
-                      <td>${n.type === 'directory' ? 'Thư mục' : 'Tệp'}</td>
+                      <td>${n.type === 'directory' ? 'Thư mục' : (String(n.symbolicPerms || '').startsWith('l') ? 'Symlink' : 'Tệp')}</td>
                       <td class="mono">${esc(n.permissions || '0644')}</td>
                       <td class="right mono">${n.type === 'directory' ? '—' : esc(fmtBytes(n.sizeBytes))}</td>
                       <td class="right">
                         <div class="row" style="justify-content:flex-end">
-                          ${n.type !== 'directory' ? `<button type="button" class="btn btn-sm" data-edit-file="${esc(n.id)}">Sửa</button>` : ''}
+                          ${n.type !== 'directory' && !String(n.symbolicPerms || '').startsWith('l') ? `<button type="button" class="btn btn-sm" data-edit-file="${esc(n.id)}">Sửa</button>` : ''}
                           <button type="button" class="btn btn-sm" data-rename-file="${esc(n.id)}" data-name="${esc(n.name)}">Đổi tên</button>
                           ${/\.(zip|tar\.gz|tgz|tar\.zst)$/i.test(n.name) ? `<button type="button" class="btn btn-sm" data-extract-file="${esc(n.id)}">Giải nén</button>` : ''}
                           <button type="button" class="btn btn-sm btn-danger" data-del-file="${esc(n.id)}" data-name="${esc(n.name)}">Xóa</button>
                         </div>
                       </td>
                     </tr>`).join('')
-                  : '<tr><td colspan="5" class="empty-state">Thư mục trống.</td></tr>'
+                  : '<tr><td colspan="6" class="empty-state">Thư mục trống.</td></tr>'
               }
             </tbody>
           </table>
@@ -1570,27 +1617,101 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
 
     document.getElementById('fm-app-select')?.addEventListener('change', (e) => {
       selectedAppId = e.target.value;
+      state.selectedFileAppId = selectedAppId;
+      try { sessionStorage.setItem('fp_files_app_id', selectedAppId); } catch (_) {}
       currentDir = '/';
+      selectedIds.clear();
       loadAndDraw();
     });
+    document.getElementById('fm-reload-btn')?.addEventListener('click', () => loadAndDraw());
     document.getElementById('fm-up-btn')?.addEventListener('click', () => {
       const parts = currentDir.split('/').filter(Boolean);
       parts.pop();
       currentDir = parts.length ? `/${parts.join('/')}` : '/';
+      selectedIds.clear();
       loadAndDraw();
     });
     container.querySelectorAll('[data-open-dir]').forEach((btn) => {
-      btn.addEventListener('click', () => { currentDir = btn.dataset.openDir; loadAndDraw(); });
+      btn.addEventListener('click', () => {
+        currentDir = btn.dataset.openDir;
+        selectedIds.clear();
+        loadAndDraw();
+      });
+    });
+
+    document.getElementById('fm-select-all')?.addEventListener('change', (e) => {
+      if (e.target.checked) {
+        visible.forEach((n) => selectedIds.add(n.id));
+      } else {
+        selectedIds.clear();
+      }
+      loadAndDraw();
+    });
+    container.querySelectorAll('[data-sel-file]').forEach((chk) => {
+      chk.addEventListener('change', () => {
+        const fid = chk.dataset.selFile;
+        if (chk.checked) selectedIds.add(fid);
+        else selectedIds.delete(fid);
+        loadAndDraw();
+      });
+    });
+
+    document.getElementById('fm-del-selected-btn')?.addEventListener('click', () => {
+      const ids = Array.from(selectedIds);
+      if (!ids.length) return;
+      const btn = document.getElementById('fm-del-selected-btn');
+      confirmAction(
+        t('Xóa mục đã chọn', 'Delete Selected Items'),
+        t(
+          `Xác nhận xóa vĩnh viễn ${ids.length} tệp/thư mục đã chọn trên đĩa và cập nhật tức thời trạng thái Website?`,
+          `Permanently delete ${ids.length} selected files/folders from disk and sync the live Website immediately?`,
+        ),
+        () => withBusy(btn, async () => {
+          try {
+            await api('POST', `/api/files/${encodeURIComponent(selectedAppId)}/delete-batch`, {
+              fileIds: ids,
+              dir: currentDir,
+            });
+            selectedIds.clear();
+            toast(t(`Đã xóa vĩnh viễn ${ids.length} mục và đồng bộ Website.`, `Deleted ${ids.length} items and synced Website.`));
+            await loadAndDraw();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        }),
+      );
+    });
+
+    document.getElementById('fm-wipe-all-btn')?.addEventListener('click', () => {
+      const btn = document.getElementById('fm-wipe-all-btn');
+      confirmAction(
+        t('Dọn sạch toàn bộ mã nguồn Website', 'Wipe All Website Source Files'),
+        t(
+          `Xác nhận xóa TOÀN BỘ tệp mã nguồn, thư mục build (dist/.next/target) và .git trong ${baseWorkingDir}? Dịch vụ chạy nền (nếu có) sẽ dừng ngay lập tức.`,
+          `Permanently wipe ALL source files, build artifacts (dist/.next/target), and .git inside ${baseWorkingDir}? Any running app daemon will stop immediately.`,
+        ),
+        () => withBusy(btn, async () => {
+          try {
+            await api('DELETE', `/api/files/${encodeURIComponent(selectedAppId)}`);
+            currentDir = '/';
+            selectedIds.clear();
+            toast(t(`Đã dọn sạch toàn bộ mã nguồn của ${activeApp?.domain || ''}.`, `Wiped all source files for ${activeApp?.domain || ''}.`));
+            await loadAndDraw();
+          } catch (err) {
+            toast(err.message, 'err');
+          }
+        }),
+      );
     });
 
     document.getElementById('fm-new-file')?.addEventListener('click', () => openCreateNodeModal('file'));
     document.getElementById('fm-new-dir')?.addEventListener('click', () => openCreateNodeModal('directory'));
 
     document.getElementById('fm-compress-btn')?.addEventListener('click', () => {
-      openModal('Nén thư mục hiện tại (.tar.gz)', `
+      openModal('Nén thư mục hiện tại (.zip)', `
         <form id="fm-comp-form">
           <div class="field"><label>Thư mục nguồn</label><input class="input mono" name="sourceDir" value="${esc(currentDir)}" required /></div>
-          <div class="field"><label>Tên file nén</label><input class="input mono" name="archiveName" value="archive.tar.gz" required /></div>
+          <div class="field"><label>Tên file nén (.zip)</label><input class="input mono" name="archiveName" value="backup.zip" required /></div>
           <div class="row" style="justify-content:flex-end"><button type="submit" class="btn btn-primary" id="fm-comp-sub">Nén ngay</button></div>
         </form>
       `, {
@@ -1605,7 +1726,7 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
                   archiveName: fd.get('archiveName'),
                 });
                 closeModal();
-                toast('Đã tạo lưu trữ thành công.');
+                toast('Đã tạo lưu trữ .zip thành công.');
                 await loadAndDraw();
               } catch (err) { toast(err.message, 'err'); }
             });
@@ -1669,39 +1790,48 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
     });
 
     container.querySelectorAll('[data-edit-file]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const node = nodes.find((x) => x.id === btn.dataset.editFile);
-        if (!node) return;
-        openModal(`Chỉnh sửa: ${node.path}`, `
-          <form id="fm-edit-form">
-            <div class="field">
-              <label>Nội dung tệp</label>
-              <textarea class="textarea" name="content" style="min-height:320px">${esc(node.content || '')}</textarea>
-            </div>
-            <div class="row" style="justify-content:flex-end">
-              <button type="submit" class="btn btn-primary" id="fm-edit-sub">Lưu thay đổi</button>
-            </div>
-          </form>
-        `, {
-          large: true,
-          onMount(body) {
-            body.querySelector('#fm-edit-form')?.addEventListener('submit', async (e) => {
-              e.preventDefault();
-              await withBusy(body.querySelector('#fm-edit-sub'), async () => {
-                const content = body.querySelector('textarea[name="content"]').value;
-                try {
-                  await api('PUT', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(node.id)}`, { content });
-                  closeModal();
-                  toast(`Đã lưu ${node.name}`);
-                  await loadAndDraw();
-                } catch (err) {
-                  toast(err.message, 'err');
-                }
+      btn.addEventListener('click', () => withBusy(btn, async () => {
+        try {
+          const node = await api(
+            'GET',
+            `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(btn.dataset.editFile)}`,
+            undefined,
+            { noCache: true },
+          );
+          if (!node) return;
+          openModal(`Chỉnh sửa: ${node.path}`, `
+            <form id="fm-edit-form">
+              <div class="field">
+                <label>Nội dung tệp</label>
+                <textarea class="textarea" name="content" style="min-height:320px">${esc(node.content || '')}</textarea>
+              </div>
+              <div class="row" style="justify-content:flex-end">
+                <button type="submit" class="btn btn-primary" id="fm-edit-sub">Lưu thay đổi</button>
+              </div>
+            </form>
+          `, {
+            large: true,
+            onMount(body) {
+              body.querySelector('#fm-edit-form')?.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                await withBusy(body.querySelector('#fm-edit-sub'), async () => {
+                  const content = body.querySelector('textarea[name="content"]').value;
+                  try {
+                    await api('PUT', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(node.id)}`, { content });
+                    closeModal();
+                    toast(`Đã lưu ${node.name}`);
+                    await loadAndDraw();
+                  } catch (err) {
+                    toast(err.message, 'err');
+                  }
+                });
               });
-            });
-          },
-        });
-      });
+            },
+          });
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      }));
     });
 
     container.querySelectorAll('[data-rename-file]').forEach((btn) => {
@@ -1744,10 +1874,13 @@ export async function renderFiles(container, renderSeq = state.renderSeq) {
 
     container.querySelectorAll('[data-del-file]').forEach((btn) => {
       btn.addEventListener('click', () => {
-        confirmAction('Xóa tệp / thư mục', `Xác nhận xóa vĩnh viễn ${btn.dataset.name}?`, () => withBusy(btn, async () => {
+        const fileId = btn.dataset.delFile;
+        const fileName = btn.dataset.name;
+        confirmAction('Xóa tệp / thư mục', `Xác nhận xóa vĩnh viễn ${fileName} trên máy chủ và đồng bộ ngay với Website?`, () => withBusy(btn, async () => {
           try {
-            await api('DELETE', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(btn.dataset.delFile)}`);
-            toast(`Đã xóa ${btn.dataset.name}`);
+            await api('DELETE', `/api/files/${encodeURIComponent(selectedAppId)}/${encodeURIComponent(fileId)}`);
+            selectedIds.delete(fileId);
+            toast(`Đã xóa vĩnh viễn ${fileName}`);
             await loadAndDraw();
           } catch (err) {
             toast(err.message, 'err');

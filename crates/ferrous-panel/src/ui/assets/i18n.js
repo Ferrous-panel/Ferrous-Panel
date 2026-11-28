@@ -102,16 +102,20 @@ const EXACT_VI_TO_EN = new Map([
 
   // File Manager
   ['Duyệt, chỉnh sửa, tải lên nhị phân, nén/giải nén an toàn trong phạm vi SafePath (/www/wwwroot).', 'Browse, edit, binary upload, and archive safely inside SafePath (/www/wwwroot).'],
+  ['Chỉnh sửa mã nguồn, đổi tên, nén/giải nén an toàn chống symlink escape, tải từ URL chống SSRF và đồng bộ tức thời với Web Server.', 'Edit source code, rename, archive safely, remote download with SSRF guard, and sync live with the Web Server.'],
   ['Thư mục mới', 'New Folder'],
   ['Tệp mới', 'New File'],
   ['Tải tệp lên', 'Upload File'],
   ['Tải từ URL', 'Remote Download'],
   ['Phân quyền hàng loạt', 'Batch Chmod'],
+  ['Dọn sạch mã nguồn', 'Wipe All Source'],
+  ['Xóa mục đã chọn', 'Delete Selected'],
   ['Tên tệp / thư mục', 'Name'],
   ['Kích thước', 'Size'],
   ['Quyền (Octal)', 'Permissions'],
   ['Cập nhật lúc', 'Modified'],
   ['Thư mục trống.', 'Directory is empty.'],
+  ['Thư mục', 'Folder'],
   ['Cần tạo ít nhất 1 website trước khi duyệt tệp trong /www/wwwroot.', 'Create at least one website first before browsing files in /www/wwwroot.'],
 
   // FPSql & Database + Myphpadmin + pgAdmin
