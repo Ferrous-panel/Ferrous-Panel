@@ -646,7 +646,7 @@ else
         if grep -q 'if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           sed -i 's/if cfg\.enable_phpmyadmin_route && is_admin_or_panel_host(host_no_port, cfg)/if cfg.enable_phpmyadmin_route/' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         fi
-        sed -i 's|norm_path == "/phpadmin" || norm_path == "/phpmyadmin"|norm_path == "/phpadmin" \|\| norm_path == "/phpmyadmin" \|\| norm_path == "/pgadmin"|; s|norm_path.starts_with("/phpadmin/") || norm_path.starts_with("/phpmyadmin/")|norm_path.starts_with("/phpadmin/") \|\| norm_path.starts_with("/phpmyadmin/") \|\| norm_path.starts_with("/pgadmin/")|' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
+        grep -q '"/pgadmin"' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs" || sed -i 's#norm_path == "/phpadmin" || norm_path == "/phpmyadmin"#norm_path == "/phpadmin" || norm_path == "/phpmyadmin" || norm_path == "/pgadmin"#; s#norm_path.starts_with("/phpadmin/") || norm_path.starts_with("/phpmyadmin/")#norm_path.starts_with("/phpadmin/") || norm_path.starts_with("/phpmyadmin/") || norm_path.starts_with("/pgadmin/")#' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
         if grep -q 'mut stream: up_stream,' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"; then
           echo -e "${CYAN}[*] Applying compatibility patch: fixing struct pattern mutability in upstream ferrousx-http/src/server.rs...${NC}"
           sed -i 's/mut stream: up_stream,/stream: mut up_stream,/g' "${FERROUSX_SRC_DIR}/crates/ferrousx-http/src/server.rs"
