@@ -2391,7 +2391,29 @@ pub const OFFICIAL_PGADMIN_VENV_DIR: &str = "/var/lib/pgadmin/venv";
 pub const OFFICIAL_PGADMIN_UNIT_NAME: &str = "ferrous-pgadmin.service";
 pub const OFFICIAL_PGADMIN_UNIT_PATH: &str = "/etc/systemd/system/ferrous-pgadmin.service";
 pub const OFFICIAL_PGADMIN_PORT: u16 = 18890;
-pub const OFFICIAL_PGADMIN_DEFAULT_VERSION: &str = "8.14";
+/// Verified prebuilt wheel release containing all 49 production Webpack bundles (`static/js/generated/*`).
+/// Note: upstream `pgadmin4==9.19` on PyPI omitted `static/js/generated/*`, causing `#pg-spinner` to hang.
+pub const OFFICIAL_PGADMIN_DEFAULT_VERSION: &str = "9.18";
+pub const OFFICIAL_PGADMIN_WHEEL_SPEC: &str = "pgadmin4==9.18";
+pub const OFFICIAL_PGADMIN_CONFIG_MARKER: &str = "FerrousPanel-PgAdmin-Config-v3";
+
+static PGADMIN_REPAIR_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+static LAST_PGADMIN_ACCOUNT_SYNC_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static LAST_PGADMIN_DB_RECONCILE_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn pgadmin_repair_lock() -> &'static tokio::sync::Mutex<()> {
+    PGADMIN_REPAIR_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn current_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2404,6 +2426,51 @@ pub struct OfficialPgAdminStatus {
     pub install_dir: String,
     pub pgadmin_url: String,
     pub custom_panel_url: String,
+}
+
+/// Verifies that `/var/lib/pgadmin/venv` contains the compiled frontend Webpack bundles
+/// (`app.bundle.js` and `vendor.main.js`) required to dismiss `#pg-spinner` (`Loading pgAdmin 4...`).
+pub fn has_valid_pgadmin_frontend_bundles() -> bool {
+    let lib_dir = Path::new(OFFICIAL_PGADMIN_VENV_DIR).join("lib");
+    let Ok(entries) = std::fs::read_dir(&lib_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("python") {
+            continue;
+        }
+        let gen_dir = entry
+            .path()
+            .join("site-packages/pgadmin4/pgadmin/static/js/generated");
+        if gen_dir.join("app.bundle.js").is_file() && gen_dir.join("vendor.main.js").is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns `true` when `/var/lib/pgadmin` has a healthy virtualenv with frontend bundles AND
+/// up-to-date `v3` `config_local.py`, `wsgi_pgadmin.py`, and `ferrous-pgadmin.service` files.
+pub fn is_pgadmin_installation_healthy() -> bool {
+    if !Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+        || !has_valid_pgadmin_frontend_bundles()
+    {
+        return false;
+    }
+    for path in [
+        "/var/lib/pgadmin/config_local.py",
+        "/var/lib/pgadmin/wsgi_pgadmin.py",
+        OFFICIAL_PGADMIN_UNIT_PATH,
+    ] {
+        let Ok(raw) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        if !raw.contains(OFFICIAL_PGADMIN_CONFIG_MARKER) {
+            return false;
+        }
+    }
+    true
 }
 
 fn detect_installed_pgadmin_version() -> String {
@@ -2428,7 +2495,8 @@ async fn is_official_pgadmin_port_open() -> bool {
 }
 
 pub async fn get_official_pgadmin_status() -> OfficialPgAdminStatus {
-    let venv_ready = Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file();
+    let venv_ready = Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+        && has_valid_pgadmin_frontend_bundles();
     let repo_cloned = Path::new(OFFICIAL_PGADMIN_REPO_DIR).join(".git").is_dir()
         || Path::new(OFFICIAL_PGADMIN_REPO_DIR).join("README.md").is_file();
     let installed = venv_ready;
@@ -2451,7 +2519,7 @@ pub async fn get_official_pgadmin_status() -> OfficialPgAdminStatus {
 }
 
 fn render_pgadmin_config_local() -> &'static str {
-    r#"# Managed by FerrousPanel — Single-User SSO Mode behind Panel Session Guard
+    r#"# FerrousPanel-PgAdmin-Config-v3 — Single-User SSO Mode behind Panel Session Guard
 SERVER_MODE = False
 MASTER_PASSWORD_REQUIRED = False
 UPGRADE_CHECK_ENABLED = False
@@ -2462,9 +2530,29 @@ LOG_FILE = '/var/lib/pgadmin/data/pgadmin4.log'
 SQLITE_PATH = '/var/lib/pgadmin/data/pgadmin4.db'
 SESSION_DB_PATH = '/var/lib/pgadmin/data/sessions'
 STORAGE_DIR = '/var/lib/pgadmin/data/storage'
+COOKIE_DEFAULT_PATH = '/pgadmin'
+SESSION_COOKIE_PATH = '/pgadmin'
 ENHANCED_COOKIE_PROTECTION = False
 WTF_CSRF_SSL_STRICT = False
+PROXY_X_FOR_COUNT = 1
+PROXY_X_PROTO_COUNT = 1
+PROXY_X_HOST_COUNT = 1
+PROXY_X_PORT_COUNT = 0
+PROXY_X_PREFIX_COUNT = 0
+COMPRESS_MIMETYPES = []
 X_FRAME_OPTIONS = 'SAMEORIGIN'
+CROSS_ORIGIN_OPENER_POLICY = 'same-origin-allow-popups'
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self' https: http: wss: ws: data: blob:;"
+    " script-src 'self' 'unsafe-inline' 'unsafe-eval' https: http: blob:;"
+    " style-src 'self' 'unsafe-inline' https: http:;"
+    " img-src 'self' data: blob: https: http:;"
+    " font-src 'self' data: https: http:;"
+    " connect-src 'self' https: http: wss: ws:;"
+    " frame-ancestors 'self';"
+    " object-src 'none';"
+    " base-uri 'self';"
+)
 "#
 }
 
@@ -2491,58 +2579,119 @@ fn render_pgadmin_servers_json() -> String {
 }
 
 fn render_pgadmin_wsgi_py() -> &'static str {
-    r#"import os
+    r#"# FerrousPanel-PgAdmin-Config-v3
+import os
 import sys
 
-sys.path.insert(0, '/var/lib/pgadmin')
+os.environ['PGADMIN_SERVER_MODE'] = 'OFF'
 os.environ['SCRIPT_NAME'] = '/pgadmin'
+sys.path.insert(0, '/var/lib/pgadmin')
 
 from pgadmin4.pgAdmin4 import app as _pgadmin_app
 
 def application(environ, start_response):
     environ['SCRIPT_NAME'] = '/pgadmin'
-    path_info = environ.get('PATH_INFO', '/') or '/'
+    path_info = environ.get('PATH_INFO', '') or '/'
     if path_info == '/pgadmin':
         environ['PATH_INFO'] = '/'
     elif path_info.startswith('/pgadmin/'):
         stripped = path_info[len('/pgadmin'):]
         environ['PATH_INFO'] = stripped if stripped else '/'
+    elif not path_info.startswith('/'):
+        environ['PATH_INFO'] = '/' + path_info
     return _pgadmin_app(environ, start_response)
 "#
 }
 
 fn render_pgadmin_bootstrap_py() -> &'static str {
-    r#"import os
+    r#"# FerrousPanel-PgAdmin-Config-v3
+import importlib.util
+import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 
+os.environ['PGADMIN_SERVER_MODE'] = 'OFF'
+os.environ['SCRIPT_NAME'] = '/pgadmin'
 sys.path.insert(0, '/var/lib/pgadmin')
-import pgadmin4
 
-pkg_dir = os.path.dirname(os.path.abspath(pgadmin4.__file__))
+spec = importlib.util.find_spec('pgadmin4.pgAdmin4')
+if spec is None or not spec.origin:
+    raise RuntimeError('pgadmin4.pgAdmin4 module not found in /var/lib/pgadmin/venv')
+pkg_dir = os.path.dirname(os.path.abspath(spec.origin))
+
 src_cfg = '/var/lib/pgadmin/config_local.py'
 dst_cfg = os.path.join(pkg_dir, 'config_local.py')
 if os.path.isfile(src_cfg):
     shutil.copyfile(src_cfg, dst_cfg)
 
-ver = getattr(pgadmin4, '__version__', '') or getattr(pgadmin4, 'APP_VERSION', '')
+sqlite_db = '/var/lib/pgadmin/data/pgadmin4.db'
+sessions_dir = '/var/lib/pgadmin/data/sessions'
+if os.path.isfile(sqlite_db):
+    try:
+        if pkg_dir not in sys.path:
+            sys.path.insert(0, pkg_dir)
+        from pgadmin.model import SCHEMA_VERSION
+        conn = sqlite3.connect(sqlite_db)
+        cur = conn.execute("SELECT value FROM version WHERE name = 'ConfigDB'")
+        row = cur.fetchone()
+        conn.close()
+        if row and int(row[0]) > int(SCHEMA_VERSION):
+            os.remove(sqlite_db)
+            shutil.rmtree(sessions_dir, ignore_errors=True)
+            os.makedirs(sessions_dir, exist_ok=True)
+    except Exception:
+        try:
+            os.remove(sqlite_db)
+        except OSError:
+            pass
+        shutil.rmtree(sessions_dir, ignore_errors=True)
+        os.makedirs(sessions_dir, exist_ok=True)
+
+import pgadmin4.pgAdmin4 as _pga_entry  # noqa: F401 — initializes SQLite schema when missing
+
+ver = ''
+try:
+    from version import APP_VERSION
+    ver = str(APP_VERSION).strip()
+except Exception:
+    pass
 if not ver:
     try:
         from importlib.metadata import version as meta_ver
         ver = meta_ver('pgadmin4')
     except Exception:
-        ver = '8.14'
+        ver = '9.18'
 with open('/var/lib/pgadmin/version.txt', 'w', encoding='utf-8') as vf:
     vf.write(str(ver).strip() + '\n')
 
+has_local_server = False
+if os.path.isfile(sqlite_db):
+    try:
+        conn = sqlite3.connect(sqlite_db)
+        cur = conn.execute("SELECT COUNT(*) FROM server WHERE host = '127.0.0.1' AND port = 5432")
+        row = cur.fetchone()
+        if row and int(row[0]) > 0:
+            has_local_server = True
+            conn.execute(
+                "UPDATE server SET username = ?, passfile = ? WHERE host = '127.0.0.1' AND port = 5432",
+                ('fp_pgadmin', '/var/lib/pgadmin/pgpass'),
+            )
+            conn.commit()
+        conn.close()
+    except Exception:
+        has_local_server = False
+
 setup_py = os.path.join(pkg_dir, 'setup.py')
 servers_json = '/var/lib/pgadmin/servers.json'
-if os.path.isfile(setup_py) and os.path.isfile(servers_json):
+if not has_local_server and os.path.isfile(setup_py) and os.path.isfile(servers_json):
     env = os.environ.copy()
+    env['PGADMIN_SERVER_MODE'] = 'OFF'
+    env['SCRIPT_NAME'] = '/pgadmin'
     env['PYTHONPATH'] = '/var/lib/pgadmin'
     subprocess.run(
-        [sys.executable, setup_py, 'load-servers', servers_json, '--replace'],
+        [sys.executable, setup_py, 'load-servers', servers_json],
         env=env,
         check=False,
         stdout=subprocess.DEVNULL,
@@ -2553,7 +2702,8 @@ if os.path.isfile(setup_py) and os.path.isfile(servers_json):
 
 fn render_pgadmin_systemd_unit() -> String {
     format!(
-        "[Unit]\n\
+        "# {OFFICIAL_PGADMIN_CONFIG_MARKER}\n\
+[Unit]\n\
 Description=FerrousPanel pgAdmin 4 Worker (127.0.0.1:{OFFICIAL_PGADMIN_PORT})\n\
 After=network.target postgresql.service\n\
 \n\
@@ -2564,9 +2714,10 @@ Group=www-data\n\
 WorkingDirectory={OFFICIAL_PGADMIN_STATE_DIR}\n\
 Environment=HOME={OFFICIAL_PGADMIN_STATE_DIR}\n\
 Environment=PYTHONPATH={OFFICIAL_PGADMIN_STATE_DIR}\n\
+Environment=PGADMIN_SERVER_MODE=OFF\n\
 Environment=SCRIPT_NAME=/pgadmin\n\
 Environment=PGPASSFILE={pgpass}\n\
-ExecStart=/var/lib/pgadmin/venv/bin/gunicorn --bind 127.0.0.1:{OFFICIAL_PGADMIN_PORT} --workers 1 --threads 8 --timeout 180 --chdir {OFFICIAL_PGADMIN_STATE_DIR} wsgi_pgadmin:application\n\
+ExecStart=/var/lib/pgadmin/venv/bin/gunicorn --bind 127.0.0.1:{OFFICIAL_PGADMIN_PORT} --workers 1 --threads 16 --timeout 180 --chdir {OFFICIAL_PGADMIN_STATE_DIR} wsgi_pgadmin:application\n\
 Restart=always\n\
 RestartSec=3\n\
 NoNewPrivileges=true\n\
@@ -2579,13 +2730,15 @@ WantedBy=multi-user.target\n",
 }
 
 /// Clones `https://github.com/pgadmin-org/pgadmin4.git` into `/www/server/pgadmin`, installs the
-/// precompiled `pgadmin4` runtime into `/var/lib/pgadmin/venv`, auto-registers the local PostgreSQL
-/// cluster (`FPSql & Database — PostgreSQL 17`), and starts `ferrous-pgadmin.service` on `127.0.0.1:18890`.
+/// verified `pgadmin4==9.18` runtime (with complete precompiled frontend bundles) into `/var/lib/pgadmin/venv`,
+/// auto-registers the local PostgreSQL cluster (`FPSql & Database — PostgreSQL 17`), and starts
+/// `ferrous-pgadmin.service` on `127.0.0.1:18890`.
 pub async fn install_or_repair_official_pgadmin(
     executor: &dyn CommandExecutor,
 ) -> Result<OfficialPgAdminStatus, PanelError> {
+    let _repair_guard = pgadmin_repair_lock().lock().await;
     let apt_timeout = Duration::from_secs(300);
-    let pip_timeout = Duration::from_secs(480);
+    let pip_timeout = Duration::from_secs(600);
     let noninteractive_env = [("DEBIAN_FRONTEND", "noninteractive")];
 
     if executor.is_binary_available(AllowedBinary::AptGet) {
@@ -2668,7 +2821,7 @@ pub async fn install_or_repair_official_pgadmin(
             .await;
     }
 
-    // 2. Create isolated virtualenv /var/lib/pgadmin/venv and install prebuilt pgadmin4 + gunicorn wheels.
+    // 2. Create isolated virtualenv /var/lib/pgadmin/venv and install verified pgadmin4==9.18 + gunicorn wheels.
     std::fs::create_dir_all("/var/lib/pgadmin/data/sessions")?;
     std::fs::create_dir_all("/var/lib/pgadmin/data/storage")?;
     set_dir_mode(OFFICIAL_PGADMIN_STATE_DIR, 0o755);
@@ -2690,9 +2843,11 @@ pub async fn install_or_repair_official_pgadmin(
         }
     }
 
-    if !Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
-        || !Path::new("/var/lib/pgadmin/version.txt").is_file()
-    {
+    let need_pip_install = !Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+        || !has_valid_pgadmin_frontend_bundles()
+        || detect_installed_pgadmin_version() != OFFICIAL_PGADMIN_DEFAULT_VERSION;
+
+    if need_pip_install {
         let pip_out = executor
             .run(
                 AllowedBinary::PgAdminPython,
@@ -2705,7 +2860,7 @@ pub async fn install_or_repair_official_pgadmin(
                     "pip",
                     "wheel",
                     "gunicorn",
-                    "pgadmin4",
+                    OFFICIAL_PGADMIN_WHEEL_SPEC,
                 ],
                 pip_timeout,
             )
@@ -2721,6 +2876,11 @@ pub async fn install_or_repair_official_pgadmin(
 
     // 3. Provision PostgreSQL SSO account + pgpass + pgAdmin config_local.py + servers.json.
     let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(executor).await;
+    LAST_PGADMIN_ACCOUNT_SYNC_SECS.store(
+        current_epoch_secs(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
     atomic_write_file(
         &Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("config_local.py"),
         render_pgadmin_config_local().as_bytes(),
@@ -2739,13 +2899,20 @@ pub async fn install_or_repair_official_pgadmin(
     let bootstrap_path = Path::new(OFFICIAL_PGADMIN_STATE_DIR).join("bootstrap_pgadmin.py");
     atomic_write_file(&bootstrap_path, render_pgadmin_bootstrap_py().as_bytes(), 0o644)?;
 
-    let _ = executor
+    let boot_out = executor
         .run(
             AllowedBinary::PgAdminPython,
             &["/var/lib/pgadmin/bootstrap_pgadmin.py"],
-            Duration::from_secs(60),
+            Duration::from_secs(90),
         )
-        .await;
+        .await?;
+    if !boot_out.success {
+        tracing::warn!(
+            exit_code = ?boot_out.exit_code,
+            stderr = %boot_out.stderr.trim(),
+            "pgadmin bootstrap script reported non-zero exit"
+        );
+    }
 
     if executor.is_binary_available(AllowedBinary::Chown) {
         let _ = executor
@@ -2795,7 +2962,7 @@ pub async fn install_or_repair_official_pgadmin(
         }
     }
 
-    for _ in 0..40 {
+    for _ in 0..48 {
         if is_official_pgadmin_port_open().await {
             break;
         }
@@ -2980,6 +3147,11 @@ fn render_official_pgadmin_launcher_html(version: &str, require_login_only: bool
 }
 
 fn verify_panel_session_for_pgadmin(req: &HttpRequest, state: &AppState) -> (bool, Option<String>) {
+    // Check explicit `?fp_sso=` / header / main cookie first so fresh tokens override stale cookies.
+    let (pma_ok, pma_tok) = verify_panel_session_for_pma(req, state);
+    if pma_ok {
+        return (true, pma_tok);
+    }
     if let Some(c) = req.cookie("fp_pgadmin_sso") {
         let tok = c.value().trim().to_string();
         if !tok.is_empty()
@@ -2993,80 +3165,21 @@ fn verify_panel_session_for_pgadmin(req: &HttpRequest, state: &AppState) -> (boo
             return (true, Some(tok));
         }
     }
-    verify_panel_session_for_pma(req, state)
+    (false, None)
 }
 
-/// Reverse-proxies `/pgadmin/*` to the local `ferrous-pgadmin.service` worker (`127.0.0.1:18890`),
-/// enforcing FerrousPanel session SSO and keeping PostgreSQL databases synchronized 2-way with `FPSql & Database`.
-pub async fn serve_official_pgadmin(
-    req: HttpRequest,
-    body: web::Bytes,
-    state: web::Data<AppState>,
+/// Forwards an authenticated `/pgadmin/*` request to an open Gunicorn TCP stream (`127.0.0.1:18890`
+/// in production, or an ephemeral test listener in integration tests) and normalizes cookies,
+/// `Location`, `X-Frame-Options`, `Content-Security-Policy`, and the `FPSql & Database` switcher badge.
+pub async fn forward_pgadmin_http_stream(
+    mut stream: TcpStream,
+    upstream_port: u16,
+    req: &HttpRequest,
+    body: &[u8],
+    verified_token: Option<&str>,
 ) -> HttpResponse {
-    let mut stream_opt = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT))
-        .await
-        .ok();
-
-    if stream_opt.is_none()
-        && state.config.is_production()
-        && Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
-        && state
-            .webserver
-            .executor()
-            .is_binary_available(AllowedBinary::Systemctl)
-    {
-        let _ = state
-            .webserver
-            .executor()
-            .run(
-                AllowedBinary::Systemctl,
-                &["restart", OFFICIAL_PGADMIN_UNIT_NAME],
-                Duration::from_secs(12),
-            )
-            .await;
-        for _ in 0..16 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            if let Ok(s) = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT)).await {
-                stream_opt = Some(s);
-                break;
-            }
-        }
-    }
-
-    let ver = detect_installed_pgadmin_version();
-    let Some(mut stream) = stream_opt else {
-        return HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .insert_header(("Cache-Control", "no-store"))
-            .body(render_official_pgadmin_launcher_html(&ver, false));
-    };
-
-    let (sso_authorized, verified_token) = verify_panel_session_for_pgadmin(&req, &state);
-    if !sso_authorized {
-        return HttpResponse::Ok()
-            .content_type("text/html; charset=utf-8")
-            .insert_header(("Cache-Control", "no-store"))
-            .body(render_official_pgadmin_launcher_html(&ver, true));
-    }
-
     let method = req.method().as_str();
     let path = req.uri().path();
-    if state.config.is_production()
-        && (path == "/pgadmin/"
-            || path == "/pgadmin/browser/"
-            || (method != "GET" && method != "HEAD"))
-    {
-        let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(
-            state.webserver.executor().as_ref(),
-        )
-        .await;
-        crate::modules::databases::reconcile_live_postgres_databases_into_store(
-            &state.modules,
-            state.webserver.executor().as_ref(),
-        )
-        .await;
-    }
-
     let cleaned_query = req
         .uri()
         .query()
@@ -3128,7 +3241,7 @@ pub async fn serve_official_pgadmin(
         }
     }
     raw_req.extend_from_slice(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes());
-    raw_req.extend_from_slice(&body);
+    raw_req.extend_from_slice(body);
 
     if tokio::time::timeout(Duration::from_secs(60), stream.write_all(&raw_req))
         .await
@@ -3141,7 +3254,7 @@ pub async fn serve_official_pgadmin(
             .body("Failed to forward request to pgAdmin worker");
     }
 
-    let mut resp_bytes = Vec::with_capacity(16 * 1024);
+    let mut resp_bytes = Vec::with_capacity(32 * 1024);
     if tokio::time::timeout(Duration::from_secs(120), stream.read_to_end(&mut resp_bytes))
         .await
         .map_err(|_| ())
@@ -3151,14 +3264,6 @@ pub async fn serve_official_pgadmin(
         return HttpResponse::GatewayTimeout()
             .content_type("text/plain; charset=utf-8")
             .body("pgAdmin worker timed out");
-    }
-
-    if state.config.is_production() && method != "GET" && method != "HEAD" {
-        crate::modules::databases::reconcile_live_postgres_databases_into_store(
-            &state.modules,
-            state.webserver.executor().as_ref(),
-        )
-        .await;
     }
 
     let Some(hdr_end) = resp_bytes.windows(4).position(|w| w == b"\r\n\r\n") else {
@@ -3180,17 +3285,38 @@ pub async fn serve_official_pgadmin(
 
     let mut builder = HttpResponse::build(status_code);
     if let Some(tok) = verified_token {
-        if !tok.contains(';') && req.cookie("fp_pgadmin_sso").is_none() {
-            builder.append_header((
-                "Set-Cookie",
-                format!("fp_pgadmin_sso={tok}; Path=/pgadmin; HttpOnly; SameSite=Lax; Max-Age=86400"),
-            ));
+        if !tok.contains(';') {
+            if req
+                .cookie(crate::auth::middleware::SESSION_COOKIE_NAME)
+                .map(|c| c.value().to_string())
+                .as_deref()
+                != Some(tok)
+            {
+                builder.append_header((
+                    "Set-Cookie",
+                    format!(
+                        "{}={tok}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400",
+                        crate::auth::middleware::SESSION_COOKIE_NAME
+                    ),
+                ));
+            }
+            if req
+                .cookie("fp_pgadmin_sso")
+                .map(|c| c.value().to_string())
+                .as_deref()
+                != Some(tok)
+            {
+                builder.append_header((
+                    "Set-Cookie",
+                    format!("fp_pgadmin_sso={tok}; Path=/pgadmin; HttpOnly; SameSite=Lax; Max-Age=86400"),
+                ));
+            }
         }
     }
 
     let mut is_chunked = false;
     let mut is_html = false;
-    let internal_origin = format!("http://127.0.0.1:{OFFICIAL_PGADMIN_PORT}");
+    let internal_origin = format!("http://127.0.0.1:{upstream_port}");
 
     for line in lines {
         let Some((k, v)) = line.split_once(':') else {
@@ -3214,7 +3340,10 @@ pub async fn serve_official_pgadmin(
             continue;
         }
         if lower == "content-security-policy" {
-            let rewritten = val_trim.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+            let mut rewritten = val_trim.replace("frame-ancestors 'none'", "frame-ancestors 'self'");
+            if !rewritten.contains("frame-ancestors") {
+                rewritten.push_str(" frame-ancestors 'self';");
+            }
             builder.append_header((key_trim.to_string(), rewritten));
             continue;
         }
@@ -3229,6 +3358,8 @@ pub async fn serve_official_pgadmin(
                     .find("/pgadmin")
                     .map(|idx| &stripped[idx..])
                     .unwrap_or(stripped)
+            } else if stripped.starts_with('/') && !stripped.starts_with("/pgadmin") {
+                return_prefixed_pgadmin_location(stripped)
             } else {
                 stripped
             };
@@ -3259,3 +3390,148 @@ pub async fn serve_official_pgadmin(
 
     builder.body(decoded_body)
 }
+
+fn return_prefixed_pgadmin_location(stripped: &str) -> &str {
+    // Static / root-relative paths emitted without SCRIPT_NAME (defensive fallback)
+    if stripped == "/browser/" || stripped == "/login" {
+        if stripped == "/browser/" {
+            "/pgadmin/browser/"
+        } else {
+            "/pgadmin/login"
+        }
+    } else {
+        stripped
+    }
+}
+
+/// Reverse-proxies `/pgadmin/*` to the local `ferrous-pgadmin.service` worker (`127.0.0.1:18890`),
+/// enforcing FerrousPanel session SSO, automatically repairing broken/outdated `pgadmin4` venvs,
+/// and keeping PostgreSQL databases synchronized 2-way with `FPSql & Database` without blocking assets.
+pub async fn serve_official_pgadmin(
+    req: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    // Auto-heal existing installations (e.g. upgrading from broken PyPI pgadmin4 9.19 missing
+    // static/js/generated/* bundles or older v1/v2 config_local.py) automatically!
+    if state.config.is_production()
+        && Path::new("/var/lib/pgadmin/venv/bin/python3").is_file()
+        && !is_pgadmin_installation_healthy()
+    {
+        let _ = install_or_repair_official_pgadmin(state.webserver.executor().as_ref()).await;
+    }
+
+    let mut stream_opt = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT))
+        .await
+        .ok();
+
+    if stream_opt.is_none()
+        && state.config.is_production()
+        && Path::new("/var/lib/pgadmin/venv/bin/gunicorn").is_file()
+    {
+        if !is_pgadmin_installation_healthy() {
+            let _ = install_or_repair_official_pgadmin(state.webserver.executor().as_ref()).await;
+        } else if state
+            .webserver
+            .executor()
+            .is_binary_available(AllowedBinary::Systemctl)
+        {
+            let _ = state
+                .webserver
+                .executor()
+                .run(
+                    AllowedBinary::Systemctl,
+                    &["restart", OFFICIAL_PGADMIN_UNIT_NAME],
+                    Duration::from_secs(15),
+                )
+                .await;
+        }
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if let Ok(s) = TcpStream::connect(("127.0.0.1", OFFICIAL_PGADMIN_PORT)).await {
+                stream_opt = Some(s);
+                break;
+            }
+        }
+    }
+
+    let ver = detect_installed_pgadmin_version();
+    let Some(stream) = stream_opt else {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(render_official_pgadmin_launcher_html(&ver, false));
+    };
+
+    let (sso_authorized, verified_token) = verify_panel_session_for_pgadmin(&req, &state);
+    if !sso_authorized {
+        return HttpResponse::Ok()
+            .content_type("text/html; charset=utf-8")
+            .insert_header(("Cache-Control", "no-store"))
+            .body(render_official_pgadmin_launcher_html(&ver, true));
+    }
+
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    if state.config.is_production() && (path == "/pgadmin/" || path == "/pgadmin/browser/") {
+        let now = current_epoch_secs();
+        let prev_acct =
+            LAST_PGADMIN_ACCOUNT_SYNC_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(prev_acct) >= 60 {
+            LAST_PGADMIN_ACCOUNT_SYNC_SECS
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            let _ = crate::modules::databases::ensure_pgadmin_sso_postgres_account(
+                state.webserver.executor().as_ref(),
+            )
+            .await;
+        }
+        let prev_rec =
+            LAST_PGADMIN_DB_RECONCILE_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(prev_rec) >= 15 {
+            LAST_PGADMIN_DB_RECONCILE_SECS
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            let bg_state = state.clone();
+            actix_web::rt::spawn(async move {
+                crate::modules::databases::reconcile_live_postgres_databases_into_store(
+                    &bg_state.modules,
+                    bg_state.webserver.executor().as_ref(),
+                )
+                .await;
+            });
+        }
+    }
+
+    let resp = forward_pgadmin_http_stream(
+        stream,
+        OFFICIAL_PGADMIN_PORT,
+        &req,
+        &body,
+        verified_token.as_deref(),
+    )
+    .await;
+
+    if state.config.is_production()
+        && method != "GET"
+        && method != "HEAD"
+        && !path.contains("/heart_beat")
+    {
+        let now = current_epoch_secs();
+        let prev_rec =
+            LAST_PGADMIN_DB_RECONCILE_SECS.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(prev_rec) >= 8 {
+            LAST_PGADMIN_DB_RECONCILE_SECS
+                .store(now, std::sync::atomic::Ordering::Relaxed);
+            let bg_state = state.clone();
+            actix_web::rt::spawn(async move {
+                crate::modules::databases::reconcile_live_postgres_databases_into_store(
+                    &bg_state.modules,
+                    bg_state.webserver.executor().as_ref(),
+                )
+                .await;
+            });
+        }
+    }
+
+    resp
+}
+

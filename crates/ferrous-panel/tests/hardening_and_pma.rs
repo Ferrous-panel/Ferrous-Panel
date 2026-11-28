@@ -860,6 +860,95 @@ fn dual_mode_custom_phpadmin_and_official_phpmyadmin_routes() -> Result<()> {
             "expected pgAdmin displayName to start with 'pgAdmin'",
         )?;
 
+        // 6. Verify forward_pgadmin_http_stream strips fp_sso, preserves multiple Set-Cookie headers,
+        //    normalizes CSP frame-ancestors, and decodes chunked HTML with switcher badge.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let mock_port = listener.local_addr()?.port();
+        let server_task = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = listener.accept().await?;
+            let mut buf = vec![0u8; 4096];
+            let n = sock.read(&mut buf).await?;
+            let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+            let html = "<!doctype html><html><body><div id=\"root\">pgAdmin 4 v9.18 Ready</div></body></html>";
+            let chunk = format!("{:x}\r\n{html}\r\n0\r\n\r\n", html.len());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Transfer-Encoding: chunked\r\n\
+                 X-Frame-Options: DENY\r\n\
+                 Content-Security-Policy: default-src 'self'; frame-ancestors 'none';\r\n\
+                 Set-Cookie: pga4_session=test-session-918; Path=/pgadmin; HttpOnly\r\n\
+                 \r\n\
+                 {chunk}"
+            );
+            sock.write_all(resp.as_bytes()).await?;
+            sock.shutdown().await?;
+            Ok::<String, std::io::Error>(req_str)
+        });
+
+        let client_stream = tokio::net::TcpStream::connect(("127.0.0.1", mock_port)).await?;
+        let synth_req = TestRequest::get()
+            .uri(&format!("/pgadmin/browser/?fp_sso={token}&ver=91800"))
+            .insert_header(("Host", "panel.example.com:8443"))
+            .insert_header(("X-Forwarded-Proto", "https"))
+            .to_http_request();
+        let proxied_resp = ferrous_panel::pma_web::forward_pgadmin_http_stream(
+            client_stream,
+            mock_port,
+            &synth_req,
+            &[],
+            Some(token),
+        )
+        .await;
+        ensure_eq(&proxied_resp.status(), &StatusCode::OK, "proxied pgAdmin HTTP 200")?;
+
+        let raw_forwarded = server_task.await??;
+        ensure(
+            raw_forwarded.starts_with("GET /pgadmin/browser/?ver=91800 HTTP/1.1\r\n"),
+            "expected fp_sso to be stripped from forwarded pgAdmin query string",
+        )?;
+        ensure(
+            raw_forwarded.contains("X-Script-Name: /pgadmin\r\n")
+                && raw_forwarded.contains("X-Forwarded-Proto: https\r\n"),
+            "expected X-Script-Name and X-Forwarded-Proto headers forwarded to Gunicorn",
+        )?;
+
+        let csp_hdr = proxied_resp
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ensure(
+            csp_hdr.contains("frame-ancestors 'self'"),
+            "expected CSP frame-ancestors rewritten to 'self' for iframe embedding",
+        )?;
+        let xfo_hdr = proxied_resp
+            .headers()
+            .get("X-Frame-Options")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        ensure_eq(&xfo_hdr, &"SAMEORIGIN", "proxied X-Frame-Options")?;
+
+        let cookies: Vec<String> = proxied_resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .filter_map(|v| v.to_str().ok().map(str::to_string))
+            .collect();
+        ensure(
+            cookies.iter().any(|c| c.starts_with("pga4_session=test-session-918"))
+                && cookies.iter().any(|c| c.starts_with("fp_pgadmin_sso=")),
+            "expected both upstream pga4_session and fp_pgadmin_sso Set-Cookie headers",
+        )?;
+
+        let proxied_html =
+            String::from_utf8_lossy(&read_body_bytes(proxied_resp.into_body()).await?).to_string();
+        ensure(
+            proxied_html.contains("pgAdmin 4 v9.18 Ready")
+                && proxied_html.contains("FPSql &amp; Database (/phpadmin/)"),
+            "expected decoded chunked HTML and /phpadmin/ quick-switch badge",
+        )?;
+
         Ok(())
     })
 }

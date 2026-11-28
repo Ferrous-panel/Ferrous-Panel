@@ -2072,7 +2072,7 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
               <a class="btn btn-sm btn-primary" href="${esc(panelDbUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
             </div>
           </div>
-          <iframe id="fp-sql-iframe" src="${esc(panelDbUrl)}" title="FPSql & Database Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(panelDbUrl)}" allow="clipboard-read; clipboard-write" title="FPSql & Database Studio" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : activeDbTab === 'official' ? `
         <section class="surface" style="padding:12px">
@@ -2091,23 +2091,23 @@ export async function renderDatabases(container, renderSeq = state.renderSeq) {
               <a class="btn btn-sm btn-primary" href="${esc(officialPmaUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
             </div>
           </div>
-          <iframe id="fp-sql-iframe" src="${esc(officialPmaUrl)}" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(officialPmaUrl)}" allow="clipboard-read; clipboard-write" title="${esc(pmaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : activeDbTab === 'pgadmin' ? `
         <section class="surface" style="padding:12px">
           <div class="surface-head" style="margin-bottom:10px">
             <div class="row">
               <strong>${esc(pgaLabel)} (PostgreSQL Studio · /pgadmin/)</strong>
-              <span class="${pgaRunning ? 'st-ok' : 'st-warn'} mono">${esc(pgaRunning ? t('Đang chạy (/pgadmin/)', 'Running (/pgadmin/)') : (pgaInstalled ? t('Đã cài · Chưa chạy', 'Installed · Stopped') : t('Chưa clone', 'Not Cloned')))}</span>
+              <span class="${pgaRunning ? 'st-ok' : 'st-warn'} mono">${esc(pgaRunning ? t('Đang chạy (/pgadmin/)', 'Running (/pgadmin/)') : (pgaInstalled ? t('Đã cài · Chưa chạy', 'Installed · Stopped') : t('Chưa clone / Cần đồng bộ', 'Not Cloned / Needs Sync')))}</span>
               <span class="meta-line mono">PostgreSQL DBs: ${pgDbs.length}</span>
             </div>
             <div class="row">
-              <button type="button" class="btn btn-sm ${pgaRunning ? '' : 'btn-primary'}" id="db-reinstall-official-pga">${esc(pgaRunning ? t('Làm mới & Đồng bộ pgAdmin', 'Refresh & Sync pgAdmin') : t('Clone & Kích hoạt pgAdmin 4 (1-Click)', 'Clone & Enable pgAdmin 4 (1-Click)'))}</button>
+              <button type="button" class="btn btn-sm ${pgaRunning ? '' : 'btn-primary'}" id="db-reinstall-official-pga">${esc(pgaRunning ? t('Làm mới & Đồng bộ pgAdmin', 'Refresh & Sync pgAdmin') : (pgaInstalled ? t('Sửa lỗi & Khởi động pgAdmin 4', 'Repair & Start pgAdmin 4') : t('Clone & Kích hoạt pgAdmin 4 (1-Click)', 'Clone & Enable pgAdmin 4 (1-Click)')))}</button>
               <button type="button" class="btn btn-sm" id="switch-to-panel-tab">⇄ FPSql &amp; Database</button>
               <a class="btn btn-sm btn-primary" href="${esc(officialPgaUrl)}" target="_blank" rel="noopener">${esc(t('Mở toàn màn hình', 'Open Fullscreen'))}</a>
             </div>
           </div>
-          <iframe id="fp-sql-iframe" src="${esc(officialPgaUrl)}" title="${esc(pgaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
+          <iframe id="fp-sql-iframe" src="${esc(officialPgaUrl)}" allow="clipboard-read; clipboard-write" title="${esc(pgaLabel)}" style="width:100%;height:680px;border:1px solid var(--border);border-radius:10px;background:#090d16"></iframe>
         </section>
       ` : `
         <section class="surface">

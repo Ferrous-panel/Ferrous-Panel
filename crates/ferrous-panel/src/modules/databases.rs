@@ -1067,11 +1067,35 @@ pub async fn ensure_pgadmin_sso_postgres_account(
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
         }
     }
-    let _ = atomic_write_file(key_path, sso_pw.as_bytes(), 0o600);
+    if std::fs::read_to_string(key_path).ok().as_deref().map(str::trim) != Some(sso_pw.as_str()) {
+        let _ = atomic_write_file(key_path, sso_pw.as_bytes(), 0o600);
+    }
+    let pgpass_path = Path::new(PGADMIN_PGPASS_FILE);
     let pgpass_content = format!(
         "127.0.0.1:5432:*:{PGADMIN_SSO_USER}:{sso_pw}\nlocalhost:5432:*:{PGADMIN_SSO_USER}:{sso_pw}\n"
     );
-    let _ = atomic_write_file(Path::new(PGADMIN_PGPASS_FILE), pgpass_content.as_bytes(), 0o600);
+    if std::fs::read_to_string(pgpass_path).ok().as_deref() != Some(pgpass_content.as_str()) {
+        let _ = atomic_write_file(pgpass_path, pgpass_content.as_bytes(), 0o600);
+    }
+    if executor.is_binary_available(AllowedBinary::Chown) {
+        let _ = executor
+            .run(
+                AllowedBinary::Chown,
+                &[
+                    "www-data:www-data",
+                    PGADMIN_SSO_PASS_FILE,
+                    PGADMIN_PGPASS_FILE,
+                ],
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(pgpass_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     let Ok(qpw) = escape_postgres_literal(&sso_pw) else {
         return None;

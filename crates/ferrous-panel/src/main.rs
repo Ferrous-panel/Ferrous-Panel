@@ -119,6 +119,32 @@ async fn run_server(mut config: Config) -> anyhow::Result<()> {
         }
     });
 
+    if shared_state.config.is_production()
+        && Path::new("/var/lib/pgadmin/venv/bin/python3").is_file()
+        && !ferrous_panel::pma_web::is_pgadmin_installation_healthy()
+    {
+        let pga_state = shared_state.clone();
+        actix_web::rt::spawn(async move {
+            tracing::info!("auto-repairing existing pgAdmin 4 installation in /var/lib/pgadmin");
+            match ferrous_panel::pma_web::install_or_repair_official_pgadmin(
+                pga_state.webserver.executor().as_ref(),
+            )
+            .await
+            {
+                Ok(st) => {
+                    tracing::info!(
+                        version = %st.version,
+                        running = st.running,
+                        "pgAdmin 4 installation auto-repaired and ready at /pgadmin/"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "background pgAdmin 4 auto-repair did not complete");
+                }
+            }
+        });
+    }
+
     let pma_listener = if pma_port > 0 && pma_port != bind_port && !is_reserved_website_port(pma_port) {
         match std::net::TcpListener::bind(("127.0.0.1", pma_port)) {
             Ok(listener) => {
